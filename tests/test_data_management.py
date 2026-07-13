@@ -53,7 +53,6 @@ def test_project_writer_creates_portable_json_snapshots(tmp_path: Path) -> None:
         7,
         "Kőzet A",
         created_at=datetime(2025, 3, 4, tzinfo=UTC),
-        operator="Kezelő",
         notes="Megjegyzés",
         configuration={"interval": 5},
         calibration_snapshot={"inlet": [1.0, 5.0, 0.0, 400.0]},

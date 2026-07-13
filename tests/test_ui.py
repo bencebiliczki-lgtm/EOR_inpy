@@ -43,7 +43,6 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     with ProjectRepository(project_path) as repository:
         project = repository.create_project(
             name="UI project",
-            operator="Operator",
             configuration={},
             calibration_snapshot={},
         )

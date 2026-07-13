@@ -27,7 +27,6 @@ class MeasurementProject:
     id: int
     name: str
     created_at: datetime
-    operator: str
     notes: str
     configuration: dict[str, object]
     calibration_snapshot: dict[str, object]
@@ -103,7 +102,6 @@ class ProjectRepository:
         self,
         *,
         name: str,
-        operator: str,
         notes: str = "",
         configuration: Mapping[str, object],
         calibration_snapshot: Mapping[str, object],
@@ -124,7 +122,7 @@ class ProjectRepository:
                 (
                     cleaned_name,
                     timestamp.isoformat(),
-                    operator.strip(),
+                    "",
                     notes,
                     configuration_json,
                     calibration_json,
@@ -327,7 +325,6 @@ class ProjectRepository:
             id=cast(int, row["id"]),
             name=cast(str, row["name"]),
             created_at=datetime.fromisoformat(cast(str, row["created_at_utc"])),
-            operator=cast(str, row["operator"]),
             notes=cast(str, row["notes"]),
             configuration=cast(dict[str, object], configuration),
             calibration_snapshot=cast(dict[str, object], calibration),

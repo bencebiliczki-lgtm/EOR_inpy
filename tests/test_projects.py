@@ -10,7 +10,6 @@ from eor_control.projects import ProjectRepository
 def create_project(repository: ProjectRepository) -> int:
     project = repository.create_project(
         name=" EOR-001 ",
-        operator=" Operator ",
         notes="Initial run",
         configuration={"interval_seconds": 5, "mode": "simulation"},
         calibration_snapshot={"line": {"voltage_min": 1.0, "voltage_max": 5.0}},
@@ -26,7 +25,6 @@ def test_project_round_trip_preserves_snapshots_and_utc_time(tmp_path: Path) -> 
         project = repository.get_project(project_id)
 
     assert project.name == "EOR-001"
-    assert project.operator == "Operator"
     assert project.created_at == datetime(2026, 7, 13, 10, 0, tzinfo=UTC)
     assert project.configuration == {"interval_seconds": 5, "mode": "simulation"}
     assert project.calibration_snapshot["line"] == {
@@ -99,7 +97,6 @@ def test_empty_project_and_stage_names_are_rejected(tmp_path: Path, name: str) -
         with pytest.raises(ValueError, match="project name"):
             repository.create_project(
                 name=name,
-                operator="Operator",
                 configuration={},
                 calibration_snapshot={},
             )
@@ -113,7 +110,6 @@ def test_naive_timestamp_and_non_finite_snapshot_are_rejected(tmp_path: Path) ->
         with pytest.raises(ValueError, match="timezone"):
             repository.create_project(
                 name="Project",
-                operator="Operator",
                 configuration={},
                 calibration_snapshot={},
                 created_at=datetime(2026, 7, 13),
@@ -121,7 +117,6 @@ def test_naive_timestamp_and_non_finite_snapshot_are_rejected(tmp_path: Path) ->
         with pytest.raises(ValueError, match="finite JSON-compatible"):
             repository.create_project(
                 name="Project",
-                operator="Operator",
                 configuration={"invalid": float("nan")},
                 calibration_snapshot={},
             )

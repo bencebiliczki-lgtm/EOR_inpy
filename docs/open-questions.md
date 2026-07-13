@@ -23,5 +23,5 @@
 ## Termékdöntések
 
 - Kötelező projektmezők és fájlelnevezési séma.
-- Felhasználói szerepkörök szükségessége.
+- A projektek közösek, nincs projekttulajdonos vagy projektenkénti szerepkör.
 - PID profilok száma és hozzáférése.

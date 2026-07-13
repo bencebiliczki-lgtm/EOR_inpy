@@ -23,7 +23,9 @@ A mintavételi gyakoriság 1 másodperc és 1 óra között konfigurálható. A 
 ## Mérési projekt
 
 - Egy mérés egy visszanyitható projekt.
-- A projekt tartalmazza a nevét, létrehozási idejét, kezelőjét, megjegyzéseit, konfigurációját és kalibrációs pillanatképét.
+- A projekt tartalmazza a nevét, létrehozási idejét, megjegyzéseit, konfigurációját
+  és kalibrációs pillanatképét. A projektek közösek: nincs tulajdonosuk, minden
+  kezelő dolgozhat minden mérésen.
 - Egy projekt tetszőleges számú, hozzáadható és átnevezhető szakaszt tartalmazhat.
 - A szakasz típusa, folyadéka/vegyszere, cél nyomása, cél térfogatárama és
   megjegyzése szerkeszthető; a szakaszok rendezhetők és törölhetők.

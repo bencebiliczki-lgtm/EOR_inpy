@@ -330,9 +330,6 @@ class ProjectSettingsDialog(QDialog):
         name, accepted = QInputDialog.getText(self, "Új projekt", "Projekt neve")
         if not accepted:
             return
-        operator, accepted = QInputDialog.getText(self, "Új projekt", "Kezelő neve")
-        if not accepted:
-            return
         notes, accepted = QInputDialog.getMultiLineText(
             self, "Új projekt", "Megjegyzések"
         )
@@ -341,7 +338,6 @@ class ProjectSettingsDialog(QDialog):
         try:
             project = self._repository.create_project(
                 name=name,
-                operator=operator,
                 notes=notes,
                 configuration=self._configuration,
                 calibration_snapshot=self._calibration_snapshot,
@@ -1766,7 +1762,6 @@ class DashboardWindow(QMainWindow):
             project.id,
             project.name,
             created_at=project.created_at,
-            operator=project.operator,
             notes=project.notes,
             configuration=project.configuration,
             calibration_snapshot=project.calibration_snapshot,
@@ -1907,7 +1902,6 @@ class DashboardWindow(QMainWindow):
                 project.id,
                 project.name,
                 created_at=project.created_at,
-                operator=project.operator,
                 notes=project.notes,
                 configuration=project.configuration,
                 calibration_snapshot=project.calibration_snapshot,
@@ -2183,7 +2177,6 @@ class DashboardWindow(QMainWindow):
             project.id,
             project.name,
             created_at=project.created_at,
-            operator=project.operator,
             notes=project.notes,
             configuration=project.configuration,
             calibration_snapshot=project.calibration_snapshot,
@@ -2241,9 +2234,6 @@ class DashboardWindow(QMainWindow):
         name, accepted = QInputDialog.getText(self, "Új projekt", "Projekt neve")
         if not accepted:
             return
-        operator, accepted = QInputDialog.getText(self, "Új projekt", "Kezelő neve")
-        if not accepted:
-            return
         notes, accepted = QInputDialog.getMultiLineText(
             self, "Új projekt", "Megjegyzések"
         )
@@ -2252,7 +2242,6 @@ class DashboardWindow(QMainWindow):
         try:
             project = self._projects.create_project(
                 name=name,
-                operator=operator,
                 notes=notes,
                 configuration=self._current_configuration(),
                 calibration_snapshot={

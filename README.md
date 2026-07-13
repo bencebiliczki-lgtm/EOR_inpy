@@ -41,6 +41,8 @@ projektet és legalább egy mérési szakaszt, majd kattints a `Csatlakozás` é
 `data/projects.sqlite3` adatbázisban maradnak meg. A PID erősítések, hatásirány és
 kimeneti korlátok a dashboardon módosíthatók. Vészleállítás után a reteszelt állapot
 a `Hiba nyugtázása` gombbal oldható; ezt követően újra csatlakozni kell.
+Projekt létrehozásakor nem szükséges felhasználót vagy tulajdonost megadni; minden
+mérés minden kezelő számára elérhető.
 
 A dashboardon a vonali, differenciál- és belépőnyomás-csatorna kétpontos kalibrációja,
 valamint a köpeny-, besajtolási és differenciálnyomás-határ és a minimális

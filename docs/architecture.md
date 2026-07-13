@@ -74,6 +74,8 @@ SQLite `user_version` értékével verziózott; a jelenlegi verzió `2`, ismeret
 A szakaszséma a név és sorrend mellett típust, folyadékot/vegyszert, cél nyomást,
 cél térfogatáramot és megjegyzést tárol. A régi 1-es séma automatikusan, adatvesztés
 nélkül migrálódik; a projektkezelő szerkesztést, rendezést és törlést biztosít.
+Projekt létrehozásakor nem kér kezelőnevet, és nincs projektgazda vagy hozzáférési
+korlátozás: minden projekt minden kezelő számára elérhető.
 
 ## Szabályozási mag
 
