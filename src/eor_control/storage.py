@@ -27,6 +27,7 @@ class CsvMeasurementWriter:
         "injected_volume_ml",
         "line_pressure_bar",
         "differential_pressure_bar",
+        "inlet_pressure_bar",
         "valve_percent",
         "active_stage",
         "quality",
@@ -37,7 +38,7 @@ class CsvMeasurementWriter:
         path.parent.mkdir(parents=True, exist_ok=True)
         is_empty = not path.exists() or path.stat().st_size == 0
         self._file: TextIO = path.open("a", encoding="utf-8", newline="")
-        self._writer = csv.writer(self._file, lineterminator="\n")
+        self._writer = csv.writer(self._file, delimiter=";", lineterminator="\n")
         if is_empty:
             self._writer.writerow(self.HEADER)
             self._sync()
@@ -47,23 +48,28 @@ class CsvMeasurementWriter:
         self._writer.writerow(
             (
                 snapshot.recorded_at.isoformat(),
-                snapshot.monotonic_seconds,
-                snapshot.jacket_pump.pressure_bar,
-                snapshot.jacket_pump.flow_ml_per_hour,
-                snapshot.jacket_pump.remaining_volume_ml,
-                snapshot.injection_pump.pressure_bar,
-                snapshot.injection_pump.flow_ml_per_hour,
-                snapshot.injection_pump.remaining_volume_ml,
-                record.injected_volume_ml,
-                snapshot.line_pressure_bar,
-                snapshot.differential_pressure_bar,
-                snapshot.valve_percent,
+                self._hu(snapshot.monotonic_seconds),
+                self._hu(snapshot.jacket_pump.pressure_bar),
+                self._hu(snapshot.jacket_pump.flow_ml_per_hour),
+                self._hu(snapshot.jacket_pump.remaining_volume_ml),
+                self._hu(snapshot.injection_pump.pressure_bar),
+                self._hu(snapshot.injection_pump.flow_ml_per_hour),
+                self._hu(snapshot.injection_pump.remaining_volume_ml),
+                self._hu(record.injected_volume_ml),
+                self._hu(snapshot.line_pressure_bar),
+                self._hu(snapshot.differential_pressure_bar),
+                self._hu(snapshot.inlet_pressure_bar),
+                self._hu(snapshot.valve_percent),
                 record.active_stage,
                 snapshot.quality.value,
                 "|".join(record.safety_reasons),
             )
         )
         self._sync()
+
+    @staticmethod
+    def _hu(value: float) -> str:
+        return str(value).replace(".", ",")
 
     def _sync(self) -> None:
         self._file.flush()

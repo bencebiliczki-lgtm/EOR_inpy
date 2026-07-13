@@ -27,6 +27,7 @@ class MeasurementSnapshot:
     line_pressure_bar: float
     differential_pressure_bar: float
     valve_percent: float
+    inlet_pressure_bar: float = 0.0
     quality: DataQuality = DataQuality.GOOD
 
 

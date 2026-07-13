@@ -52,6 +52,25 @@ def test_differential_limit_is_inclusive() -> None:
     assert "differential pressure limit reached" in decision.reasons
 
 
+def test_inlet_pressure_limit_is_supervised() -> None:
+    unsafe = snapshot(120.0, 100.0)
+    unsafe = MeasurementSnapshot(
+        recorded_at=unsafe.recorded_at,
+        monotonic_seconds=unsafe.monotonic_seconds,
+        jacket_pump=unsafe.jacket_pump,
+        injection_pump=unsafe.injection_pump,
+        line_pressure_bar=unsafe.line_pressure_bar,
+        differential_pressure_bar=unsafe.differential_pressure_bar,
+        valve_percent=unsafe.valve_percent,
+        inlet_pressure_bar=401.0,
+    )
+
+    decision = monitor().evaluate(unsafe)
+
+    assert not decision.safe
+    assert "inlet pressure limit exceeded" in decision.reasons
+
+
 @pytest.mark.parametrize("invalid_value", [float("nan"), float("inf"), float("-inf")])
 def test_non_finite_sensor_value_is_unsafe(invalid_value: float) -> None:
     decision = monitor().evaluate(snapshot(120.0, 100.0, delta_p=invalid_value))
@@ -101,3 +120,42 @@ def test_latched_fault_requires_acknowledgement_and_safe_snapshot_to_reset() -> 
 
 def test_reset_without_a_latched_fault_returns_current_safety_state() -> None:
     assert monitor().reset(snapshot(120.0, 100.0), operator_acknowledged=False).safe
+
+
+def test_reconfiguration_does_not_clear_latched_fault() -> None:
+    safety_monitor = monitor()
+    safety_monitor.evaluate(snapshot(119.0, 100.0))
+    safety_monitor.configure(SafetyLimits(500.0, 500.0, 100.0, 10.0))
+
+    decision = safety_monitor.evaluate(snapshot(120.0, 100.0))
+
+    assert not decision.safe
+    assert decision.latched
+
+
+def test_invalid_safety_limits_are_rejected() -> None:
+    with pytest.raises(ValueError, match="positive and finite"):
+        SafetyLimits(400.0, 350.0, 50.0, 0.0)
+
+
+def test_controlled_pressure_overshoot_limit_is_inclusive() -> None:
+    safety_monitor = monitor()
+
+    decision = safety_monitor.evaluate(
+        snapshot(120.0, 100.0),
+        controlled_pressure_bar=105.0,
+        pressure_target_bar=100.0,
+    )
+
+    assert not decision.safe
+    assert "controlled pressure overshoot limit reached" in decision.reasons
+
+
+def test_controlled_pressure_below_overshoot_limit_is_safe() -> None:
+    decision = monitor().evaluate(
+        snapshot(120.0, 100.0),
+        controlled_pressure_bar=104.999,
+        pressure_target_bar=100.0,
+    )
+
+    assert decision.safe

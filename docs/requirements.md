@@ -13,6 +13,7 @@ Minden mintavételi időpontban rögzítendő:
 - a mérés kezdete óta besajtolt térfogat;
 - vonali nyomás;
 - differenciálnyomás;
+- belépő nyomás;
 - szelepvezérlés százalékos értéke;
 - aktív mérési szakasz;
 - rendszerállapot, adatminőség és aktív hibák.
@@ -24,6 +25,8 @@ A mintavételi gyakoriság 1 másodperc és 1 óra között konfigurálható. A 
 - Egy mérés egy visszanyitható projekt.
 - A projekt tartalmazza a nevét, létrehozási idejét, kezelőjét, megjegyzéseit, konfigurációját és kalibrációs pillanatképét.
 - Egy projekt tetszőleges számú, hozzáadható és átnevezhető szakaszt tartalmazhat.
+- A szakasz típusa, folyadéka/vegyszere, cél nyomása, cél térfogatárama és
+  megjegyzése szerkeszthető; a szakaszok rendezhetők és törölhetők.
 - Példák: hidegvizes, melegvizes, olajkiszorításos és különböző vegyszeres szakaszok.
 - A projekt neve jelenjen meg az exportált fájl nevében.
 - Javasolt NAS-struktúra: `EOR mérés/<év>/<projekt neve>/`.
@@ -36,6 +39,7 @@ A mintavételi gyakoriság 1 másodperc és 1 óra között konfigurálható. A 
 - A teljes rögzített mérés külön diagramja.
 - Választható adatsorok és szabadon skálázható tengelyek.
 - A szelep aktuális állásának folyamatos kijelzése.
+- A belépő nyomás külön csatornaként jelenjen meg és PID-forrásként választható legyen.
 
 ## Kalibráció
 
@@ -54,6 +58,6 @@ A nyomásmérőkhöz megadható legalább két kalibrációs pont: alsó/felső 
 
 - A nyers mérési adatok folyamatos, összeomlástűrő helyi mentése kötelező.
 - A NAS-ra írás ne blokkolja az adatgyűjtést; hálózati hiba esetén helyi várólista szükséges.
-- CSV-exportban a magyar felhasználói igény szerint tizedesvessző használható. Az oszlopelválasztó ezért pontosítandó, javasolt a pontosvessző.
+- A nyers és felhasználói magyar CSV pontosvesszős, tizedesvesszős formátumot használ;
+  a felhasználói exportnál más elválasztó és tizedespont is választható.
 - Az export nem helyettesíti a belső nyers adatforrást.
-

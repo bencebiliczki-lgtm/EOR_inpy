@@ -52,3 +52,18 @@ class SimulatedDataAcquisition:
         self.safe_state_requested = True
         self.outputs.clear()
 
+
+@dataclass(slots=True)
+class SimulatedValveActuator:
+    output_percent: float | None = None
+    safe_state_requested: bool = False
+
+    def write_percent(self, output_percent: float) -> None:
+        if not 0.0 <= output_percent <= 100.0:
+            raise ValueError("simulated valve output must be between 0 and 100 percent")
+        self.output_percent = output_percent
+        self.safe_state_requested = False
+
+    def set_safe_state(self) -> None:
+        self.output_percent = None
+        self.safe_state_requested = True

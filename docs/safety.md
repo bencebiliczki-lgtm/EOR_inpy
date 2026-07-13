@@ -32,6 +32,16 @@ kiértékelése után oldható. A nem véges (`NaN`, pozitív vagy negatív vég
 mérési érték, a kézi vészleállítás és a vezérlési határidő túllépése reteszelt
 hibát vált ki.
 
+Automata szabályozásban a kiválasztott nyomásforrás értéke külön céltúllövési
+interlockot kap. A konfigurált célérték plusz a `max_control_overshoot_bar` eltérés
+elérése reteszelt hibát és kimenettiltást vált ki. A dashboardon ez az eltérés
+pozitív, véges barértékként állítható.
+
+Fizikai pumpaindítás csak HARDVER + READY állapotban, korábbi kapcsolatpróba és
+hardverengedély után lehetséges. A köpenypumpa indításához `RUN JACKET PUMP`, a
+besajtolópumpához `RUN INJECTION PUMP` pontos kezelői megerősítés szükséges. A
+besajtolás 20 bar alatti pillanatnyi köpenytöbbletnél szoftveresen blokkolt.
+
 ## Kötelező tesztek
 
 Minden interlockhoz tartozzon határérték alatti, pontosan határértékű, határérték feletti, hibás adat és kapcsolatvesztési teszt. Biztonsági teszt hibája blokkolja a kiadást.

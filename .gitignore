@@ -9,8 +9,8 @@ htmlcov/
 build/
 dist/
 *.spec
+!eor_control.spec
 *.log
 data/
 measurements/
 config.local.toml
-

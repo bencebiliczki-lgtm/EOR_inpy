@@ -2,22 +2,26 @@
 
 ## Blokkoló műszaki kérdések
 
-1. Beszerezhető és licencelhető-e a Teledyne ISCO Universal Driver, és milyen API-t biztosít?
-2. Mi a pumpák pontos vezérlőváltozata, firmware-verziója, ID-je és soros kábelezése?
-3. Egy vezérlő vagy két önálló vezérlő kapcsolódik a két pumpához?
-4. Mik a végleges NI csatornák és elektromos bekötések?
-5. Mi a differenciálnyomás-mérő aktuálisan konfigurált alsó és felső tartománya?
-6. A szelep 1–5 V jele parancsolt pozíciót, fordulatszámot vagy más mennyiséget jelent?
-7. Mi a szelep igazolt biztonságos állapota táp-, USB- vagy programhiba esetén?
-8. Pontosan mit kell jelentenie a pumpák STOP-jának és milyen sorrendben kell beavatkozni?
-9. Hogyan mérhető és fogadható el a ±1 bar szabályozási pontosság?
-10. CSV-ben tizedesvessző mellett pontosvessző legyen-e az oszlopelválasztó?
+1. A közvetlen, dokumentált DASNET adapter elkészült; el kell dönteni, szükséges-e
+   emellett a Teledyne ISCO Universal Driver használata.
+2. A pumpák COM-portját, ID-jét, A–D csatornáját és kábelezési megjegyzését a
+   felhasználó adja meg az Eszközbeállításokban; az értékeket a program megőrzi.
+3. Az NI fizikai csatornákat, a bemeneti bekötési módot és a bekötési/földelési
+   megjegyzést a felhasználó állítja be és a program megőrzi.
+4. A differenciálnyomás-mérő tényleges alsó és felső tartományát a felhasználó a
+   Kalibráció és biztonság ablakban adja meg.
+5. A szelep 0%/100% végpontját és safe-state feszültségét a felhasználó adja meg.
+   Ezek fizikai helyességéért a helyszíni validáció felel.
+6. A kábelkihúzási, kommunikációvesztési és vészleállítási próba, valamint a
+   felügyelt kommunikációs próba időtartama és teljesítési állapota rögzíthető az
+   Eszközbeállításokban.
+7. A dokumentált `STOP` parancs implementált. A két pumpa és a DAQ safe-state
+   művelete egymástól függetlenül, mindenképpen megkísérlődik; a helyszíni fizikai
+   beavatkozási sorrend jóváhagyása még szükséges.
+8. Hogyan mérhető és fogadható el a ±1 bar szabályozási pontosság?
 
 ## Termékdöntések
 
 - Kötelező projektmezők és fájlelnevezési séma.
 - Felhasználói szerepkörök szükségessége.
 - PID profilok száma és hozzáférése.
-- Automatikus NAS-visszaszinkron szabályai.
-- Excel-fájl szerkezete és diagramjai.
-

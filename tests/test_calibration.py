@@ -17,3 +17,7 @@ def test_out_of_range_voltage_is_rejected() -> None:
     with pytest.raises(ValueError, match="outside"):
         calibration.convert(0.9)
 
+
+def test_invalid_calibration_range_is_rejected_at_configuration_time() -> None:
+    with pytest.raises(ValueError, match="voltage_max"):
+        LinearCalibration(5.0, 1.0, 0.0, 400.0)

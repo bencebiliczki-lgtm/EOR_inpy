@@ -10,6 +10,22 @@ class SafetyLimits:
     max_injection_pressure_bar: float
     max_differential_pressure_bar: float
     minimum_jacket_margin_bar: float = 20.0
+    max_control_overshoot_bar: float = 5.0
+    max_line_pressure_bar: float = 400.0
+    max_inlet_pressure_bar: float = 400.0
+
+    def __post_init__(self) -> None:
+        values = (
+            self.max_jacket_pressure_bar,
+            self.max_injection_pressure_bar,
+            self.max_differential_pressure_bar,
+            self.minimum_jacket_margin_bar,
+            self.max_control_overshoot_bar,
+            self.max_line_pressure_bar,
+            self.max_inlet_pressure_bar,
+        )
+        if not all(isfinite(value) and value > 0.0 for value in values):
+            raise ValueError("safety limits must be positive and finite")
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,12 +40,17 @@ class SafetyMonitor:
         self._limits = limits
         self._latched_reasons: tuple[str, ...] = ()
 
+    def configure(self, limits: SafetyLimits) -> None:
+        self._limits = limits
+
     def evaluate(
         self,
         snapshot: MeasurementSnapshot,
         *,
         emergency_stop: bool = False,
         control_deadline_missed: bool = False,
+        controlled_pressure_bar: float | None = None,
+        pressure_target_bar: float | None = None,
     ) -> SafetyDecision:
         reasons: list[str] = []
         if snapshot.quality is not DataQuality.GOOD:
@@ -45,6 +66,7 @@ class SafetyMonitor:
             snapshot.injection_pump.remaining_volume_ml,
             snapshot.line_pressure_bar,
             snapshot.differential_pressure_bar,
+            snapshot.inlet_pressure_bar,
             snapshot.valve_percent,
             snapshot.monotonic_seconds,
         )
@@ -54,12 +76,25 @@ class SafetyMonitor:
             reasons.append("manual emergency stop")
         if control_deadline_missed:
             reasons.append("control deadline missed")
+        if (controlled_pressure_bar is None) != (pressure_target_bar is None):
+            reasons.append("incomplete pressure target supervision data")
+        elif controlled_pressure_bar is not None and pressure_target_bar is not None:
+            if not isfinite(controlled_pressure_bar) or not isfinite(pressure_target_bar):
+                reasons.append("invalid pressure target supervision data")
+            elif controlled_pressure_bar >= (
+                pressure_target_bar + self._limits.max_control_overshoot_bar
+            ):
+                reasons.append("controlled pressure overshoot limit reached")
         if snapshot.jacket_pump.pressure_bar > self._limits.max_jacket_pressure_bar:
             reasons.append("jacket pressure limit exceeded")
         if snapshot.injection_pump.pressure_bar > self._limits.max_injection_pressure_bar:
             reasons.append("injection pressure limit exceeded")
         if snapshot.differential_pressure_bar >= self._limits.max_differential_pressure_bar:
             reasons.append("differential pressure limit reached")
+        if snapshot.line_pressure_bar > self._limits.max_line_pressure_bar:
+            reasons.append("line pressure limit exceeded")
+        if snapshot.inlet_pressure_bar > self._limits.max_inlet_pressure_bar:
+            reasons.append("inlet pressure limit exceeded")
         margin = snapshot.jacket_pump.pressure_bar - snapshot.injection_pump.pressure_bar
         if margin < self._limits.minimum_jacket_margin_bar:
             reasons.append("jacket pressure margin is too low")
