@@ -1,5 +1,13 @@
 # Hardver és kommunikáció
 
+## Célgép
+
+A telepítési célgép egy Windows 10 Pro rendszert futtató Dell OptiPlex 780,
+Intel Core 2 Quad Q9400 processzorral és 8 GB RAM-mal. A részletes, dátumozott
+rendszerprofilot és a felismert COM-portokat a [target-host.md](target-host.md)
+tartalmazza. Fejlesztésnél és csomagolásnál az ott leírt régi CPU-, Windows 10-
+és erőforrás-korlátokat kötelező figyelembe venni.
+
 ## Teledyne ISCO 260D pumpák
 
 - Darabszám: 2.
@@ -23,6 +31,9 @@ A `isco.py` adapter `RSVP` és `IDENTIFY` segítségével ellenőrzi a kapcsolat
 A kapcsolat létrehozása önmagában nem küld `REMOTE` vagy motorindító parancsot.
 A tényleges használathoz konfigurálni kell a COM-portot, a 0–9 egységazonosítót,
 az A–D pumpacsatornát, a baud rate-et és az aktuális pumpamértékegységeket.
+Az ismert célgépen a `COM1`, `COM2` és `COM4` lehet fizikai pumpaport. A `COM3`
+Intel AMT/SOL menedzsmentport, ezért pumpához nem lehet automatikus alapérték.
+Az egyes pumpák tényleges portkiosztása továbbra is helyszíni ellenőrzést igényel.
 Az Eszközök ablak megnyitásakor és a frissítőgomb megnyomásakor az alkalmazás
 csak olvasási rendszerleltárral felderíti az elérhető COM-portokat, valamint az
 NI analóg be- és kimeneti fizikai csatornákat. A korábban mentett érték akkor is
