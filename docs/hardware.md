@@ -27,6 +27,9 @@ Az Eszközök ablak megnyitásakor és a frissítőgomb megnyomásakor az alkalm
 csak olvasási rendszerleltárral felderíti az elérhető COM-portokat, valamint az
 NI analóg be- és kimeneti fizikai csatornákat. A korábban mentett érték akkor is
 választható marad, ha az eszköz átmenetileg nincs csatlakoztatva.
+Windows-csomag készítésekor a PyInstaller spec külön rejtett importként tartalmazza
+a `serial.tools.list_ports` és `nidaqmx.system` modulokat. A build script a csomagolás
+előtt ellenőrzi is ezek elérhetőségét, így hiányos hardveres build nem készülhet el.
 Ezeket, valamint a kábelezési megjegyzést a felhasználó az Eszközbeállításokban
 adja meg; a program a beállításokat megőrzi.
 

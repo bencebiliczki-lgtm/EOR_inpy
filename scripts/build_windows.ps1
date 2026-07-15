@@ -19,6 +19,11 @@ try {
         throw "A telepített NumPy verziója nem 1.26.4."
     }
 
+    & $python -c "import nidaqmx.system; import serial.tools.list_ports"
+    if ($LASTEXITCODE -ne 0) {
+        throw "A hardverfelderítéshez szükséges nidaqmx vagy pyserial csomag hiányzik. Telepítsd: python -m pip install -e '.[hardware]'"
+    }
+
     & $python -m PyInstaller --noconfirm --clean eor_control.spec
     Write-Host "Elkészült: $root\dist\EOR_Controller\EOR_Controller.exe"
 }
