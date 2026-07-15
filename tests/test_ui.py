@@ -79,7 +79,11 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
             target_flow_ml_per_hour=10.0,
         )
 
-    window = build_simulated_dashboard(tmp_path / "raw.csv", project_path)
+    settings_path = tmp_path / "config" / "AFKI" / "EORControl.ini"
+    user_settings = QSettings(str(settings_path), QSettings.Format.IniFormat)
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", project_path, settings=user_settings
+    )
     project_selector = window.findChild(QComboBox, "project_selector")
     stage_selector = window.findChild(QComboBox, "stage_selector")
 
@@ -160,9 +164,17 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     window._recording_interval.setValue(7)
     window._set_theme("dark")
     assert "#11151a" in application().styleSheet()
+    settings_path = Path(window._user_settings.fileName())
+    assert settings_path.is_file()
+    persisted_settings = QSettings(str(settings_path), QSettings.Format.IniFormat)
+    assert persisted_settings.value("theme") == "dark"
     window.close()
 
-    restored = build_simulated_dashboard(tmp_path / "restored.csv", project_path)
+    restored = build_simulated_dashboard(
+        tmp_path / "restored.csv",
+        project_path,
+        settings=QSettings(str(settings_path), QSettings.Format.IniFormat),
+    )
     assert restored._active_project_label.text() == "UI project"
     assert restored._active_stage_label.text() == "Water stage"
     assert restored._manual_output.value() == 33.0

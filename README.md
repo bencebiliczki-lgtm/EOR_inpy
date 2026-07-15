@@ -69,6 +69,10 @@ A program `QSettings` segítségével megőrzi az utoljára használt projektet 
 mérési szakaszt, a témát, a kézi/automata vezérlési mezőket, a PID-paramétereket,
 az adatrögzítési időközt, a kalibrációkat és a biztonsági határértékeket. Törölt
 projekt vagy sérült beállítás esetén biztonságos UI-alapértékre tér vissza.
+A beállítások explicit INI-fájlja a hordozható alkalmazásmappa
+`config/AFKI/EORControl.ini` útvonalán található. A korábbi Windows Registry-alapú
+`AFKI/EORControl` beállításokat az alkalmazás az első induláskor automatikusan
+átmásolja, ha az INI még üres. A témaválasztás azonnal lemezre kerül.
 
 Az eszközök a `Beállítások` → `Eszközök…` ablakban konfigurálhatók. A dashboard és
 az ablak is jól látható `SZIMULÁCIÓ` vagy `HARDVER` módszalagot mutat. Hardvermód

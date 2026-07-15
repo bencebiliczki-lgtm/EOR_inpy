@@ -136,6 +136,10 @@ projekt/szakasz, téma, vezérlési mód és forrás, PID, rögzítési időköz
 biztonsági határérték. A visszatöltés a Qt widgetek tartományellenőrzésén keresztül
 történik; ismeretlen enum, hibás szám vagy már nem létező projekt nem írja felül a
 biztonságos alapértéket.
+Az alkalmazás nem hagyatkozik a platformfüggő QSettings-alapértelmezésre: explicit
+`config/AFKI/EORControl.ini` fájlt nyit. Üres INI esetén egyszer átmásolja a korábbi
+Windows Registry `AFKI/EORControl` kulcsait. A témaváltás külön azonnali `sync()`
+műveletet végez, és az írási hibát az állapotsorban jelzi.
 
 ## Eszközmód és kapcsolatpróba
 

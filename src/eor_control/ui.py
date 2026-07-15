@@ -125,6 +125,27 @@ def application_root_path() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def portable_user_settings(
+    root: Path | None = None, *, migrate_legacy: bool = True
+) -> QSettings:
+    """Open the explicit portable INI and migrate older Registry settings once."""
+
+    settings_path = (root or application_root_path()) / "config" / "AFKI" / "EORControl.ini"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings = QSettings(str(settings_path), QSettings.Format.IniFormat)
+    if migrate_legacy and not settings.allKeys():
+        legacy = QSettings(
+            QSettings.Format.NativeFormat,
+            QSettings.Scope.UserScope,
+            "AFKI",
+            "EORControl",
+        )
+        for key in legacy.allKeys():
+            settings.setValue(key, legacy.value(key))
+        settings.sync()
+    return settings
+
+
 def application_icon() -> QIcon:
     path = application_icon_path()
     return QIcon(str(path)) if path.is_file() else QIcon()
@@ -1386,9 +1407,10 @@ class DashboardWindow(QMainWindow):
         data_directory: Path,
         measurement_writer: ProjectMeasurementWriter,
         nas_sync: BackgroundNasSynchronizer,
+        settings: QSettings | None = None,
     ) -> None:
         super().__init__()
-        self._user_settings = QSettings("AFKI", "EORControl")
+        self._user_settings = settings or portable_user_settings()
         self._devices = devices
         self._control_loop = control_loop
         self._valve = valve
@@ -1905,6 +1927,11 @@ class DashboardWindow(QMainWindow):
             application.setPalette(application.style().standardPalette())
             self._plot.setBackground(None)
         self._user_settings.setValue("theme", theme)
+        self._user_settings.sync()
+        if self._user_settings.status() != QSettings.Status.NoError:
+            self.statusBar().showMessage(
+                f"A témabeállítás nem menthető: {self._user_settings.fileName()}"
+            )
 
     def _refresh_mode_label(self) -> None:
         if self._run_mode is RunMode.HARDWARE:
@@ -2608,7 +2635,10 @@ class DashboardWindow(QMainWindow):
 
 
 def build_simulated_dashboard(
-    data_path: Path, project_path: Path | None = None
+    data_path: Path,
+    project_path: Path | None = None,
+    *,
+    settings: QSettings | None = None,
 ) -> DashboardWindow:
     jacket = SimulatedPump(pressure_bar=120.0)
     injection = SimulatedPump(
@@ -2642,22 +2672,18 @@ def build_simulated_dashboard(
         data_directory=data_path.parent,
         measurement_writer=writer,
         nas_sync=nas_sync,
+        settings=settings,
     )
 
 
 def run_ui() -> int:
     root = application_root_path()
-    config_directory = root / "config"
-    config_directory.mkdir(parents=True, exist_ok=True)
-    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
-    QSettings.setPath(
-        QSettings.Format.IniFormat,
-        QSettings.Scope.UserScope,
-        str(config_directory),
-    )
+    settings = portable_user_settings(root)
     instance = QApplication.instance()
     application = instance if isinstance(instance, QApplication) else QApplication(sys.argv)
     application.setWindowIcon(application_icon())
-    window = build_simulated_dashboard(root / "data" / "simulated_measurements.csv")
+    window = build_simulated_dashboard(
+        root / "data" / "simulated_measurements.csv", settings=settings
+    )
     window.show()
     return application.exec()
