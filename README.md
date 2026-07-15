@@ -89,7 +89,9 @@ Az alkalmazás minden új indításkor biztonsági okból szimulációs módból
 
 A `Beállítások` → `Naplózás…` ablakban a diagnosztikai napló teljesen ki- vagy
 bekapcsolható, és külön választható a két pumpa, a négy NI funkció, a runtime és a
-rendszer. Engedélyezve a napló a `data/logs/communication.log` fájlba kerül. A
+rendszer. Engedélyezve a rendszer- és runtime események a
+`data/logs/application.log`, a pumpa- és NI-kommunikáció pedig a külön
+`data/logs/hardware_communication.log` fájlba kerül. A
 `Developer` → `Eszközkommunikáció…` nézet élő TX/RX/timeout/hiba táblát és
 kategóriaszűrőt biztosít.
 A `Rendszer és módváltás` kategória a port- és NI-csatornafelderítés összesítését,

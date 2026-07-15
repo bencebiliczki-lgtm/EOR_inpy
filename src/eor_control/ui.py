@@ -65,7 +65,9 @@ from eor_control.hardware import (
     HardwareConfiguration,
     HardwareConnectionTester,
     HardwareDiscovery,
+    NiPhysicalChannelInfo,
     PhysicalHardwareConnectionTester,
+    SerialPortInfo,
     discover_hardware,
 )
 from eor_control.isco import open_isco_pump
@@ -460,10 +462,19 @@ class EditableSelectionComboBox(QComboBox):
         self.setText(value)
 
     def text(self) -> str:
+        index = self.currentIndex()
+        if index >= 0 and self.currentText() == self.itemText(index):
+            value = self.itemData(index)
+            if isinstance(value, str) and value:
+                return value
         return self.currentText()
 
     def setText(self, value: str) -> None:
-        self.setCurrentText(value)
+        index = self.findData(value)
+        if index >= 0:
+            self.setCurrentIndex(index)
+        else:
+            self.setCurrentText(value)
 
 
 class DeviceSettingsDialog(QDialog):
@@ -494,14 +505,13 @@ class DeviceSettingsDialog(QDialog):
         )
         layout.addWidget(self._mode_label)
         channel_help = QLabel(
-            "A fizikai NI-csatornákat a felhasználó adja meg (például Dev1/ai0). "
-            "A négy csatornának különbözőnek kell lennie; a három bemenetet a "
-            "kapcsolatpróba ténylegesen beolvassa."
+            "Először keresd meg az eszközöket, majd válaszd ki a két pumpa "
+            "csatlakozóját és az NI adatgyűjtőt. Ezután csak a kiválasztott NI "
+            "eszközhöz tartozó bemenetek és kimenetek jelennek meg."
         )
         channel_help.setWordWrap(True)
         channel_help.setStyleSheet("padding:8px;color:#66788a")
         layout.addWidget(channel_help)
-        form = QFormLayout()
         self.jacket_port = EditableSelectionComboBox(self._stored("jacket_port", "COM3"))
         self.jacket_id = self._integer_field("jacket_unit_id", 1, 0, 9)
         self.jacket_channel = self._channel_field("jacket_channel", "A")
@@ -524,6 +534,22 @@ class DeviceSettingsDialog(QDialog):
         self.valve_channel = EditableSelectionComboBox(
             self._stored("valve_output_channel", "Dev1/ao0")
         )
+        self.ni_device = QComboBox()
+        self.ni_device.addItem("Előbb deríts fel és válassz NI eszközt…", None)
+        self._discovered_ni_inputs: tuple[NiPhysicalChannelInfo, ...] = ()
+        self._discovered_ni_outputs: tuple[NiPhysicalChannelInfo, ...] = ()
+        self._active_ni_device: str | None = None
+        self._ni_channel_selections: dict[str, tuple[str, str, str]] = {}
+        self._changing_ni_inputs = False
+        self.ni_device.currentIndexChanged.connect(self._ni_device_changed)
+        self.line_channel.currentIndexChanged.connect(
+            lambda _index: self._ensure_distinct_ni_inputs(self.line_channel)
+        )
+        self.delta_channel.currentIndexChanged.connect(
+            lambda _index: self._ensure_distinct_ni_inputs(self.delta_channel)
+        )
+        for field in (self.line_channel, self.delta_channel, self.valve_channel):
+            field.setEnabled(False)
         self.terminal_configuration = QComboBox()
         for label, value in (
             ("Automatikus / eszköz alapérték", "DEFAULT"),
@@ -544,35 +570,45 @@ class DeviceSettingsDialog(QDialog):
         self.hundred_voltage = self._voltage_field(
             "valve_hundred_percent_voltage", 5.0
         )
-        fields = (
-            ("Köpenypumpa COM-port", self.jacket_port),
-            ("Köpenypumpa DASNET ID", self.jacket_id),
-            ("Köpenypumpa csatorna", self.jacket_channel),
-            ("Besajtolópumpa COM-port", self.injection_port),
-            ("Besajtolópumpa DASNET ID", self.injection_id),
-            ("Besajtolópumpa csatorna", self.injection_channel),
-            ("Baud rate", self.baud_rate),
-            ("Vonali nyomás NI csatorna", self.line_channel),
-            ("Differenciálnyomás NI csatorna", self.delta_channel),
-            ("Szelep NI kimenet", self.valve_channel),
-            ("NI bemeneti bekötési mód", self.terminal_configuration),
-            ("Pumpakábelezés megjegyzése", self.pump_cabling_notes),
-            ("NI bekötés/földelés megjegyzése", self.ni_wiring_notes),
-            ("Safe-state feszültség", self.safe_voltage),
-            ("Szelep 0% feszültség", self.zero_voltage),
-            ("Szelep 100% feszültség", self.hundred_voltage),
-        )
-        for label, widget in fields:
-            form.addRow(label, widget)
+        pump_box = QGroupBox("Pumpák csatlakoztatása")
+        pump_form = QFormLayout(pump_box)
+        for label, pump_widget in (
+            ("Köpenypumpa csatlakozója", self.jacket_port),
+            ("Köpenypumpa vezérlőazonosítója", self.jacket_id),
+            ("Köpenypumpa csatlakozási helye", self.jacket_channel),
+            ("Besajtolópumpa csatlakozója", self.injection_port),
+            ("Besajtolópumpa vezérlőazonosítója", self.injection_id),
+            ("Besajtolópumpa csatlakozási helye", self.injection_channel),
+            ("Kapcsolati sebesség", self.baud_rate),
+            ("Kábelezési megjegyzés", self.pump_cabling_notes),
+        ):
+            pump_form.addRow(label, pump_widget)
+        layout.addWidget(pump_box)
+
+        ni_box = QGroupBox("Nyomásmérés és szelepvezérlés")
+        ni_form = QFormLayout(ni_box)
+        for label, ni_widget in (
+            ("NI adatgyűjtő", self.ni_device),
+            ("Vonali nyomás bemenete", self.line_channel),
+            ("Differenciálnyomás bemenete", self.delta_channel),
+            ("Szelepvezérlés kimenete", self.valve_channel),
+            ("Bemenetek bekötési módja", self.terminal_configuration),
+            ("Bekötési megjegyzés", self.ni_wiring_notes),
+            ("Biztonságos szelepjel", self.safe_voltage),
+            ("Szelep 0%-os jele", self.zero_voltage),
+            ("Szelep 100%-os jele", self.hundred_voltage),
+        ):
+            ni_form.addRow(label, ni_widget)
+        layout.addWidget(ni_box)
+
         discovery_row = QHBoxLayout()
         self._discovery_status = QLabel()
         self._discovery_status.setWordWrap(True)
-        refresh_button = QPushButton("Portok és NI-csatornák frissítése")
+        refresh_button = QPushButton("Csatlakoztatott eszközök keresése")
         refresh_button.clicked.connect(self._refresh_hardware_choices)
         discovery_row.addWidget(refresh_button)
         discovery_row.addWidget(self._discovery_status, 1)
-        form.addRow("Eszközfelderítés", discovery_row)
-        layout.addLayout(form)
+        layout.addLayout(discovery_row)
         validation = QGroupBox("Helyszíni validáció felhasználói adatai")
         validation_form = QFormLayout(validation)
         self.supervised_test_minutes = self._integer_field(
@@ -673,13 +709,155 @@ class DeviceSettingsDialog(QDialog):
         return field
 
     @staticmethod
-    def _replace_choices(field: QComboBox, choices: tuple[str, ...]) -> None:
-        selected = field.currentText().strip()
+    def _replace_port_choices(
+        field: EditableSelectionComboBox,
+        ports: tuple[SerialPortInfo, ...],
+        stored_value: str,
+    ) -> None:
+        selected_data = field.currentData()
+        selected = selected_data if isinstance(selected_data, str) else stored_value
         field.clear()
-        field.addItems(choices)
-        if selected and field.findText(selected, Qt.MatchFlag.MatchFixedString) < 0:
-            field.addItem(selected)
-        field.setCurrentText(selected or (choices[0] if choices else ""))
+        field.setEditable(False)
+        if not ports:
+            field.addItem("Nincs elérhető soros eszköz", None)
+            field.setEnabled(False)
+            return
+        field.setEnabled(True)
+        field.addItem("Válassz soros eszközt…", None)
+        for port in ports:
+            field.addItem(port.display_name, port.device)
+        selected_index = field.findData(selected)
+        if selected_index >= 0:
+            field.setCurrentIndex(selected_index)
+        else:
+            field.setCurrentIndex(0)
+
+    @staticmethod
+    def _replace_ni_choices(
+        field: EditableSelectionComboBox,
+        channels: tuple[NiPhysicalChannelInfo, ...],
+        selected: str,
+        fallback_index: int,
+    ) -> None:
+        field.blockSignals(True)
+        field.clear()
+        if not channels:
+            field.addItem("Nincs elérhető csatorna", None)
+            field.blockSignals(False)
+            return
+        for channel in channels:
+            field.addItem(channel.display_name, channel.channel)
+            field.setItemData(
+                field.count() - 1,
+                channel.tooltip,
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        normalized_selected = selected.strip().casefold()
+        selected_index = next(
+            (
+                index
+                for index in range(field.count())
+                if isinstance(field.itemData(index), str)
+                and field.itemData(index).strip().casefold() == normalized_selected
+            ),
+            -1,
+        )
+        if selected_index >= 0:
+            field.setCurrentIndex(selected_index)
+        elif channels:
+            field.setCurrentIndex(min(fallback_index, len(channels) - 1))
+        field.blockSignals(False)
+
+    def _ensure_distinct_ni_inputs(self, changed: QComboBox) -> None:
+        if self._changing_ni_inputs:
+            return
+        line_value = self.line_channel.currentData()
+        delta_value = self.delta_channel.currentData()
+        if not isinstance(line_value, str) or line_value != delta_value:
+            return
+        target = self.delta_channel if changed is self.line_channel else self.line_channel
+        self._changing_ni_inputs = True
+        try:
+            for index in range(target.count()):
+                if target.itemData(index) != line_value:
+                    target.setCurrentIndex(index)
+                    break
+        finally:
+            self._changing_ni_inputs = False
+
+    def _replace_ni_devices(
+        self,
+        inputs: tuple[NiPhysicalChannelInfo, ...],
+        outputs: tuple[NiPhysicalChannelInfo, ...],
+    ) -> None:
+        self._discovered_ni_inputs = inputs
+        self._discovered_ni_outputs = outputs
+        devices: dict[str, NiPhysicalChannelInfo] = {}
+        for channel in (*inputs, *outputs):
+            devices.setdefault(channel.device_name, channel)
+        selected = self._stored("ni_device_name", "")
+        self.ni_device.blockSignals(True)
+        self.ni_device.clear()
+        if not devices:
+            self.ni_device.addItem("Nincs elérhető NI eszköz", None)
+            self.ni_device.setEnabled(False)
+        else:
+            self.ni_device.setEnabled(True)
+            self.ni_device.addItem("Válassz felismert NI eszközt…", None)
+        for name in sorted(devices, key=str.casefold):
+            channel = devices[name]
+            self.ni_device.addItem(channel.device_display_name, name)
+            self.ni_device.setItemData(
+                self.ni_device.count() - 1,
+                channel.tooltip,
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        selected_index = self.ni_device.findData(selected)
+        self.ni_device.setCurrentIndex(max(0, selected_index))
+        self.ni_device.blockSignals(False)
+        self._ni_device_changed()
+
+    def _ni_device_changed(self, *_args: object) -> None:
+        if self._active_ni_device is not None:
+            self._ni_channel_selections[self._active_ni_device] = (
+                self.line_channel.text(),
+                self.delta_channel.text(),
+                self.valve_channel.text(),
+            )
+        selected = self.ni_device.currentData()
+        if not isinstance(selected, str) or not selected:
+            self._active_ni_device = None
+            for field in (self.line_channel, self.delta_channel, self.valve_channel):
+                field.clear()
+                field.addItem("Előbb válassz NI eszközt", None)
+                field.setEnabled(False)
+            return
+        inputs = tuple(
+            channel
+            for channel in self._discovered_ni_inputs
+            if channel.device_name == selected
+        )
+        outputs = tuple(
+            channel
+            for channel in self._discovered_ni_outputs
+            if channel.device_name == selected
+        )
+        saved = self._ni_channel_selections.get(
+            selected,
+            (
+                self._stored("line_pressure_channel", ""),
+                self._stored("differential_pressure_channel", ""),
+                self._stored("valve_output_channel", ""),
+            ),
+        )
+        self._replace_ni_choices(self.line_channel, inputs, saved[0], 0)
+        self._replace_ni_choices(self.delta_channel, inputs, saved[1], 1)
+        self._replace_ni_choices(self.valve_channel, outputs, saved[2], 0)
+        self._ensure_distinct_ni_inputs(self.line_channel)
+        self.line_channel.setEnabled(bool(inputs))
+        self.delta_channel.setEnabled(bool(inputs))
+        self.valve_channel.setEnabled(bool(outputs))
+        self._active_ni_device = selected
 
     def _refresh_hardware_choices(self) -> None:
         try:
@@ -690,23 +868,55 @@ class DeviceSettingsDialog(QDialog):
             self._discovery_status.setStyleSheet("color:#b00020")
             self._log_discovery(message, level="ERROR")
             return
-        self._replace_choices(self.jacket_port, discovery.serial_ports)
-        self._replace_choices(self.injection_port, discovery.serial_ports)
-        self._replace_choices(self.line_channel, discovery.ni_input_channels)
-        self._replace_choices(self.delta_channel, discovery.ni_input_channels)
-        self._replace_choices(self.valve_channel, discovery.ni_output_channels)
+        self._replace_port_choices(
+            self.jacket_port,
+            discovery.serial_ports,
+            self._stored("jacket_port", ""),
+        )
+        self._replace_port_choices(
+            self.injection_port,
+            discovery.serial_ports,
+            self._stored("injection_port", ""),
+        )
+        self._replace_ni_devices(
+            discovery.ni_input_channels,
+            discovery.ni_output_channels,
+        )
+        ni_device_count = len(
+            {
+                channel.device_name
+                for channel in (*discovery.ni_input_channels, *discovery.ni_output_channels)
+            }
+        )
         summary = (
+            f"{len(discovery.serial_ports)} soros csatlakozó és "
+            f"{ni_device_count} NI eszköz található."
+        )
+        diagnostic_summary = (
             f"{len(discovery.serial_ports)} COM-port, "
             f"{len(discovery.ni_input_channels)} NI bemenet, "
             f"{len(discovery.ni_output_channels)} NI kimenet"
         )
+        if discovery.serial_ports:
+            port_names = "; ".join(port.display_name for port in discovery.serial_ports)
+            diagnostic_summary = f"{diagnostic_summary}. Portok: {port_names}"
+        ni_channels = (*discovery.ni_input_channels, *discovery.ni_output_channels)
+        if ni_channels:
+            channel_names = "; ".join(channel.display_name for channel in ni_channels)
+            diagnostic_summary = f"{diagnostic_summary}. NI: {channel_names}"
         if discovery.warnings:
-            summary = f"{summary}. " + " ".join(discovery.warnings)
+            summary = f"{summary} Egyes eszközök nem érhetők el; részletek a Developer naplóban."
+            diagnostic_summary = f"{diagnostic_summary}. " + " ".join(
+                discovery.warnings
+            )
             self._discovery_status.setStyleSheet("color:#8a5a00")
         else:
             self._discovery_status.setStyleSheet("color:#1b7f3a")
         self._discovery_status.setText(summary)
-        self._log_discovery(summary, level="WARNING" if discovery.warnings else "INFO")
+        self._log_discovery(
+            diagnostic_summary,
+            level="WARNING" if discovery.warnings else "INFO",
+        )
 
     def _log_discovery(self, message: str, *, level: str) -> None:
         if self._diagnostics is not None:
@@ -718,6 +928,18 @@ class DeviceSettingsDialog(QDialog):
             )
 
     def _read_configuration(self) -> HardwareConfiguration:
+        if not isinstance(self.jacket_port.currentData(), str):
+            raise ValueError("előbb válaszd ki a köpenypumpa elérhető csatlakozóját")
+        if not isinstance(self.injection_port.currentData(), str):
+            raise ValueError("előbb válaszd ki a besajtolópumpa elérhető csatlakozóját")
+        if not isinstance(self.ni_device.currentData(), str):
+            raise ValueError("előbb válassz egy felismert NI eszközt")
+        if not isinstance(self.line_channel.currentData(), str):
+            raise ValueError("nincs elérhető vonali nyomáscsatorna")
+        if not isinstance(self.delta_channel.currentData(), str):
+            raise ValueError("nincs elérhető differenciálnyomás-csatorna")
+        if not isinstance(self.valve_channel.currentData(), str):
+            raise ValueError("nincs elérhető szelepvezérlő csatorna")
         return HardwareConfiguration(
             jacket_port=self.jacket_port.text(),
             jacket_unit_id=self.jacket_id.value(),
@@ -811,6 +1033,7 @@ class DeviceSettingsDialog(QDialog):
     def _store_configuration(self, configuration: HardwareConfiguration) -> None:
         for key, value in configuration.to_settings().items():
             self._settings.setValue(f"hardware/{key}", value)
+        self._settings.setValue("hardware/ni_device_name", self.ni_device.currentData())
         self._settings.sync()
 
 
@@ -996,7 +1219,10 @@ class LoggingSettingsDialog(QDialog):
             categories_layout.addWidget(checkbox)
             self.category_checks[category] = checkbox
         layout.addWidget(categories_box)
-        path_label = QLabel(f"Logfájl: {logger.path}")
+        path_label = QLabel(
+            f"Alkalmazásnapló: {logger.path}\n"
+            f"Hardverkommunikáció: {logger.hardware_path}"
+        )
         path_label.setStyleSheet("color:#66788a")
         path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(path_label)
@@ -1437,7 +1663,8 @@ class DashboardWindow(QMainWindow):
         self._pump_control: PumpControlService | None = None
         self._measurement_time_origin: float | None = None
         self._diagnostics = DiagnosticLogger(
-            data_directory / "logs" / "communication.log"
+            data_directory / "logs" / "application.log",
+            hardware_path=data_directory / "logs" / "hardware_communication.log",
         )
         self._restore_logging_settings()
         self._restore_nas_settings()

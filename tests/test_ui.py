@@ -9,7 +9,12 @@ from PySide6.QtWidgets import QApplication, QComboBox, QSplitter  # noqa: E402
 
 from eor_control.application import RunMode  # noqa: E402
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger  # noqa: E402
-from eor_control.hardware import ConnectionTestResult, HardwareDiscovery  # noqa: E402
+from eor_control.hardware import (  # noqa: E402
+    ConnectionTestResult,
+    HardwareDiscovery,
+    NiPhysicalChannelInfo,
+    SerialPortInfo,
+)
 from eor_control.projects import ProjectRepository  # noqa: E402
 from eor_control.ui import (  # noqa: E402
     DeveloperViewDialog,
@@ -45,21 +50,81 @@ def test_device_settings_discovers_dropdown_choices(tmp_path: Path) -> None:
         current_mode=RunMode.SIMULATION,
         diagnostics=diagnostics,
         discoverer=lambda: HardwareDiscovery(
-            serial_ports=("COM8", "COM9"),
-            ni_input_channels=("Dev2/ai0", "Dev2/ai1"),
-            ni_output_channels=("Dev2/ao0",),
+            serial_ports=(
+                SerialPortInfo("COM8", "USB Serial Port", "FTDI", "FT232R"),
+                SerialPortInfo("COM9", "PCI Serial Port"),
+            ),
+            ni_input_channels=(
+                NiPhysicalChannelInfo("Dev2/ai0", "Dev2", "NI USB-6001", "1234"),
+                NiPhysicalChannelInfo("Dev2/ai1", "Dev2", "NI USB-6001", "1234"),
+            ),
+            ni_output_channels=(
+                NiPhysicalChannelInfo("Dev2/ao0", "Dev2", "NI USB-6001", "1234"),
+            ),
         ),
     )
 
     assert isinstance(dialog.jacket_port, QComboBox)
-    assert dialog.jacket_port.isEditable()
-    assert dialog.jacket_port.findText("COM8") >= 0
-    assert dialog.injection_port.findText("COM9") >= 0
-    assert dialog.line_channel.findText("Dev2/ai0") >= 0
-    assert dialog.delta_channel.findText("Dev2/ai1") >= 0
-    assert dialog.valve_channel.findText("Dev2/ao0") >= 0
-    assert "2 COM-port" in dialog._discovery_status.text()
+    assert not dialog.jacket_port.isEditable()
+    assert dialog.jacket_port.findData("COM8") >= 0
+    assert dialog.jacket_port.itemText(dialog.jacket_port.findData("COM8")) == (
+        "USB Serial Port (COM8)"
+    )
+    assert dialog.injection_port.findData("COM9") >= 0
+    dialog.jacket_port.setCurrentIndex(dialog.jacket_port.findData("COM8"))
+    dialog.injection_port.setCurrentIndex(dialog.injection_port.findData("COM9"))
+    assert dialog.ni_device.currentData() is None
+    assert not dialog.line_channel.isEnabled()
+    assert not dialog.delta_channel.isEnabled()
+    assert not dialog.valve_channel.isEnabled()
+    dialog.ni_device.setCurrentIndex(dialog.ni_device.findData("Dev2"))
+    assert dialog.line_channel.isEnabled()
+    assert dialog.delta_channel.isEnabled()
+    assert dialog.valve_channel.isEnabled()
+    dialog.delta_channel.setCurrentIndex(dialog.delta_channel.findData("Dev2/ai0"))
+    assert dialog.line_channel.currentData() != dialog.delta_channel.currentData()
+    assert dialog._read_configuration().jacket_port == "COM8"
+    assert dialog._read_configuration().injection_port == "COM9"
+    assert dialog.line_channel.findData("Dev2/ai0") >= 0
+    assert dialog.line_channel.itemText(dialog.line_channel.findData("Dev2/ai0")) == (
+        "1. analóg bemenet (AI0)"
+    )
+    assert dialog.delta_channel.findData("Dev2/ai1") >= 0
+    assert dialog.valve_channel.findData("Dev2/ao0") >= 0
+    dialog._replace_ni_choices(
+        dialog.line_channel,
+        dialog._discovered_ni_inputs,
+        " dev2/AI0 ",
+        0,
+    )
+    assert dialog.line_channel.currentData() == "Dev2/ai0"
+    assert dialog.line_channel.currentText() == "1. analóg bemenet (AI0)"
+    assert dialog.line_channel.findText(" dev2/AI0 ") == -1
+    dialog.line_channel.setCurrentIndex(dialog.line_channel.findData("Dev2/ai0"))
+    dialog.delta_channel.setCurrentIndex(dialog.delta_channel.findData("Dev2/ai1"))
+    dialog.valve_channel.setCurrentIndex(dialog.valve_channel.findData("Dev2/ao0"))
+    assert dialog._read_configuration().line_pressure_channel == "Dev2/ai0"
+    assert "2 soros csatlakozó" in dialog._discovery_status.text()
     assert "system\tDISCOVERY\t2 COM-port" in log_path.read_text(encoding="utf-8")
+    dialog.close()
+
+
+def test_device_settings_shows_when_no_device_is_available(tmp_path: Path) -> None:
+    application()
+    dialog = DeviceSettingsDialog(
+        UnusedTester(),  # type: ignore[arg-type]
+        settings=QSettings(str(tmp_path / "empty.ini"), QSettings.Format.IniFormat),
+        current_mode=RunMode.SIMULATION,
+        discoverer=HardwareDiscovery,
+    )
+
+    assert dialog.jacket_port.currentText() == "Nincs elérhető soros eszköz"
+    assert not dialog.jacket_port.isEnabled()
+    assert dialog.injection_port.currentText() == "Nincs elérhető soros eszköz"
+    assert dialog.ni_device.currentText() == "Nincs elérhető NI eszköz"
+    assert not dialog.ni_device.isEnabled()
+    assert dialog.line_channel.currentText() == "Előbb válassz NI eszközt"
+    assert not dialog.line_channel.isEnabled()
     dialog.close()
 
 
@@ -190,12 +255,34 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     restored._set_theme("system")
     assert application().styleSheet() == ""
 
+    def dev7_discovery() -> HardwareDiscovery:
+        return HardwareDiscovery(
+            serial_ports=(
+                SerialPortInfo("COM3", "Kommunikációs port"),
+                SerialPortInfo("COM4", "PCI Serial Port"),
+            ),
+            ni_input_channels=(
+                NiPhysicalChannelInfo("Dev7/ai3", "Dev7", "NI USB-6001"),
+                NiPhysicalChannelInfo("Dev7/ai4", "Dev7", "NI USB-6001"),
+            ),
+            ni_output_channels=(
+                NiPhysicalChannelInfo("Dev7/ao1", "Dev7", "NI USB-6001"),
+            ),
+        )
     device_dialog = DeviceSettingsDialog(
         UnusedTester(),  # type: ignore[arg-type]
         settings=restored._user_settings,
         current_mode=RunMode.SIMULATION,
+        discoverer=dev7_discovery,
         parent=restored,
     )
+    device_dialog.jacket_port.setCurrentIndex(
+        device_dialog.jacket_port.findData("COM3")
+    )
+    device_dialog.injection_port.setCurrentIndex(
+        device_dialog.injection_port.findData("COM4")
+    )
+    device_dialog.ni_device.setCurrentIndex(device_dialog.ni_device.findData("Dev7"))
     device_dialog.line_channel.setText("Dev7/ai3")
     device_dialog.delta_channel.setText("Dev7/ai4")
     device_dialog.valve_channel.setText("Dev7/ao1")
@@ -213,6 +300,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
         UnusedTester(),  # type: ignore[arg-type]
         settings=restored._user_settings,
         current_mode=RunMode.SIMULATION,
+        discoverer=dev7_discovery,
         parent=restored,
     )
     assert reopened_devices.line_channel.text() == "Dev7/ai3"

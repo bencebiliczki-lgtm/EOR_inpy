@@ -35,6 +35,15 @@ def test_hardware_configuration_builds_adapter_configs() -> None:
     assert config.supervised_test_minutes == 60
 
 
+def test_serial_port_display_name_does_not_repeat_embedded_com_port() -> None:
+    port = hardware.SerialPortInfo(
+        device="COM4",
+        description="Standard Serial over Bluetooth link (COM4)",
+    )
+
+    assert port.display_name == "Standard Serial over Bluetooth link (COM4)"
+
+
 def test_hardware_configuration_rejects_shared_port_and_invalid_valve_range() -> None:
     values = configuration().to_settings()
     values["injection_port"] = "com3"
@@ -60,11 +69,20 @@ def test_hardware_configuration_rejects_shared_port_and_invalid_valve_range() ->
 def test_hardware_discovery_lists_serial_and_ni_channels(monkeypatch: pytest.MonkeyPatch) -> None:
     serial_module = SimpleNamespace(
         comports=lambda: [
-            SimpleNamespace(device="COM7"),
-            SimpleNamespace(device="COM2"),
+            SimpleNamespace(
+                device="COM7",
+                description="USB Serial Port",
+                manufacturer="FTDI",
+                product="FT232R",
+                hwid="USB VID:PID=0403:6001",
+            ),
+            SimpleNamespace(device="COM2", description="PCI Serial Port"),
         ]
     )
     device = SimpleNamespace(
+        name="Dev1",
+        product_type="NI USB-6001",
+        serial_num=12345678,
         ai_physical_chans=[SimpleNamespace(name="Dev1/ai1"), SimpleNamespace(name="Dev1/ai0")],
         ao_physical_chans=[SimpleNamespace(name="Dev1/ao0")],
     )
@@ -79,7 +97,15 @@ def test_hardware_discovery_lists_serial_and_ni_channels(monkeypatch: pytest.Mon
 
     discovery = hardware.discover_hardware()
 
-    assert discovery.serial_ports == ("COM2", "COM7")
-    assert discovery.ni_input_channels == ("Dev1/ai0", "Dev1/ai1")
-    assert discovery.ni_output_channels == ("Dev1/ao0",)
+    assert [port.device for port in discovery.serial_ports] == ["COM2", "COM7"]
+    assert discovery.serial_ports[0].display_name == "PCI Serial Port (COM2)"
+    assert discovery.serial_ports[1].manufacturer == "FTDI"
+    assert "USB VID:PID=0403:6001" in discovery.serial_ports[1].tooltip
+    assert [channel.channel for channel in discovery.ni_input_channels] == [
+        "Dev1/ai0",
+        "Dev1/ai1",
+    ]
+    assert discovery.ni_input_channels[0].display_name == "1. analóg bemenet (AI0)"
+    assert discovery.ni_input_channels[0].serial_number == "12345678"
+    assert [channel.channel for channel in discovery.ni_output_channels] == ["Dev1/ao0"]
     assert discovery.warnings == ()

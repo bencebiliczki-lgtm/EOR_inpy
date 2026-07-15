@@ -159,7 +159,9 @@ automatikusan fizikai hardvert.
 
 A `DiagnosticLogger` szálbiztos, kategóriaszűrt eseménynapló. Kikapcsolt állapotban
 nem hoz létre fájlt. Bekapcsolva legfeljebb 5000 eseményt tart memóriában, és
-append-only UTF-8 sorokat ír a `data/logs/communication.log` fájlba. Külön
+append-only UTF-8 sorokat ír. A rendszer- és runtime események a
+`data/logs/application.log`, a pumpa DASNET TX/RX és NI hardveresemények a külön
+`data/logs/hardware_communication.log` fájlba kerülnek. Külön
 kategória tartozik a két pumpához, a két NI bemenethez, a szelep AO-hoz, a
 runtime-hoz és a rendszerhez.
 

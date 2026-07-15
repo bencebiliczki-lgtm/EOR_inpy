@@ -30,10 +30,27 @@ class DiagnosticEvent:
 
 
 class DiagnosticLogger:
-    def __init__(self, path: Path, *, capacity: int = 5000) -> None:
+    HARDWARE_CATEGORIES = frozenset(
+        {
+            DiagnosticCategory.JACKET_PUMP,
+            DiagnosticCategory.INJECTION_PUMP,
+            DiagnosticCategory.NI_LINE,
+            DiagnosticCategory.NI_DIFFERENTIAL,
+            DiagnosticCategory.NI_VALVE,
+        }
+    )
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        hardware_path: Path | None = None,
+        capacity: int = 5000,
+    ) -> None:
         if capacity < 1:
             raise ValueError("diagnostic capacity must be positive")
         self._path = path
+        self._hardware_path = hardware_path or path
         self._events: deque[DiagnosticEvent] = deque(maxlen=capacity)
         self._enabled = False
         self._categories = set(DiagnosticCategory)
@@ -48,6 +65,10 @@ class DiagnosticLogger:
     @property
     def path(self) -> Path:
         return self._path
+
+    @property
+    def hardware_path(self) -> Path:
+        return self._hardware_path
 
     @property
     def categories(self) -> frozenset[DiagnosticCategory]:
@@ -94,11 +115,16 @@ class DiagnosticLogger:
             self._events.clear()
 
     def _append_file(self, event: DiagnosticEvent) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        path = (
+            self._hardware_path
+            if event.category in self.HARDWARE_CATEGORIES
+            else self._path
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
         line = (
             f"{event.recorded_at.isoformat()}\t{event.monotonic_seconds:.6f}\t"
             f"{event.level}\t{event.category.value}\t{event.direction}\t{event.message}\n"
         )
-        with self._path.open("a", encoding="utf-8", newline="") as file:
+        with path.open("a", encoding="utf-8", newline="") as file:
             file.write(line)
             file.flush()

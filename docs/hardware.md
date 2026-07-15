@@ -38,6 +38,19 @@ Az Eszközök ablak megnyitásakor és a frissítőgomb megnyomásakor az alkalm
 csak olvasási rendszerleltárral felderíti az elérhető COM-portokat, valamint az
 NI analóg be- és kimeneti fizikai csatornákat. A korábban mentett érték akkor is
 választható marad, ha az eszköz átmenetileg nincs csatlakoztatva.
+A COM-portok listája a port azonosítója mellett megjeleníti a Windows/pyserial
+eszközleírását is, például `COM2 — PCI Serial Port`; az elem súgója tartalmazhatja
+a gyártót, terméknevet és hardverazonosítót. A mentett érték továbbra is kizárólag
+a stabil portazonosító (`COM2`). Egy RS-232 mögötti pumpa modelljét a Windows nem
+látja, ezért az ISCO típusnév csak külön, aktív DASNET-azonosítással állapítható meg.
+Az NI fizikai csatornák listája hasonlóan megjeleníti az NI eszköz terméktípusát,
+például `Dev7/ai3 — NI USB-6001`. Az elem súgója az NI MAX eszköznevet és az
+elérhető sorozatszámot is mutatja, miközben az INI-be csak a fizikai csatornanév
+(`Dev7/ai3`) kerül.
+Az Eszközök ablakban előbb a felderített NI-eszközt kell kiválasztani. Addig az
+NI csatornamezők üresek és tiltottak; ezután kizárólag a kiválasztott eszköz AI-,
+illetve AO-csatornái jelennek meg. A kiválasztott NI-eszköz neve
+`hardware/ni_device_name` kulccsal kerül az INI-be.
 Windows-csomag készítésekor a PyInstaller spec külön rejtett importként tartalmazza
 a `serial.tools.list_ports` és `nidaqmx.system` modulokat. A build script a csomagolás
 előtt ellenőrzi is ezek elérhetőségét, így hiányos hardveres build nem készülhet el.

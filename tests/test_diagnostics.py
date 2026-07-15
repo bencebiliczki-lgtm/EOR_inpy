@@ -8,6 +8,7 @@ def test_disabled_logger_does_not_record_or_create_file(tmp_path: Path) -> None:
     logger = DiagnosticLogger(path)
 
     assert logger.path == path
+    assert logger.hardware_path == path
     logger.emit(DiagnosticCategory.JACKET_PUMP, "TX", "RSVP")
 
     assert logger.events_after(0) == ()
@@ -39,3 +40,20 @@ def test_events_can_be_read_incrementally_and_memory_cleared(tmp_path: Path) -> 
     assert [event.message for event in logger.events_after(first_sequence)] == ["second"]
     logger.clear_memory()
     assert logger.events_after(0) == ()
+
+
+def test_hardware_events_are_written_to_separate_file(tmp_path: Path) -> None:
+    application_path = tmp_path / "application.log"
+    hardware_path = tmp_path / "hardware_communication.log"
+    logger = DiagnosticLogger(application_path, hardware_path=hardware_path)
+    logger.configure(enabled=True, categories=DiagnosticCategory)
+
+    logger.emit(DiagnosticCategory.SYSTEM, "DISCOVERY", "inventory complete")
+    logger.emit(DiagnosticCategory.JACKET_PUMP, "TX", "RSVP")
+    logger.emit(DiagnosticCategory.NI_LINE, "RX", "2.0 V")
+
+    assert "inventory complete" in application_path.read_text(encoding="utf-8")
+    hardware_log = hardware_path.read_text(encoding="utf-8")
+    assert "jacket_pump\tTX\tRSVP" in hardware_log
+    assert "ni_line\tRX\t2.0 V" in hardware_log
+    assert "inventory complete" not in hardware_log

@@ -9,30 +9,99 @@ from eor_control.ni import NidaqBackend, NidaqConfig, NidaqmxBackend
 
 
 @dataclass(frozen=True, slots=True)
+class SerialPortInfo:
+    device: str
+    description: str = ""
+    manufacturer: str = ""
+    product: str = ""
+    hardware_id: str = ""
+
+    @property
+    def display_name(self) -> str:
+        description = self.description.strip()
+        if description and description.lower() != "n/a":
+            if description.casefold().endswith(f"({self.device})".casefold()):
+                return description
+            return f"{description} ({self.device})"
+        return f"Soros csatlakozó ({self.device})"
+
+    @property
+    def tooltip(self) -> str:
+        details = [
+            value
+            for value in (self.manufacturer, self.product, self.hardware_id)
+            if value.strip() and value.strip().lower() != "n/a"
+        ]
+        return "\n".join(details) or self.display_name
+
+
+@dataclass(frozen=True, slots=True)
+class NiPhysicalChannelInfo:
+    channel: str
+    device_name: str
+    product_type: str = ""
+    serial_number: str = ""
+
+    @property
+    def display_name(self) -> str:
+        physical_name = self.channel.rsplit("/", 1)[-1]
+        normalized = physical_name.lower()
+        if normalized.startswith("ai") and normalized[2:].isdigit():
+            return f"{int(normalized[2:]) + 1}. analóg bemenet ({physical_name.upper()})"
+        if normalized.startswith("ao") and normalized[2:].isdigit():
+            return f"{int(normalized[2:]) + 1}. analóg kimenet ({physical_name.upper()})"
+        return f"Fizikai csatorna ({physical_name})"
+
+    @property
+    def tooltip(self) -> str:
+        details = [f"NI eszköz: {self.device_name}"]
+        if self.product_type.strip():
+            details.append(f"Típus: {self.product_type}")
+        if self.serial_number.strip():
+            details.append(f"Sorozatszám: {self.serial_number}")
+        return "\n".join(details)
+
+    @property
+    def device_display_name(self) -> str:
+        if self.product_type.strip():
+            return f"{self.product_type} ({self.device_name})"
+        return self.device_name
+
+
+@dataclass(frozen=True, slots=True)
 class HardwareDiscovery:
     """Read-only inventory of communication ports and NI physical channels."""
 
-    serial_ports: tuple[str, ...] = ()
-    ni_input_channels: tuple[str, ...] = ()
-    ni_output_channels: tuple[str, ...] = ()
+    serial_ports: tuple[SerialPortInfo, ...] = ()
+    ni_input_channels: tuple[NiPhysicalChannelInfo, ...] = ()
+    ni_output_channels: tuple[NiPhysicalChannelInfo, ...] = ()
     warnings: tuple[str, ...] = ()
 
 
 def discover_hardware() -> HardwareDiscovery:
     """List locally visible hardware without opening a port or creating an NI task."""
 
-    serial_ports: tuple[str, ...] = ()
-    ni_inputs: tuple[str, ...] = ()
-    ni_outputs: tuple[str, ...] = ()
+    serial_ports: tuple[SerialPortInfo, ...] = ()
+    ni_inputs: tuple[NiPhysicalChannelInfo, ...] = ()
+    ni_outputs: tuple[NiPhysicalChannelInfo, ...] = ()
     warnings: list[str] = []
 
     try:
         list_ports = importlib.import_module("serial.tools.list_ports")
-        serial_ports = tuple(
-            sorted(
-                {str(port.device).strip() for port in list_ports.comports() if port.device},
-                key=str.casefold,
+        discovered_ports = {
+            str(port.device).strip(): SerialPortInfo(
+                device=str(port.device).strip(),
+                description=str(getattr(port, "description", "") or "").strip(),
+                manufacturer=str(getattr(port, "manufacturer", "") or "").strip(),
+                product=str(getattr(port, "product", "") or "").strip(),
+                hardware_id=str(getattr(port, "hwid", "") or "").strip(),
             )
+            for port in list_ports.comports()
+            if getattr(port, "device", None)
+        }
+        serial_ports = tuple(
+            discovered_ports[device]
+            for device in sorted(discovered_ports, key=str.casefold)
         )
     except Exception as error:
         warnings.append(f"Soros portok felderítése sikertelen: {error}")
@@ -42,24 +111,34 @@ def discover_hardware() -> HardwareDiscovery:
         system = system_module.System.local()
         ni_inputs = tuple(
             sorted(
-                {
-                    str(channel.name).strip()
+                (
+                    NiPhysicalChannelInfo(
+                        channel=str(channel.name).strip(),
+                        device_name=str(device.name).strip(),
+                        product_type=str(getattr(device, "product_type", "") or "").strip(),
+                        serial_number=str(getattr(device, "serial_num", "") or "").strip(),
+                    )
                     for device in system.devices
                     for channel in device.ai_physical_chans
                     if channel.name
-                },
-                key=str.casefold,
+                ),
+                key=lambda item: item.channel.casefold(),
             )
         )
         ni_outputs = tuple(
             sorted(
-                {
-                    str(channel.name).strip()
+                (
+                    NiPhysicalChannelInfo(
+                        channel=str(channel.name).strip(),
+                        device_name=str(device.name).strip(),
+                        product_type=str(getattr(device, "product_type", "") or "").strip(),
+                        serial_number=str(getattr(device, "serial_num", "") or "").strip(),
+                    )
                     for device in system.devices
                     for channel in device.ao_physical_chans
                     if channel.name
-                },
-                key=str.casefold,
+                ),
+                key=lambda item: item.channel.casefold(),
             )
         )
     except Exception as error:
