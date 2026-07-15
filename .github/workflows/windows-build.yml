@@ -65,30 +65,5 @@ jobs:
           }
 
           python -m pip install --quiet paramiko
-          python -c @'
-import os
-import pathlib
-import paramiko
-
-host = os.environ["SSH_HOST"]
-port = int(os.environ.get("SSH_PORT", "22"))
-username = os.environ["SSH_USERNAME"]
-password = os.environ["SSH_PASSWORD"]
-remote_dir = os.environ.get("SSH_REMOTE_DIR", ".")
-package_path = os.environ["PACKAGE_PATH"]
-
-client = paramiko.SSHClient()
-client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-client.connect(hostname=host, port=port, username=username, password=password, look_for_keys=False, allow_agent=False)
-try:
-    stdin, stdout, stderr = client.exec_command(f"mkdir -p {remote_dir}")
-    stdout.read()
-    stderr.read()
-
-    with client.open_sftp() as sftp:
-        target_path = f"{remote_dir.rstrip('/')}/{pathlib.Path(package_path).name}"
-        sftp.put(package_path, target_path)
-finally:
-    client.close()
-'@
+          python -c 'import os, pathlib, paramiko; host=os.environ["SSH_HOST"]; port=int(os.environ.get("SSH_PORT","22")); username=os.environ["SSH_USERNAME"]; password=os.environ["SSH_PASSWORD"]; remote_dir=os.environ.get("SSH_REMOTE_DIR", ""); package_path=os.environ["PACKAGE_PATH"]; client=paramiko.SSHClient(); client.set_missing_host_key_policy(paramiko.AutoAddPolicy()); client.connect(hostname=host, port=port, username=username, password=password, look_for_keys=False, allow_agent=False); client.exec_command("mkdir -p " + remote_dir); sftp=client.open_sftp(); target_path=(remote_dir.rstrip("/") + "/" + pathlib.Path(package_path).name) if remote_dir else pathlib.Path(package_path).name; sftp.put(package_path, target_path); sftp.close(); client.close()'
 
