@@ -51,7 +51,6 @@ jobs:
       # Expected GitHub Secrets:
       # SSH_HOST, SSH_USERNAME, SSH_PASSWORD, SSH_PORT (optional), SSH_REMOTE_DIR
       - name: Upload package over SSH
-        if: ${{ secrets.SSH_HOST != '' && secrets.SSH_USERNAME != '' && secrets.SSH_PASSWORD != '' }}
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_PORT: ${{ secrets.SSH_PORT }}
@@ -62,6 +61,11 @@ jobs:
         run: |
           if ([string]::IsNullOrWhiteSpace($env:SSH_PORT)) {
             $env:SSH_PORT = "22"
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:SSH_HOST) -or [string]::IsNullOrWhiteSpace($env:SSH_USERNAME) -or [string]::IsNullOrWhiteSpace($env:SSH_PASSWORD)) {
+            Write-Host "SSH upload skipped because required secrets are missing."
+            exit 0
           }
 
           python -m pip install --quiet paramiko
