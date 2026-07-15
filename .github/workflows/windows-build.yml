@@ -48,6 +48,28 @@ jobs:
           path: ${{ env.PACKAGE_PATH }}
       # Expected GitHub Secrets:
       # SSH_HOST, SSH_USERNAME, SSH_PASSWORD, SSH_PORT (optional), SSH_REMOTE_DIR
+      # Tailscale auth secrets:
+      # TAILSCALE_CLIENT_ID, TAILSCALE_CLIENT_SECRET
+      - name: Connect to Tailscale
+        env:
+          TAILSCALE_CLIENT_ID: ${{ secrets.TAILSCALE_CLIENT_ID }}
+          TAILSCALE_CLIENT_SECRET: ${{ secrets.TAILSCALE_CLIENT_SECRET }}
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_CLIENT_ID) -or [string]::IsNullOrWhiteSpace($env:TAILSCALE_CLIENT_SECRET)) {
+            Write-Host "Tailscale client credentials are not configured; skipping Tailscale connection."
+            exit 0
+          }
+
+          try {
+            Invoke-WebRequest -Uri "https://tailscale.com/install.ps1" -OutFile "$env:TEMP\tailscale-install.ps1"
+            & "$env:TEMP\tailscale-install.ps1"
+            tailscale version | Out-Host
+            tailscale up --authkey="$env:TAILSCALE_CLIENT_ID:$env:TAILSCALE_CLIENT_SECRET" --hostname="github-runner-$env:GITHUB_RUN_ID" --accept-dns=false --accept-routes=false --ssh
+          }
+          catch {
+            Write-Host "Tailscale connection failed: $($_.Exception.Message)"
+          }
       - name: Upload package over SSH
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
@@ -55,6 +77,8 @@ jobs:
           SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
           SSH_REMOTE_DIR: ${{ secrets.SSH_REMOTE_DIR }}
+          TAILSCALE_CLIENT_ID: ${{ secrets.TAILSCALE_CLIENT_ID }}
+          TAILSCALE_CLIENT_SECRET: ${{ secrets.TAILSCALE_CLIENT_SECRET }}
         shell: pwsh
         run: |
           if ([string]::IsNullOrWhiteSpace($env:SSH_PORT)) {
@@ -64,6 +88,10 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:SSH_HOST) -or [string]::IsNullOrWhiteSpace($env:SSH_USERNAME) -or [string]::IsNullOrWhiteSpace($env:SSH_PASSWORD)) {
             Write-Host "SSH upload skipped because required secrets are missing."
             exit 0
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($env:TAILSCALE_CLIENT_ID) -and -not [string]::IsNullOrWhiteSpace($env:TAILSCALE_CLIENT_SECRET)) {
+            Write-Host "Tailscale auth secrets detected; SSH upload will use them when available."
           }
 
           python -m pip install --quiet paramiko
