@@ -117,6 +117,11 @@ beállítások a hordozható mappa `config/`, a projektek és várólisták a `d
 könyvtárában maradnak; a program futásához nem szükséges internet. Az NI-DAQmx és
 a soros adapter Windows-drivereit a célgépen külön kell telepíteni.
 
+A Windows-csomag a `constraints-windows-legacy.txt` alapján NumPy 1.26.4-et
+használ, hogy ne igényelje a NumPy 2.x `X86_V2` CPU-baseline-ját. A workflow a
+csomagolás előtt ellenőrzi a tényleges NumPy-verziót. A Core 2 Quad Q9400
+kompatibilitását az OptiPlex célgépen indított próba igazolja.
+
 ## Dokumentáció
 
 A fejlesztés előtt olvasd el az `AGENTS.md` és a `docs/` fájlokat. A még nem tisztázott kérdések a `docs/open-questions.md` dokumentumban találhatók.

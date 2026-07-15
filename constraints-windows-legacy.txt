@@ -1,0 +1,2 @@
+# Keep the packaged application compatible with the Core 2 Quad Q9400 host.
+numpy==1.26.4
