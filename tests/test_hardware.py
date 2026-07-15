@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+
 import pytest
 
+from eor_control import hardware
 from eor_control.hardware import HardwareConfiguration
 
 
@@ -52,3 +55,31 @@ def test_hardware_configuration_rejects_shared_port_and_invalid_valve_range() ->
     values["supervised_test_minutes"] = 0
     with pytest.raises(ValueError, match="test duration"):
         HardwareConfiguration(**values)  # type: ignore[arg-type]
+
+
+def test_hardware_discovery_lists_serial_and_ni_channels(monkeypatch: pytest.MonkeyPatch) -> None:
+    serial_module = SimpleNamespace(
+        comports=lambda: [
+            SimpleNamespace(device="COM7"),
+            SimpleNamespace(device="COM2"),
+        ]
+    )
+    device = SimpleNamespace(
+        ai_physical_chans=[SimpleNamespace(name="Dev1/ai1"), SimpleNamespace(name="Dev1/ai0")],
+        ao_physical_chans=[SimpleNamespace(name="Dev1/ao0")],
+    )
+    ni_module = SimpleNamespace(
+        System=SimpleNamespace(local=lambda: SimpleNamespace(devices=[device]))
+    )
+
+    def import_module(name: str) -> object:
+        return serial_module if name == "serial.tools.list_ports" else ni_module
+
+    monkeypatch.setattr(hardware.importlib, "import_module", import_module)
+
+    discovery = hardware.discover_hardware()
+
+    assert discovery.serial_ports == ("COM2", "COM7")
+    assert discovery.ni_input_channels == ("Dev1/ai0", "Dev1/ai1")
+    assert discovery.ni_output_channels == ("Dev1/ao0",)
+    assert discovery.warnings == ()

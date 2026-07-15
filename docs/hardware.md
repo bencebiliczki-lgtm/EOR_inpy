@@ -23,6 +23,10 @@ A `isco.py` adapter `RSVP` és `IDENTIFY` segítségével ellenőrzi a kapcsolat
 A kapcsolat létrehozása önmagában nem küld `REMOTE` vagy motorindító parancsot.
 A tényleges használathoz konfigurálni kell a COM-portot, a 0–9 egységazonosítót,
 az A–D pumpacsatornát, a baud rate-et és az aktuális pumpamértékegységeket.
+Az Eszközök ablak megnyitásakor és a frissítőgomb megnyomásakor az alkalmazás
+csak olvasási rendszerleltárral felderíti az elérhető COM-portokat, valamint az
+NI analóg be- és kimeneti fizikai csatornákat. A korábban mentett érték akkor is
+választható marad, ha az eszköz átmenetileg nincs csatlakoztatva.
 Ezeket, valamint a kábelezési megjegyzést a felhasználó az Eszközbeállításokban
 adja meg; a program a beállításokat megőrzi.
 

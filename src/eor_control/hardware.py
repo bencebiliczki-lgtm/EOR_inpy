@@ -1,3 +1,4 @@
+import importlib
 from dataclasses import asdict, dataclass
 from math import isfinite
 from typing import Protocol
@@ -5,6 +6,66 @@ from typing import Protocol
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
 from eor_control.isco import IscoSerialConfig, open_isco_pump
 from eor_control.ni import NidaqBackend, NidaqConfig, NidaqmxBackend
+
+
+@dataclass(frozen=True, slots=True)
+class HardwareDiscovery:
+    """Read-only inventory of communication ports and NI physical channels."""
+
+    serial_ports: tuple[str, ...] = ()
+    ni_input_channels: tuple[str, ...] = ()
+    ni_output_channels: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+def discover_hardware() -> HardwareDiscovery:
+    """List locally visible hardware without opening a port or creating an NI task."""
+
+    serial_ports: tuple[str, ...] = ()
+    ni_inputs: tuple[str, ...] = ()
+    ni_outputs: tuple[str, ...] = ()
+    warnings: list[str] = []
+
+    try:
+        list_ports = importlib.import_module("serial.tools.list_ports")
+        serial_ports = tuple(
+            sorted(
+                {str(port.device).strip() for port in list_ports.comports() if port.device},
+                key=str.casefold,
+            )
+        )
+    except Exception as error:
+        warnings.append(f"Soros portok felderítése sikertelen: {error}")
+
+    try:
+        system_module = importlib.import_module("nidaqmx.system")
+        system = system_module.System.local()
+        ni_inputs = tuple(
+            sorted(
+                {
+                    str(channel.name).strip()
+                    for device in system.devices
+                    for channel in device.ai_physical_chans
+                    if channel.name
+                },
+                key=str.casefold,
+            )
+        )
+        ni_outputs = tuple(
+            sorted(
+                {
+                    str(channel.name).strip()
+                    for device in system.devices
+                    for channel in device.ao_physical_chans
+                    if channel.name
+                },
+                key=str.casefold,
+            )
+        )
+    except Exception as error:
+        warnings.append(f"NI eszközök felderítése sikertelen: {error}")
+
+    return HardwareDiscovery(serial_ports, ni_inputs, ni_outputs, tuple(warnings))
 
 
 @dataclass(frozen=True, slots=True)

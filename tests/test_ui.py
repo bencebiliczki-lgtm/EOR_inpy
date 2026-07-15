@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication, QComboBox, QSplitter  # noqa: E402
 
 from eor_control.application import RunMode  # noqa: E402
 from eor_control.diagnostics import DiagnosticCategory  # noqa: E402
-from eor_control.hardware import ConnectionTestResult  # noqa: E402
+from eor_control.hardware import ConnectionTestResult, HardwareDiscovery  # noqa: E402
 from eor_control.projects import ProjectRepository  # noqa: E402
 from eor_control.ui import (  # noqa: E402
     DeveloperViewDialog,
@@ -31,6 +31,31 @@ def application() -> QApplication:
 class UnusedTester:
     def test(self, configuration: object) -> ConnectionTestResult:
         raise AssertionError("test should not be called directly")
+
+
+def test_device_settings_discovers_dropdown_choices(tmp_path: Path) -> None:
+    application()
+    settings = QSettings(str(tmp_path / "hardware.ini"), QSettings.Format.IniFormat)
+    dialog = DeviceSettingsDialog(
+        UnusedTester(),  # type: ignore[arg-type]
+        settings=settings,
+        current_mode=RunMode.SIMULATION,
+        discoverer=lambda: HardwareDiscovery(
+            serial_ports=("COM8", "COM9"),
+            ni_input_channels=("Dev2/ai0", "Dev2/ai1"),
+            ni_output_channels=("Dev2/ao0",),
+        ),
+    )
+
+    assert isinstance(dialog.jacket_port, QComboBox)
+    assert dialog.jacket_port.isEditable()
+    assert dialog.jacket_port.findText("COM8") >= 0
+    assert dialog.injection_port.findText("COM9") >= 0
+    assert dialog.line_channel.findText("Dev2/ai0") >= 0
+    assert dialog.delta_channel.findText("Dev2/ai1") >= 0
+    assert dialog.valve_channel.findText("Dev2/ao0") >= 0
+    assert "2 COM-port" in dialog._discovery_status.text()
+    dialog.close()
 
 
 def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None:

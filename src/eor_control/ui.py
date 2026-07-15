@@ -64,7 +64,9 @@ from eor_control.hardware import (
     ConnectionTestResult,
     HardwareConfiguration,
     HardwareConnectionTester,
+    HardwareDiscovery,
     PhysicalHardwareConnectionTester,
+    discover_hardware,
 )
 from eor_control.isco import open_isco_pump
 from eor_control.measurement import MeasurementService
@@ -427,6 +429,22 @@ class DeviceTestBridge(QObject):
     failed = Signal(str)
 
 
+class EditableSelectionComboBox(QComboBox):
+    """Editable dropdown retaining the small QLineEdit API used by this dialog."""
+
+    def __init__(self, value: str = "") -> None:
+        super().__init__()
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.setText(value)
+
+    def text(self) -> str:
+        return self.currentText()
+
+    def setText(self, value: str) -> None:
+        self.setCurrentText(value)
+
+
 class DeviceSettingsDialog(QDialog):
     def __init__(
         self,
@@ -434,11 +452,13 @@ class DeviceSettingsDialog(QDialog):
         *,
         settings: QSettings,
         current_mode: RunMode,
+        discoverer: Callable[[], HardwareDiscovery] = discover_hardware,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._tester = tester
         self._settings = settings
+        self._discoverer = discoverer
         self._test_succeeded = False
         self._configuration: HardwareConfiguration | None = None
         self.setWindowTitle("Eszközbeállítások")
@@ -459,10 +479,12 @@ class DeviceSettingsDialog(QDialog):
         channel_help.setStyleSheet("padding:8px;color:#66788a")
         layout.addWidget(channel_help)
         form = QFormLayout()
-        self.jacket_port = QLineEdit(self._stored("jacket_port", "COM3"))
+        self.jacket_port = EditableSelectionComboBox(self._stored("jacket_port", "COM3"))
         self.jacket_id = self._integer_field("jacket_unit_id", 1, 0, 9)
         self.jacket_channel = self._channel_field("jacket_channel", "A")
-        self.injection_port = QLineEdit(self._stored("injection_port", "COM4"))
+        self.injection_port = EditableSelectionComboBox(
+            self._stored("injection_port", "COM4")
+        )
         self.injection_id = self._integer_field("injection_unit_id", 2, 0, 9)
         self.injection_channel = self._channel_field("injection_channel", "A")
         self.baud_rate = QComboBox()
@@ -470,11 +492,15 @@ class DeviceSettingsDialog(QDialog):
             self.baud_rate.addItem(str(baud), baud)
         baud_index = self.baud_rate.findData(self._stored_int("baud_rate", 9600))
         self.baud_rate.setCurrentIndex(max(0, baud_index))
-        self.line_channel = QLineEdit(self._stored("line_pressure_channel", "Dev1/ai0"))
-        self.delta_channel = QLineEdit(
+        self.line_channel = EditableSelectionComboBox(
+            self._stored("line_pressure_channel", "Dev1/ai0")
+        )
+        self.delta_channel = EditableSelectionComboBox(
             self._stored("differential_pressure_channel", "Dev1/ai1")
         )
-        self.valve_channel = QLineEdit(self._stored("valve_output_channel", "Dev1/ao0"))
+        self.valve_channel = EditableSelectionComboBox(
+            self._stored("valve_output_channel", "Dev1/ao0")
+        )
         self.terminal_configuration = QComboBox()
         for label, value in (
             ("Automatikus / eszköz alapérték", "DEFAULT"),
@@ -515,6 +541,14 @@ class DeviceSettingsDialog(QDialog):
         )
         for label, widget in fields:
             form.addRow(label, widget)
+        discovery_row = QHBoxLayout()
+        self._discovery_status = QLabel()
+        self._discovery_status.setWordWrap(True)
+        refresh_button = QPushButton("Portok és NI-csatornák frissítése")
+        refresh_button.clicked.connect(self._refresh_hardware_choices)
+        discovery_row.addWidget(refresh_button)
+        discovery_row.addWidget(self._discovery_status, 1)
+        form.addRow("Eszközfelderítés", discovery_row)
         layout.addLayout(form)
         validation = QGroupBox("Helyszíni validáció felhasználói adatai")
         validation_form = QFormLayout(validation)
@@ -567,6 +601,7 @@ class DeviceSettingsDialog(QDialog):
         self._bridge = DeviceTestBridge(self)
         self._bridge.succeeded.connect(self._test_passed)
         self._bridge.failed.connect(self._test_failed)
+        self._refresh_hardware_choices()
 
     @property
     def configuration(self) -> HardwareConfiguration | None:
@@ -613,6 +648,39 @@ class DeviceSettingsDialog(QDialog):
         field.setSuffix(" V")
         field.setValue(self._stored_float(key, default))
         return field
+
+    @staticmethod
+    def _replace_choices(field: QComboBox, choices: tuple[str, ...]) -> None:
+        selected = field.currentText().strip()
+        field.clear()
+        field.addItems(choices)
+        if selected and field.findText(selected, Qt.MatchFlag.MatchFixedString) < 0:
+            field.addItem(selected)
+        field.setCurrentText(selected or (choices[0] if choices else ""))
+
+    def _refresh_hardware_choices(self) -> None:
+        try:
+            discovery = self._discoverer()
+        except Exception as error:
+            self._discovery_status.setText(f"A felderítés sikertelen: {error}")
+            self._discovery_status.setStyleSheet("color:#b00020")
+            return
+        self._replace_choices(self.jacket_port, discovery.serial_ports)
+        self._replace_choices(self.injection_port, discovery.serial_ports)
+        self._replace_choices(self.line_channel, discovery.ni_input_channels)
+        self._replace_choices(self.delta_channel, discovery.ni_input_channels)
+        self._replace_choices(self.valve_channel, discovery.ni_output_channels)
+        summary = (
+            f"{len(discovery.serial_ports)} COM-port, "
+            f"{len(discovery.ni_input_channels)} NI bemenet, "
+            f"{len(discovery.ni_output_channels)} NI kimenet"
+        )
+        if discovery.warnings:
+            summary = f"{summary}. " + " ".join(discovery.warnings)
+            self._discovery_status.setStyleSheet("color:#8a5a00")
+        else:
+            self._discovery_status.setStyleSheet("color:#1b7f3a")
+        self._discovery_status.setText(summary)
 
     def _read_configuration(self) -> HardwareConfiguration:
         return HardwareConfiguration(
