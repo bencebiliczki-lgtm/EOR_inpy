@@ -27,7 +27,7 @@ def test_hardware_configuration_builds_adapter_configs() -> None:
     assert config.jacket_config().port == "COM3"
     assert config.injection_config().unit_id == 2
     assert config.ni_config().valve_output_channel == "Dev1/ao0"
-    assert config.ni_config().inlet_pressure_channel == "Dev1/ai2"
+    assert config.ni_config().line_pressure_channel == "Dev1/ai0"
     assert config.ni_terminal_configuration == "DEFAULT"
     assert config.supervised_test_minutes == 60
 

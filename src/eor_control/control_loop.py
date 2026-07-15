@@ -57,7 +57,6 @@ class ControlLoop:
                 setpoint_bar if mode is ControlMode.AUTOMATIC else None
             ),
             use_line_pressure_for_control=source is PressureSource.LINE_SENSOR,
-            use_inlet_pressure_for_control=source is PressureSource.INLET_SENSOR,
         )
         safety = SafetyDecision(
             safe=not record.safety_reasons,
@@ -90,19 +89,20 @@ class ControlLoop:
         *,
         line_calibration: LinearCalibration,
         differential_calibration: LinearCalibration,
-        inlet_calibration: LinearCalibration | None = None,
         safety_limits: SafetyLimits,
     ) -> None:
         self._measurement.configure_measurement(
             line_calibration=line_calibration,
             differential_calibration=differential_calibration,
-            inlet_calibration=inlet_calibration,
             safety_limits=safety_limits,
         )
 
     def close(self) -> None:
         self._actuator.set_safe_state()
         self._measurement.close()
+
+    def reset_injected_volume_tracking(self) -> None:
+        self._measurement.reset_injected_volume_tracking()
 
     def request_safe_state(self) -> None:
         self._actuator.set_safe_state()

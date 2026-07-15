@@ -12,7 +12,6 @@ class SafetyLimits:
     minimum_jacket_margin_bar: float = 20.0
     max_control_overshoot_bar: float = 5.0
     max_line_pressure_bar: float = 400.0
-    max_inlet_pressure_bar: float = 400.0
 
     def __post_init__(self) -> None:
         values = (
@@ -22,7 +21,6 @@ class SafetyLimits:
             self.minimum_jacket_margin_bar,
             self.max_control_overshoot_bar,
             self.max_line_pressure_bar,
-            self.max_inlet_pressure_bar,
         )
         if not all(isfinite(value) and value > 0.0 for value in values):
             raise ValueError("safety limits must be positive and finite")
@@ -66,7 +64,6 @@ class SafetyMonitor:
             snapshot.injection_pump.remaining_volume_ml,
             snapshot.line_pressure_bar,
             snapshot.differential_pressure_bar,
-            snapshot.inlet_pressure_bar,
             snapshot.valve_percent,
             snapshot.monotonic_seconds,
         )
@@ -93,8 +90,6 @@ class SafetyMonitor:
             reasons.append("differential pressure limit reached")
         if snapshot.line_pressure_bar > self._limits.max_line_pressure_bar:
             reasons.append("line pressure limit exceeded")
-        if snapshot.inlet_pressure_bar > self._limits.max_inlet_pressure_bar:
-            reasons.append("inlet pressure limit exceeded")
         margin = snapshot.jacket_pump.pressure_bar - snapshot.injection_pump.pressure_bar
         if margin < self._limits.minimum_jacket_margin_bar:
             reasons.append("jacket pressure margin is too low")

@@ -13,7 +13,6 @@ Minden mintavételi időpontban rögzítendő:
 - a mérés kezdete óta besajtolt térfogat;
 - vonali nyomás;
 - differenciálnyomás;
-- belépő nyomás;
 - szelepvezérlés százalékos értéke;
 - aktív mérési szakasz;
 - rendszerállapot, adatminőség és aktív hibák.
@@ -27,8 +26,8 @@ A mintavételi gyakoriság 1 másodperc és 1 óra között konfigurálható. A 
   és kalibrációs pillanatképét. A projektek közösek: nincs tulajdonosuk, minden
   kezelő dolgozhat minden mérésen.
 - Egy projekt tetszőleges számú, hozzáadható és átnevezhető szakaszt tartalmazhat.
-- A szakasz típusa, folyadéka/vegyszere, cél nyomása, cél térfogatárama és
-  megjegyzése szerkeszthető; a szakaszok rendezhetők és törölhetők.
+- A szakasz neve egyben a típusa. Emellett a folyadék/vegyszer, cél nyomás, cél
+  térfogatáram és megjegyzés szerkeszthető; a szakaszok rendezhetők és törölhetők.
 - Példák: hidegvizes, melegvizes, olajkiszorításos és különböző vegyszeres szakaszok.
 - A projekt neve jelenjen meg az exportált fájl nevében.
 - Javasolt NAS-struktúra: `EOR mérés/<év>/<projekt neve>/`.
@@ -38,10 +37,12 @@ A mintavételi gyakoriság 1 másodperc és 1 óra között konfigurálható. A 
 - Kapcsolati állapot minden eszközhöz.
 - Aktuális értékek és aktív riasztások jól láthatóan.
 - Az elmúlt 10 perc élő diagramja.
+- A besajtolási térfogatáram külön, `ml/h` egységű élő diagramja.
 - A teljes rögzített mérés külön diagramja.
 - Választható adatsorok és szabadon skálázható tengelyek.
 - A szelep aktuális állásának folyamatos kijelzése.
-- A belépő nyomás külön csatornaként jelenjen meg és PID-forrásként választható legyen.
+- A vonali nyomás egyben a berendezés belépő nyomása; nem kezelhető külön,
+  duplikált érzékelőként vagy adatsorként.
 
 ## Kalibráció
 

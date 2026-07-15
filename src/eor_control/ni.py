@@ -60,13 +60,11 @@ class NidaqConfig:
     safe_output_voltage: float
     output_min_voltage: float = 1.0
     output_max_voltage: float = 5.0
-    inlet_pressure_channel: str = "Dev1/ai2"
 
     def __post_init__(self) -> None:
         channels = (
             self.line_pressure_channel,
             self.differential_pressure_channel,
-            self.inlet_pressure_channel,
             self.valve_output_channel,
         )
         if any(not channel.strip() for channel in channels):
@@ -102,7 +100,6 @@ class NidaqmxDataAcquisition:
         self._channels = {
             "line_pressure": config.line_pressure_channel,
             "differential_pressure": config.differential_pressure_channel,
-            "inlet_pressure": config.inlet_pressure_channel,
         }
 
     def authorize_output(self, confirmation: str) -> None:
@@ -121,7 +118,6 @@ class NidaqmxDataAcquisition:
         categories = {
             "line_pressure": DiagnosticCategory.NI_LINE,
             "differential_pressure": DiagnosticCategory.NI_DIFFERENTIAL,
-            "inlet_pressure": DiagnosticCategory.NI_INLET,
         }
         category = categories[channel]
         self._log(category, "RX", f"{physical_channel}={voltage:.6f} V")

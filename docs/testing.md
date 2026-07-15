@@ -17,9 +17,11 @@ besajtolt térfogat követését, az 1 másodperc–1 óra intervallumkorlátot,
 és kapcsolatvesztés utáni biztonságos állapotot, valamint a nyers CSV fejlécét és
 append működését.
 
-A belépő nyomás tesztjei lefedik a harmadik NI-csatorna leképezését, kalibrálását,
-CSV-mezőjét és önálló biztonsági maximumát. A projektadatbázis teszteli a szakaszok
-metaadatait, mozgatását és törlés utáni újraszámozását. Az adatkezelési teszt a
+A vonali nyomás egyben a belépő nyomás; a regressziós tesztek biztosítják, hogy ne
+jöjjön létre hozzá duplikált NI-csatorna, kalibráció vagy CSV-mező. A korábbi,
+`inlet_pressure_bar` oszlopot tartalmazó mérési fájlok továbbra is megnyithatók.
+A projektadatbázis teszteli a szakaszok metaadatait, mozgatását és törlés utáni
+újraszámozását. Az adatkezelési teszt a
 magyar nyers CSV mellett a régi vesszős fájlok visszafelé kompatibilis megnyitását
 és az év/projekt JSON-pillanatképeket is ellenőrzi.
 

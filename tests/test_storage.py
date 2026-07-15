@@ -38,7 +38,7 @@ def test_csv_writer_persists_header_and_measurement(tmp_path: Path) -> None:
     assert rows[0] == list(CsvMeasurementWriter.HEADER)
     assert rows[1][0] == "2026-07-13T12:30:00+00:00"
     assert rows[1][8] == "10,0"
-    assert rows[1][13:] == ["water", "good", "example fault"]
+    assert rows[1][12:] == ["water", "good", "example fault"]
 
 
 def test_csv_writer_appends_without_repeating_header(tmp_path: Path) -> None:
@@ -50,5 +50,5 @@ def test_csv_writer_appends_without_repeating_header(tmp_path: Path) -> None:
 
     rows = read_rows(path)
     assert len(rows) == 3
-    assert rows[1][13] == "first"
-    assert rows[2][13] == "second"
+    assert rows[1][12] == "first"
+    assert rows[2][12] == "second"

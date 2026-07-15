@@ -15,7 +15,6 @@ class MeasurementStage:
     name: str
     position: int
     created_at: datetime
-    stage_type: str = "custom"
     fluid: str = ""
     target_pressure_bar: float | None = None
     target_flow_ml_per_hour: float | None = None
@@ -34,7 +33,7 @@ class MeasurementProject:
 
 
 class ProjectRepository:
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,10 +75,10 @@ class ProjectRepository:
                     );
                     CREATE INDEX measurement_stages_project
                     ON measurement_stages(project_id, position);
-                    PRAGMA user_version = 2;
+                    PRAGMA user_version = 3;
                     """
                 )
-            version = 2
+            version = 3
         if version == 1:
             with self._connection:
                 self._connection.executescript(
@@ -95,6 +94,15 @@ class ProjectRepository:
                     ALTER TABLE measurement_stages
                     ADD COLUMN notes TEXT NOT NULL DEFAULT '';
                     PRAGMA user_version = 2;
+                    """
+                )
+            version = 2
+        if version == 2:
+            with self._connection:
+                self._connection.executescript(
+                    """
+                    UPDATE measurement_stages SET stage_type = name;
+                    PRAGMA user_version = 3;
                     """
                 )
 
@@ -150,7 +158,6 @@ class ProjectRepository:
         project_id: int,
         name: str,
         *,
-        stage_type: str = "custom",
         fluid: str = "",
         target_pressure_bar: float | None = None,
         target_flow_ml_per_hour: float | None = None,
@@ -160,7 +167,6 @@ class ProjectRepository:
         self._require_project(project_id)
         cleaned_name = self._validate_name(name, "stage name")
         timestamp = self._as_utc(created_at or datetime.now(UTC))
-        cleaned_type = self._validate_name(stage_type, "stage type")
         self._validate_optional_target(target_pressure_bar, "target pressure")
         self._validate_optional_target(target_flow_ml_per_hour, "target flow")
         row = self._connection.execute(
@@ -181,7 +187,7 @@ class ProjectRepository:
                     cleaned_name,
                     position,
                     timestamp.isoformat(),
-                    cleaned_type,
+                    cleaned_name,
                     fluid.strip(),
                     target_pressure_bar,
                     target_flow_ml_per_hour,
@@ -194,7 +200,6 @@ class ProjectRepository:
             name=cleaned_name,
             position=position,
             created_at=timestamp,
-            stage_type=cleaned_type,
             fluid=fluid.strip(),
             target_pressure_bar=target_pressure_bar,
             target_flow_ml_per_hour=target_flow_ml_per_hour,
@@ -206,7 +211,6 @@ class ProjectRepository:
         return self.update_stage(
             stage_id,
             name=name,
-            stage_type=stage.stage_type,
             fluid=stage.fluid,
             target_pressure_bar=stage.target_pressure_bar,
             target_flow_ml_per_hour=stage.target_flow_ml_per_hour,
@@ -218,14 +222,12 @@ class ProjectRepository:
         stage_id: int,
         *,
         name: str,
-        stage_type: str,
         fluid: str,
         target_pressure_bar: float | None,
         target_flow_ml_per_hour: float | None,
         notes: str,
     ) -> MeasurementStage:
         cleaned_name = self._validate_name(name, "stage name")
-        cleaned_type = self._validate_name(stage_type, "stage type")
         self._validate_optional_target(target_pressure_bar, "target pressure")
         self._validate_optional_target(target_flow_ml_per_hour, "target flow")
         with self._connection:
@@ -238,7 +240,7 @@ class ProjectRepository:
                 """,
                 (
                     cleaned_name,
-                    cleaned_type,
+                    cleaned_name,
                     fluid.strip(),
                     target_pressure_bar,
                     target_flow_ml_per_hour,
@@ -339,7 +341,6 @@ class ProjectRepository:
             name=cast(str, row["name"]),
             position=cast(int, row["position"]),
             created_at=datetime.fromisoformat(cast(str, row["created_at_utc"])),
-            stage_type=cast(str, row["stage_type"]),
             fluid=cast(str, row["fluid"]),
             target_pressure_bar=cast(float | None, row["target_pressure_bar"]),
             target_flow_ml_per_hour=cast(float | None, row["target_flow_ml_per_hour"]),

@@ -52,23 +52,22 @@ def test_differential_limit_is_inclusive() -> None:
     assert "differential pressure limit reached" in decision.reasons
 
 
-def test_inlet_pressure_limit_is_supervised() -> None:
+def test_line_pressure_limit_is_supervised() -> None:
     unsafe = snapshot(120.0, 100.0)
     unsafe = MeasurementSnapshot(
         recorded_at=unsafe.recorded_at,
         monotonic_seconds=unsafe.monotonic_seconds,
         jacket_pump=unsafe.jacket_pump,
         injection_pump=unsafe.injection_pump,
-        line_pressure_bar=unsafe.line_pressure_bar,
+        line_pressure_bar=401.0,
         differential_pressure_bar=unsafe.differential_pressure_bar,
         valve_percent=unsafe.valve_percent,
-        inlet_pressure_bar=401.0,
     )
 
     decision = monitor().evaluate(unsafe)
 
     assert not decision.safe
-    assert "inlet pressure limit exceeded" in decision.reasons
+    assert "line pressure limit exceeded" in decision.reasons
 
 
 @pytest.mark.parametrize("invalid_value", [float("nan"), float("inf"), float("-inf")])

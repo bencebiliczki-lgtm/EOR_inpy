@@ -22,7 +22,6 @@ class HardwareConfiguration:
     safe_output_voltage: float
     valve_zero_percent_voltage: float
     valve_hundred_percent_voltage: float
-    inlet_pressure_channel: str = "Dev1/ai2"
     ni_terminal_configuration: str = "DEFAULT"
     pump_cabling_notes: str = ""
     ni_wiring_notes: str = ""
@@ -51,7 +50,6 @@ class HardwareConfiguration:
             self.differential_pressure_channel,
             self.valve_output_channel,
             self.safe_output_voltage,
-            inlet_pressure_channel=self.inlet_pressure_channel,
         )
         if self.ni_terminal_configuration not in NidaqmxBackend.TERMINAL_CONFIGURATIONS:
             raise ValueError("unsupported NI terminal configuration")
@@ -88,7 +86,6 @@ class HardwareConfiguration:
             self.differential_pressure_channel,
             self.valve_output_channel,
             self.safe_output_voltage,
-            inlet_pressure_channel=self.inlet_pressure_channel,
         )
 
     def to_settings(self) -> dict[str, object]:
@@ -101,7 +98,6 @@ class ConnectionTestResult:
     injection_pump: str
     line_voltage: float
     differential_voltage: float
-    inlet_voltage: float = 0.0
 
 
 class HardwareConnectionTester(Protocol):
@@ -144,9 +140,6 @@ class PhysicalHardwareConnectionTester:
             differential_voltage = ni_backend.read_voltage(
                 configuration.differential_pressure_channel
             )
-            inlet_voltage = ni_backend.read_voltage(
-                configuration.inlet_pressure_channel
-            )
             if self._diagnostics is not None:
                 self._diagnostics.emit(
                     DiagnosticCategory.NI_LINE,
@@ -159,15 +152,7 @@ class PhysicalHardwareConnectionTester:
                     f"{configuration.differential_pressure_channel}="
                     f"{differential_voltage:.6f} V",
                 )
-                self._diagnostics.emit(
-                    DiagnosticCategory.NI_INLET,
-                    "TEST-RX",
-                    f"{configuration.inlet_pressure_channel}={inlet_voltage:.6f} V",
-                )
-            if not all(
-                isfinite(value)
-                for value in (line_voltage, differential_voltage, inlet_voltage)
-            ):
+            if not all(isfinite(value) for value in (line_voltage, differential_voltage)):
                 raise ConnectionError("NI connection test returned a non-finite voltage")
             return ConnectionTestResult(
                 jacket_pump=(
@@ -178,7 +163,6 @@ class PhysicalHardwareConnectionTester:
                 ),
                 line_voltage=line_voltage,
                 differential_voltage=differential_voltage,
-                inlet_voltage=inlet_voltage,
             )
         finally:
             jacket.disconnect()

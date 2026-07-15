@@ -43,24 +43,27 @@ kimeneti korlátok a dashboardon módosíthatók. Vészleállítás után a rete
 a `Hiba nyugtázása` gombbal oldható; ezt követően újra csatlakozni kell.
 Projekt létrehozásakor nem szükséges felhasználót vagy tulajdonost megadni; minden
 mérés minden kezelő számára elérhető.
+A mérési szakasz neve egyben a típusa, ezért létrehozáskor és szerkesztéskor csak
+egyetlen közös mezőt kell megadni.
 
-A dashboardon a vonali, differenciál- és belépőnyomás-csatorna kétpontos kalibrációja,
+A dashboardon a vonali és differenciálnyomás-csatorna kétpontos kalibrációja,
 valamint a köpeny-, besajtolási és differenciálnyomás-határ és a minimális
 köpenynyomás-többlet is beállítható. Ezek futó mérés közben zároltak. Az új projekt
 kalibrációs pillanatképe az aktuálisan látható értékekből készül.
 
 A dashboard reszponzív, átméretezhető hárompaneles elrendezést használ: az élő
-állapotkártyák balra, a nagy grafikon középre, a görgethető vezérlőpanel jobbra
-kerül. A
+állapotkártyák balra, a nyomás és a besajtolási ütem külön élő grafikonja középre,
+a görgethető vezérlőpanel jobbra kerül. A középső grafikonok függőlegesen
+átméretezhetők, azonos, méréskezdettől számított pozitív időtengelyt használnak. A
 `Beállítások` menüből nyitható meg a kalibrációs/biztonsági panel, valamint itt
 választható rendszer-, világos vagy sötét téma. A témaválasztás következő indításra
 is megmarad.
 
 A PID-vezérlés 100 ms-os háttérszálon fut, ezért nem blokkolja a Qt főszálat. A
 nyers adatrögzítés ettől függetlenül 1 másodperc és 1 óra között állítható. A
-dashboard külön kapcsolatjelzőt mutat a két pumpához, a három NI bemenethez és a
-szelepaktuátorhoz. A belépő nyomás külön kalibrálható, grafikonon megjeleníthető és
-automatikus PID-forrásként választható.
+dashboard külön kapcsolatjelzőt mutat a két pumpához, a két NI bemenethez és a
+szelepaktuátorhoz. A vonali nyomás a berendezés belépő nyomása is, ezért egyetlen
+csatornaként kalibrálható, jeleníthető meg és választható PID-forrásként.
 
 A program `QSettings` segítségével megőrzi az utoljára használt projektet és
 mérési szakaszt, a témát, a kézi/automata vezérlési mezőket, a PID-paramétereket,
@@ -69,9 +72,9 @@ projekt vagy sérült beállítás esetén biztonságos UI-alapértékre tér vi
 
 Az eszközök a `Beállítások` → `Eszközök…` ablakban konfigurálhatók. A dashboard és
 az ablak is jól látható `SZIMULÁCIÓ` vagy `HARDVER` módszalagot mutat. Hardvermód
-csak mindkét ISCO pumpa és mindhárom NI analóg bemenet sikeres, csak olvasási tesztje
+csak mindkét ISCO pumpa és mindkét NI analóg bemenet sikeres, csak olvasási tesztje
 után, a `HARDVER mód aktiválása` gombbal kapcsolható be.
-Mindhárom NI bemenet és a szelep NI kimenete felhasználó által megadható és külön
+Mindkét NI bemenet és a szelep NI kimenete felhasználó által megadható és külön
 menthető; egyik fizikai csatorna sincs kötelezően a forráskódba rögzítve.
 Ugyanitt választható az NI bemeneti bekötési mód, megadható a pumpa- és NI-kábelezés
 megjegyzése, a szelep 0%/100% és safe-state feszültsége, továbbá rögzíthető a

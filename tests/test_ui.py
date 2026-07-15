@@ -49,7 +49,6 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
         repository.add_stage(
             project.id,
             "Water stage",
-            stage_type="cold_water",
             fluid="water",
             target_pressure_bar=88.0,
             target_flow_ml_per_hour=10.0,
@@ -73,8 +72,13 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     assert splitter is not None
     assert splitter.count() == 3
     assert splitter.widget(0).objectName() == "status_scroll_area"
-    assert splitter.widget(1).objectName() == "live_measurement_plot"
+    assert splitter.widget(1).objectName() == "live_chart_splitter"
     assert splitter.widget(2).objectName() == "control_scroll_area"
+    chart_splitter = window.findChild(QSplitter, "live_chart_splitter")
+    assert chart_splitter is not None
+    assert chart_splitter.count() == 2
+    assert chart_splitter.widget(0).objectName() == "live_measurement_plot"
+    assert chart_splitter.widget(1).objectName() == "live_injection_flow_plot"
     configuration = window._current_configuration()
     assert configuration["pid"]["direction"] == "direct"
     window._apply_pid()
@@ -86,6 +90,19 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     assert window._valve.output_percent is not None
     assert window._connection_labels["jacket"].text() == "KAPCSOLÓDVA"
     assert window._connection_labels["line_daq"].text() == "KAPCSOLÓDVA"
+    assert "ml" in window._jacket_remaining_label.text()
+    assert "ml" in window._injection_remaining_label.text()
+    assert "ml/h" in window._injection_flow_label.text()
+    assert "Mérés óta besajtolt:" in window._injected_volume_label.text()
+    x_values, _ = window._jacket_curve.getData()
+    assert x_values is not None
+    assert all(value >= 0.0 for value in x_values)
+    assert window._plot.viewRange()[0][0] >= 0.0
+    flow_x_values, flow_values = window._flow_curve.getData()
+    assert flow_x_values is not None
+    assert flow_values is not None
+    assert len(flow_values) == len(flow_x_values)
+    assert all(value >= 0.0 for value in flow_x_values)
     window._runtime.stop()
     window._devices.stop()
     measurement_path = window._measurement_writer.current_path
@@ -139,7 +156,6 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     )
     device_dialog.line_channel.setText("Dev7/ai3")
     device_dialog.delta_channel.setText("Dev7/ai4")
-    device_dialog.inlet_channel.setText("Dev7/ai5")
     device_dialog.valve_channel.setText("Dev7/ao1")
     device_dialog.terminal_configuration.setCurrentIndex(
         device_dialog.terminal_configuration.findData("DIFFERENTIAL")
@@ -151,7 +167,6 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     device_dialog.emergency_stop_test.setChecked(True)
     device_dialog.supervised_test.setChecked(True)
     device_dialog._save_only()
-    assert restored._user_settings.value("hardware/inlet_pressure_channel") == "Dev7/ai5"
     reopened_devices = DeviceSettingsDialog(
         UnusedTester(),  # type: ignore[arg-type]
         settings=restored._user_settings,
@@ -160,7 +175,6 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     )
     assert reopened_devices.line_channel.text() == "Dev7/ai3"
     assert reopened_devices.delta_channel.text() == "Dev7/ai4"
-    assert reopened_devices.inlet_channel.text() == "Dev7/ai5"
     assert reopened_devices.valve_channel.text() == "Dev7/ao1"
     assert reopened_devices.terminal_configuration.currentData() == "DIFFERENTIAL"
     assert reopened_devices.pump_cabling_notes.text() == "Gyári null-modem kábel"

@@ -48,6 +48,18 @@ def read_measurement_table(path: Path) -> MeasurementTable:
     if not rows:
         return MeasurementTable(CsvMeasurementWriter.HEADER, ())
     header = tuple(rows[0])
+    legacy_inlet_column = "inlet_pressure_bar"
+    if (
+        legacy_inlet_column in header
+        and tuple(item for item in header if item != legacy_inlet_column)
+        == CsvMeasurementWriter.HEADER
+    ):
+        inlet_index = header.index(legacy_inlet_column)
+        rows = [
+            [value for index, value in enumerate(row) if index != inlet_index]
+            for row in rows
+        ]
+        header = tuple(rows[0])
     if header != CsvMeasurementWriter.HEADER:
         raise ValueError("a mérési CSV fejléce nem támogatott")
     width = len(header)
@@ -66,7 +78,7 @@ def export_measurement_csv(
         raise ValueError("a CSV elválasztó csak vessző, pontosvessző vagy tabulátor lehet")
     table = read_measurement_table(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    numeric_columns = set(range(1, 13))
+    numeric_columns = set(range(1, table.header.index("active_stage")))
     with destination.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.writer(file, delimiter=delimiter, lineterminator="\n")
         writer.writerow(table.header)
@@ -95,7 +107,7 @@ def export_measurement_excel(source: Path, destination: Path) -> None:
     sheet.title = "Mérési adatok"
     sheet.freeze_panes = "A2"
     sheet.append(list(table.header))
-    numeric_columns = set(range(1, 13))
+    numeric_columns = set(range(1, table.header.index("active_stage")))
     for source_row in table.rows:
         row: list[str | float] = list(source_row)
         for index in numeric_columns:

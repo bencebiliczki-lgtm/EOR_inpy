@@ -53,7 +53,7 @@ def loop(
     jacket.connect()
     injection.connect()
     daq = SimulatedDataAcquisition()
-    daq.inputs.update(line_pressure=2.0, differential_pressure=1.5, inlet_pressure=2.0)
+    daq.inputs.update(line_pressure=2.0, differential_pressure=1.5)
     writer = MemoryWriter()
     calibration = LinearCalibration(1.0, 5.0, 0.0, 400.0)
     measurement = MeasurementService(

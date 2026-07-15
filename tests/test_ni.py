@@ -24,12 +24,11 @@ def config() -> NidaqConfig:
 
 
 def test_inputs_use_configured_physical_channels() -> None:
-    backend = FakeBackend({"Dev1/ai0": 2.0, "Dev1/ai1": 1.5, "Dev1/ai2": 2.5})
+    backend = FakeBackend({"Dev1/ai0": 2.0, "Dev1/ai1": 1.5})
     daq = NidaqmxDataAcquisition(backend, config())
 
     assert daq.read_voltage("line_pressure") == 2.0
     assert daq.read_voltage("differential_pressure") == 1.5
-    assert daq.read_voltage("inlet_pressure") == 2.5
 
 
 def test_output_requires_exact_confirmation_and_range() -> None:

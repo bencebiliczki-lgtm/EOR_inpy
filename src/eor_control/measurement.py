@@ -25,7 +25,6 @@ class SystemClock:
 class MeasurementChannels:
     line_pressure: str = "line_pressure"
     differential_pressure: str = "differential_pressure"
-    inlet_pressure: str = "inlet_pressure"
 
 
 class MeasurementService:
@@ -37,7 +36,6 @@ class MeasurementService:
         daq: DataAcquisition,
         line_calibration: LinearCalibration,
         differential_calibration: LinearCalibration,
-        inlet_calibration: LinearCalibration | None = None,
         safety_monitor: SafetyMonitor,
         writer: MeasurementWriter,
         clock: Clock | None = None,
@@ -48,12 +46,15 @@ class MeasurementService:
         self._daq = daq
         self._line_calibration = line_calibration
         self._differential_calibration = differential_calibration
-        self._inlet_calibration = inlet_calibration or line_calibration
         self._safety_monitor = safety_monitor
         self._writer = writer
         self._clock = clock or SystemClock()
         self._channels = channels or MeasurementChannels()
         self._initial_injection_volume_ml: float | None = None
+
+    def reset_injected_volume_tracking(self) -> None:
+        """Start the injected-volume counter from the next acquired pump status."""
+        self._initial_injection_volume_ml = None
 
     def sample_once(
         self,
@@ -64,7 +65,6 @@ class MeasurementService:
         control_deadline_missed: bool = False,
         pressure_target_bar: float | None = None,
         use_line_pressure_for_control: bool = False,
-        use_inlet_pressure_for_control: bool = False,
     ) -> MeasurementRecord:
         jacket = self._jacket_pump.read_status()
         injection = self._injection_pump.read_status()
@@ -83,15 +83,8 @@ class MeasurementService:
                 self._daq.read_voltage(self._channels.differential_pressure)
             ),
             valve_percent=valve_percent,
-            inlet_pressure_bar=self._inlet_calibration.convert(
-                self._daq.read_voltage(self._channels.inlet_pressure)
-            ),
         )
-        if use_line_pressure_for_control and use_inlet_pressure_for_control:
-            raise ValueError("only one external pressure source can control the valve")
-        if use_inlet_pressure_for_control:
-            controlled_pressure = snapshot.inlet_pressure_bar
-        elif use_line_pressure_for_control:
+        if use_line_pressure_for_control:
             controlled_pressure = snapshot.line_pressure_bar
         else:
             controlled_pressure = snapshot.injection_pump.pressure_bar
@@ -155,12 +148,10 @@ class MeasurementService:
         *,
         line_calibration: LinearCalibration,
         differential_calibration: LinearCalibration,
-        inlet_calibration: LinearCalibration | None = None,
         safety_limits: SafetyLimits,
     ) -> None:
         self._line_calibration = line_calibration
         self._differential_calibration = differential_calibration
-        self._inlet_calibration = inlet_calibration or line_calibration
         self._safety_monitor.configure(safety_limits)
 
     def close(self) -> None:

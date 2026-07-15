@@ -14,7 +14,6 @@ class ControlMode(StrEnum):
 class PressureSource(StrEnum):
     INJECTION_PUMP = "injection_pump"
     LINE_SENSOR = "line_sensor"
-    INLET_SENSOR = "inlet_sensor"
 
 
 class ControlDirection(StrEnum):
@@ -150,7 +149,6 @@ class ValveController:
         measurements = {
             PressureSource.INJECTION_PUMP: snapshot.injection_pump.pressure_bar,
             PressureSource.LINE_SENSOR: snapshot.line_pressure_bar,
-            PressureSource.INLET_SENSOR: snapshot.inlet_pressure_bar,
         }
         measurement = measurements[source]
         output = self._pid.calculate(

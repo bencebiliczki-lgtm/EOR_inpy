@@ -28,12 +28,12 @@ adja meg; a program a beállításokat megőrzi.
 
 ## NI USB-6001
 
-A konfiguráció három analóg nyomásbemenetet kezel: vonali, differenciál- és belépő
-nyomást. A fizikai csatornaneveket a felhasználó adja meg az Eszközbeállításokban;
-a program megőrzi és a csak olvasási kapcsolatpróbán ellenőrzi őket. A belépő
-nyomás kezdőértéke `Dev1/ai2`, de szabadon átírható. Mindhárom csatorna külön
-kalibrálható; ismert kiinduló tartományuk 1–5 V, a vonali és belépő érzékelő
-alapértelmezett leképezése 0–400 bar.
+A konfiguráció két analóg nyomásbemenetet kezel: vonali és differenciálnyomást.
+A vonali nyomás egyben a berendezés belépő nyomása, ezért nem tartozik hozzá külön
+harmadik NI-csatorna. A fizikai csatornaneveket a felhasználó adja meg az
+Eszközbeállításokban; a program megőrzi és a csak olvasási kapcsolatpróbán
+ellenőrzi őket. Mindkét csatorna külön kalibrálható; ismert kiinduló
+jeltartományuk 1–5 V, a vonali érzékelő alapértelmezett leképezése 0–400 bar.
 
 - USB-kapcsolat a Windows géppel.
 - Analóg bemenet: vonali nyomásmérő.
@@ -47,7 +47,7 @@ alapértelmezett leképezése 0–400 bar.
 
 ### Implementált adapter
 
-A `ni.py` logikai `line_pressure`, `differential_pressure`, `inlet_pressure` és `valve_output`
+A `ni.py` logikai `line_pressure`, `differential_pressure` és `valve_output`
 csatornákat köt konfigurált NI fizikai csatornákhoz. A fizikai analóg kimenet külön,
 pontos megerősítő szöveg nélkül tiltott. A safe-state feszültséget és az engedélyezett
 kimeneti tartományt kötelező konfigurálni; a kód nem választ helyettük alapértelmezett

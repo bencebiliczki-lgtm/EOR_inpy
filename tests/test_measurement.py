@@ -53,7 +53,7 @@ def service(
     jacket.connect()
     injection.connect()
     daq = SimulatedDataAcquisition()
-    daq.inputs.update(line_pressure=2.0, differential_pressure=1.5, inlet_pressure=2.5)
+    daq.inputs.update(line_pressure=2.0, differential_pressure=1.5)
     writer = MemoryWriter()
     calibration = LinearCalibration(1.0, 5.0, 0.0, 400.0)
     measurement_service = MeasurementService(
@@ -77,9 +77,12 @@ def test_sample_calibrates_and_tracks_injected_volume() -> None:
 
     assert first.snapshot.line_pressure_bar == pytest.approx(100.0)
     assert first.snapshot.differential_pressure_bar == pytest.approx(5.0)
-    assert first.snapshot.inlet_pressure_bar == pytest.approx(150.0)
     assert second.injected_volume_ml == pytest.approx(2.5)
     assert writer.records == [first, second]
+
+    measurement_service.reset_injected_volume_tracking()
+    restarted = measurement_service.sample_once(active_stage="water", valve_percent=25.0)
+    assert restarted.injected_volume_ml == pytest.approx(0.0)
 
 
 def test_non_persistent_control_sample_is_not_written() -> None:

@@ -60,20 +60,16 @@ def test_stage_metadata_can_be_edited_reordered_and_deleted(tmp_path: Path) -> N
         water = repository.add_stage(
             project_id,
             "Cold water",
-            stage_type="cold_water",
             fluid="water",
             target_pressure_bar=100.0,
             target_flow_ml_per_hour=10.0,
             notes="baseline",
         )
-        chemical = repository.add_stage(
-            project_id, "Chemical A", stage_type="chemical", fluid="A"
-        )
+        chemical = repository.add_stage(project_id, "Chemical A", fluid="A")
         repository.move_stage(chemical.id, -1)
         repository.update_stage(
             chemical.id,
             name="Chemical A updated",
-            stage_type="chemical",
             fluid="Chemical A",
             target_pressure_bar=120.0,
             target_flow_ml_per_hour=8.0,
@@ -154,12 +150,13 @@ def test_version_one_database_is_migrated_with_stage_metadata(tmp_path: Path) ->
 
     with ProjectRepository(path) as repository:
         project_id = create_project(repository)
-        stage = repository.add_stage(
-            project_id, "Chemical", stage_type="chemical", fluid="A"
-        )
+        stage = repository.add_stage(project_id, "Chemical", fluid="A")
 
-    assert stage.stage_type == "chemical"
+    assert stage.name == "Chemical"
     assert stage.fluid == "A"
     check = sqlite3.connect(path)
-    assert check.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert check.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert check.execute(
+        "SELECT stage_type FROM measurement_stages WHERE id = ?", (stage.id,)
+    ).fetchone()[0] == "Chemical"
     check.close()

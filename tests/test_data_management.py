@@ -13,6 +13,7 @@ from eor_control.data_management import (
     safe_filename,
 )
 from eor_control.domain import MeasurementRecord, MeasurementSnapshot, PumpStatus
+from eor_control.storage import CsvMeasurementWriter
 
 
 def record() -> MeasurementRecord:
@@ -55,15 +56,15 @@ def test_project_writer_creates_portable_json_snapshots(tmp_path: Path) -> None:
         created_at=datetime(2025, 3, 4, tzinfo=UTC),
         notes="Megjegyzés",
         configuration={"interval": 5},
-        calibration_snapshot={"inlet": [1.0, 5.0, 0.0, 400.0]},
-        stages=[{"name": "Hidegvizes", "type": "cold_water"}],
+        calibration_snapshot={"line": [1.0, 5.0, 0.0, 400.0]},
+        stages=[{"name": "Hidegvizes", "type": "Hidegvizes"}],
     )
     writer.close()
 
     assert source.parent.parent.name == "2025"
     project = json.loads((source.parent / "project.json").read_text(encoding="utf-8"))
     assert project["name"] == "Kőzet A"
-    assert project["stages"] == [{"name": "Hidegvizes", "type": "cold_water"}]
+    assert project["stages"] == [{"name": "Hidegvizes", "type": "Hidegvizes"}]
     assert json.loads(
         (source.parent / "config_snapshot.json").read_text(encoding="utf-8")
     ) == {"interval": 5}
@@ -113,6 +114,8 @@ def test_reader_keeps_legacy_comma_delimited_raw_files_compatible(tmp_path: Path
     table = read_measurement_table(source)
 
     assert table.rows[0][2] == "1.5"
+    assert table.header == CsvMeasurementWriter.HEADER
+    assert "inlet_pressure_bar" not in table.header
 
 
 def test_excel_export_contains_data_and_chart_sheet(tmp_path: Path) -> None:

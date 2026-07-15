@@ -129,11 +129,11 @@ def application_icon() -> QIcon:
 
 
 DEFAULT_STAGE_TEMPLATES = (
-    ("Hidegvizes mérés", "cold_water", "víz"),
-    ("Melegvizes mérés", "hot_water", "víz"),
-    ("Olajkiszorítás", "oil_displacement", "olaj"),
-    ("Vegyszeres mérés", "chemical", ""),
-    ("Öblítés", "flushing", ""),
+    ("Hidegvizes mérés", "víz"),
+    ("Melegvizes mérés", "víz"),
+    ("Olajkiszorítás", "olaj"),
+    ("Vegyszeres mérés", ""),
+    ("Öblítés", ""),
 )
 
 
@@ -141,8 +141,8 @@ def create_default_stages(
     repository: ProjectRepository, project_id: int
 ) -> MeasurementStage:
     stages = tuple(
-        repository.add_stage(project_id, name, stage_type=stage_type, fluid=fluid)
-        for name, stage_type, fluid in DEFAULT_STAGE_TEMPLATES
+        repository.add_stage(project_id, name, fluid=fluid)
+        for name, fluid in DEFAULT_STAGE_TEMPLATES
     )
     return stages[0]
 
@@ -153,7 +153,7 @@ def stage_snapshots(project: MeasurementProject) -> list[dict[str, object]]:
             "id": stage.id,
             "name": stage.name,
             "position": stage.position,
-            "type": stage.stage_type,
+            "type": stage.name,
             "fluid": stage.fluid,
             "target_pressure_bar": stage.target_pressure_bar,
             "target_flow_ml_per_hour": stage.target_flow_ml_per_hour,
@@ -164,13 +164,12 @@ def stage_snapshots(project: MeasurementProject) -> list[dict[str, object]]:
 
 
 class StageSettingsDialog(QDialog):
-    STAGE_TYPES = (
-        ("Hidegvizes mérés", "cold_water"),
-        ("Melegvizes mérés", "hot_water"),
-        ("Olajkiszorítás", "oil_displacement"),
-        ("Vegyszeres mérés", "chemical"),
-        ("Öblítés", "flushing"),
-        ("Egyéb", "custom"),
+    STAGE_NAMES = (
+        "Hidegvizes mérés",
+        "Melegvizes mérés",
+        "Olajkiszorítás",
+        "Vegyszeres mérés",
+        "Öblítés",
     )
 
     def __init__(
@@ -180,13 +179,10 @@ class StageSettingsDialog(QDialog):
         self.setWindowTitle("Mérési szakasz")
         layout = QVBoxLayout(self)
         form = QFormLayout()
-        self.name = QLineEdit(stage.name if stage else "")
-        self.stage_type = QComboBox()
-        for label, value in self.STAGE_TYPES:
-            self.stage_type.addItem(label, value)
-        if stage is not None:
-            index = self.stage_type.findData(stage.stage_type)
-            self.stage_type.setCurrentIndex(index if index >= 0 else len(self.STAGE_TYPES) - 1)
+        self.name = QComboBox()
+        self.name.setEditable(True)
+        self.name.addItems(self.STAGE_NAMES)
+        self.name.setCurrentText(stage.name if stage else self.STAGE_NAMES[0])
         self.fluid = QLineEdit(stage.fluid if stage else "")
         self.target_pressure = self._optional_value(" bar")
         self.target_flow = self._optional_value(" ml/h")
@@ -195,8 +191,7 @@ class StageSettingsDialog(QDialog):
         if stage is not None and stage.target_flow_ml_per_hour is not None:
             self.target_flow.setValue(stage.target_flow_ml_per_hour)
         self.notes = QLineEdit(stage.notes if stage else "")
-        form.addRow("Szakasz neve", self.name)
-        form.addRow("Szakasz típusa", self.stage_type)
+        form.addRow("Szakasz neve és típusa", self.name)
         form.addRow("Folyadék / vegyszer", self.fluid)
         form.addRow("Cél nyomás", self.target_pressure)
         form.addRow("Cél térfogatáram", self.target_flow)
@@ -220,8 +215,7 @@ class StageSettingsDialog(QDialog):
 
     def values(self) -> dict[str, object]:
         return {
-            "name": self.name.text(),
-            "stage_type": str(self.stage_type.currentData()),
+            "name": self.name.currentText(),
             "fluid": self.fluid.text(),
             "target_pressure_bar": (
                 None if self.target_pressure.value() < 0.0 else self.target_pressure.value()
@@ -359,7 +353,6 @@ class ProjectSettingsDialog(QDialog):
                 stage = self._repository.add_stage(
                     project_id,
                     str(values["name"]),
-                    stage_type=str(values["stage_type"]),
                     fluid=str(values["fluid"]),
                     target_pressure_bar=cast(float | None, values["target_pressure_bar"]),
                     target_flow_ml_per_hour=cast(
@@ -384,7 +377,6 @@ class ProjectSettingsDialog(QDialog):
                 self._repository.update_stage(
                     stage_id,
                     name=str(values["name"]),
-                    stage_type=str(values["stage_type"]),
                     fluid=str(values["fluid"]),
                     target_pressure_bar=cast(float | None, values["target_pressure_bar"]),
                     target_flow_ml_per_hour=cast(
@@ -482,9 +474,6 @@ class DeviceSettingsDialog(QDialog):
         self.delta_channel = QLineEdit(
             self._stored("differential_pressure_channel", "Dev1/ai1")
         )
-        self.inlet_channel = QLineEdit(
-            self._stored("inlet_pressure_channel", "Dev1/ai2")
-        )
         self.valve_channel = QLineEdit(self._stored("valve_output_channel", "Dev1/ao0"))
         self.terminal_configuration = QComboBox()
         for label, value in (
@@ -516,7 +505,6 @@ class DeviceSettingsDialog(QDialog):
             ("Baud rate", self.baud_rate),
             ("Vonali nyomás NI csatorna", self.line_channel),
             ("Differenciálnyomás NI csatorna", self.delta_channel),
-            ("Belépő nyomás NI csatorna", self.inlet_channel),
             ("Szelep NI kimenet", self.valve_channel),
             ("NI bemeneti bekötési mód", self.terminal_configuration),
             ("Pumpakábelezés megjegyzése", self.pump_cabling_notes),
@@ -637,7 +625,6 @@ class DeviceSettingsDialog(QDialog):
             baud_rate=int(self.baud_rate.currentData()),
             line_pressure_channel=self.line_channel.text(),
             differential_pressure_channel=self.delta_channel.text(),
-            inlet_pressure_channel=self.inlet_channel.text(),
             valve_output_channel=self.valve_channel.text(),
             safe_output_voltage=self.safe_voltage.value(),
             valve_zero_percent_voltage=self.zero_voltage.value(),
@@ -687,7 +674,6 @@ class DeviceSettingsDialog(QDialog):
             f"Besajtolópumpa: {result.injection_pump}\n"
             f"Vonali AI: {result.line_voltage:.4f} V\n"
             f"Differenciál AI: {result.differential_voltage:.4f} V"
-            f"\nBelépő AI: {result.inlet_voltage:.4f} V"
         )
         self._result_label.setStyleSheet("color:#1b7f3a;font-weight:700")
 
@@ -1185,7 +1171,6 @@ class MeasurementHistoryDialog(QDialog):
         ("injection_pressure_bar", "Besajtolási nyomás", "#c62828"),
         ("line_pressure_bar", "Vonali nyomás", "#2e7d32"),
         ("differential_pressure_bar", "Differenciálnyomás", "#8e24aa"),
-        ("inlet_pressure_bar", "Belépő nyomás", "#ef6c00"),
         ("jacket_flow_ml_per_hour", "Köpeny térfogatáram", "#00838f"),
         ("jacket_remaining_volume_ml", "Köpeny maradék térfogat", "#5c6bc0"),
         ("injection_flow_ml_per_hour", "Besajtolási térfogatáram", "#ef6c00"),
@@ -1345,6 +1330,7 @@ class DashboardWindow(QMainWindow):
         self._nas_sync = nas_sync
         self._run_mode = RunMode.SIMULATION
         self._pump_control: PumpControlService | None = None
+        self._measurement_time_origin: float | None = None
         self._diagnostics = DiagnosticLogger(
             data_directory / "logs" / "communication.log"
         )
@@ -1354,8 +1340,8 @@ class DashboardWindow(QMainWindow):
         self._times: deque[float] = deque(maxlen=6000)
         self._jacket_pressures: deque[float] = deque(maxlen=6000)
         self._injection_pressures: deque[float] = deque(maxlen=6000)
+        self._injection_flows: deque[float] = deque(maxlen=6000)
         self._line_pressures: deque[float] = deque(maxlen=6000)
-        self._inlet_pressures: deque[float] = deque(maxlen=6000)
         self._runtime_bridge = RuntimeBridge(self)
         self._runtime_bridge.cycle_completed.connect(self._handle_cycle)
         self._runtime_bridge.fault_raised.connect(self._handle_runtime_fault)
@@ -1397,9 +1383,12 @@ class DashboardWindow(QMainWindow):
         self._state_label = QLabel()
         self._jacket_label = QLabel("— bar")
         self._injection_label = QLabel("— bar")
+        self._jacket_remaining_label = QLabel("Maradék folyadék: — ml")
+        self._injection_remaining_label = QLabel("Maradék folyadék: — ml")
+        self._injection_flow_label = QLabel("Besajtolási sebesség: — ml/h")
+        self._injected_volume_label = QLabel("Mérés óta besajtolt: — ml")
         self._line_label = QLabel("— bar")
         self._delta_label = QLabel("— bar")
-        self._inlet_label = QLabel("— bar")
         self._valve_label = QLabel("— %")
         labels = (
             ("Rendszerállapot", self._state_label),
@@ -1407,7 +1396,6 @@ class DashboardWindow(QMainWindow):
             ("Besajtolópumpa", self._injection_label),
             ("Vonali nyomás", self._line_label),
             ("Differenciálnyomás", self._delta_label),
-            ("Belépő nyomás", self._inlet_label),
             ("Szelep", self._valve_label),
         )
         self._connection_labels: dict[str, QLabel] = {}
@@ -1417,7 +1405,6 @@ class DashboardWindow(QMainWindow):
             "injection",
             "line_daq",
             "delta_daq",
-            "inlet_daq",
             "valve",
         )
         for index, (title, value) in enumerate(labels):
@@ -1426,6 +1413,19 @@ class DashboardWindow(QMainWindow):
             box_layout = QVBoxLayout(box)
             value.setStyleSheet("font-size: 20px; font-weight: 600")
             box_layout.addWidget(value)
+            if title == "Köpenypumpa":
+                self._jacket_remaining_label.setStyleSheet(
+                    "color:#66788a;font-size:12px;font-weight:600"
+                )
+                box_layout.addWidget(self._jacket_remaining_label)
+            elif title == "Besajtolópumpa":
+                for detail in (
+                    self._injection_remaining_label,
+                    self._injection_flow_label,
+                    self._injected_volume_label,
+                ):
+                    detail.setStyleSheet("color:#66788a;font-size:12px;font-weight:600")
+                    box_layout.addWidget(detail)
             connection_key = connection_keys[index]
             if connection_key is not None:
                 connection = QLabel("NINCS ADAT")
@@ -1513,7 +1513,6 @@ class DashboardWindow(QMainWindow):
         self._source = QComboBox()
         self._source.addItem("Besajtolópumpa", PressureSource.INJECTION_PUMP)
         self._source.addItem("Vonali nyomás", PressureSource.LINE_SENSOR)
-        self._source.addItem("Belépő nyomás", PressureSource.INLET_SENSOR)
         self._manual_output = QDoubleSpinBox()
         self._manual_output.setRange(0.0, 100.0)
         self._manual_output.setValue(25.0)
@@ -1572,15 +1571,10 @@ class DashboardWindow(QMainWindow):
         self._delta_voltage_max = self._value_spinbox(5.0, -10.0, 10.0, " V")
         self._delta_value_min = self._value_spinbox(0.0, -1000.0, 1000.0, " bar")
         self._delta_value_max = self._value_spinbox(40.0, -1000.0, 1000.0, " bar")
-        self._inlet_voltage_min = self._value_spinbox(1.0, -10.0, 10.0, " V")
-        self._inlet_voltage_max = self._value_spinbox(5.0, -10.0, 10.0, " V")
-        self._inlet_value_min = self._value_spinbox(0.0, -1000.0, 1000.0, " bar")
-        self._inlet_value_max = self._value_spinbox(400.0, -1000.0, 1000.0, " bar")
         self._max_jacket = self._value_spinbox(400.0, 0.1, 1000.0, " bar")
         self._max_injection = self._value_spinbox(350.0, 0.1, 1000.0, " bar")
         self._max_delta = self._value_spinbox(50.0, 0.1, 1000.0, " bar")
         self._max_line = self._value_spinbox(400.0, 0.1, 1000.0, " bar")
-        self._max_inlet = self._value_spinbox(400.0, 0.1, 1000.0, " bar")
         self._minimum_margin = self._value_spinbox(20.0, 0.1, 1000.0, " bar")
         self._max_overshoot = self._value_spinbox(5.0, 0.1, 1000.0, " bar")
         calibration_fields = (
@@ -1592,15 +1586,10 @@ class DashboardWindow(QMainWindow):
             ("Δp U max", self._delta_voltage_max),
             ("Δp érték min", self._delta_value_min),
             ("Δp érték max", self._delta_value_max),
-            ("Belépő U min", self._inlet_voltage_min),
-            ("Belépő U max", self._inlet_voltage_max),
-            ("Belépő érték min", self._inlet_value_min),
-            ("Belépő érték max", self._inlet_value_max),
             ("Köpeny maximum", self._max_jacket),
             ("Besajtolás maximum", self._max_injection),
             ("Vonali maximum", self._max_line),
             ("Δp maximum", self._max_delta),
-            ("Belépő maximum", self._max_inlet),
             ("Min. köpenytöbblet", self._minimum_margin),
             ("Max. céltúllövés", self._max_overshoot),
         )
@@ -1625,14 +1614,35 @@ class DashboardWindow(QMainWindow):
         self._plot.setObjectName("live_measurement_plot")
         self._plot.setMinimumWidth(480)
         self._plot.setLabel("left", "Nyomás", units="bar")
-        self._plot.setLabel("bottom", "Idő", units="s")
+        self._plot.setLabel("bottom", "Mérés kezdete óta eltelt idő", units="s")
+        self._plot.setLimits(xMin=0.0)
         self._plot.showGrid(x=True, y=True, alpha=0.22)
         self._plot.setMouseEnabled(x=True, y=True)
         self._plot.addLegend()
         self._jacket_curve = self._plot.plot(pen="#1565c0", name="Köpeny")
         self._injection_curve = self._plot.plot(pen="#c62828", name="Besajtolás")
         self._line_curve = self._plot.plot(pen="#2e7d32", name="Vonali")
-        self._inlet_curve = self._plot.plot(pen="#ef6c00", name="Belépő")
+        self._flow_plot = pg.PlotWidget(title="Elmúlt 10 perc besajtolási üteme")
+        self._flow_plot.setObjectName("live_injection_flow_plot")
+        self._flow_plot.setMinimumWidth(480)
+        self._flow_plot.setLabel("left", "Besajtolási sebesség", units="ml/h")
+        self._flow_plot.setLabel(
+            "bottom", "Mérés kezdete óta eltelt idő", units="s"
+        )
+        self._flow_plot.setLimits(xMin=0.0)
+        self._flow_plot.showGrid(x=True, y=True, alpha=0.22)
+        self._flow_plot.setMouseEnabled(x=True, y=True)
+        self._flow_curve = self._flow_plot.plot(
+            pen=pg.mkPen("#8e24aa", width=2), name="Besajtolási ütem"
+        )
+        chart_splitter = QSplitter(Qt.Orientation.Vertical)
+        chart_splitter.setObjectName("live_chart_splitter")
+        chart_splitter.setChildrenCollapsible(False)
+        chart_splitter.addWidget(self._plot)
+        chart_splitter.addWidget(self._flow_plot)
+        chart_splitter.setStretchFactor(0, 2)
+        chart_splitter.setStretchFactor(1, 1)
+        chart_splitter.setSizes([520, 260])
         left_scroll = QScrollArea()
         left_scroll.setObjectName("status_scroll_area")
         left_scroll.setWidgetResizable(True)
@@ -1648,7 +1658,7 @@ class DashboardWindow(QMainWindow):
         splitter.setObjectName("dashboard_splitter")
         splitter.setChildrenCollapsible(False)
         splitter.addWidget(left_scroll)
-        splitter.addWidget(self._plot)
+        splitter.addWidget(chart_splitter)
         splitter.addWidget(right_scroll)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 5)
@@ -1812,14 +1822,16 @@ class DashboardWindow(QMainWindow):
             return
         if theme == "dark":
             application.setStyleSheet(DARK_STYLESHEET)
-            self._plot.setBackground("#15191f")
-            self._plot.getAxis("left").setTextPen("#e6edf3")
-            self._plot.getAxis("bottom").setTextPen("#e6edf3")
+            for plot in (self._plot, self._flow_plot):
+                plot.setBackground("#15191f")
+                plot.getAxis("left").setTextPen("#e6edf3")
+                plot.getAxis("bottom").setTextPen("#e6edf3")
         elif theme == "light":
             application.setStyleSheet(LIGHT_STYLESHEET)
-            self._plot.setBackground("#ffffff")
-            self._plot.getAxis("left").setTextPen("#263238")
-            self._plot.getAxis("bottom").setTextPen("#263238")
+            for plot in (self._plot, self._flow_plot):
+                plot.setBackground("#ffffff")
+                plot.getAxis("left").setTextPen("#263238")
+                plot.getAxis("bottom").setTextPen("#263238")
         else:
             application.setStyleSheet("")
             application.setPalette(application.style().standardPalette())
@@ -1913,7 +1925,6 @@ class DashboardWindow(QMainWindow):
             daq=daq,
             line_calibration=LinearCalibration(*self._line_calibration_values()),
             differential_calibration=LinearCalibration(*self._delta_calibration_values()),
-            inlet_calibration=LinearCalibration(*self._inlet_calibration_values()),
             safety_monitor=SafetyMonitor(
                 SafetyLimits(
                     self._max_jacket.value(),
@@ -1922,7 +1933,6 @@ class DashboardWindow(QMainWindow):
                     self._minimum_margin.value(),
                     self._max_overshoot.value(),
                     self._max_line.value(),
-                    self._max_inlet.value(),
                 )
             ),
             writer=writer,
@@ -2009,15 +2019,10 @@ class DashboardWindow(QMainWindow):
             (self._delta_voltage_max, "calibration/delta_voltage_max"),
             (self._delta_value_min, "calibration/delta_value_min"),
             (self._delta_value_max, "calibration/delta_value_max"),
-            (self._inlet_voltage_min, "calibration/inlet_voltage_min"),
-            (self._inlet_voltage_max, "calibration/inlet_voltage_max"),
-            (self._inlet_value_min, "calibration/inlet_value_min"),
-            (self._inlet_value_max, "calibration/inlet_value_max"),
             (self._max_jacket, "safety/max_jacket"),
             (self._max_injection, "safety/max_injection"),
             (self._max_delta, "safety/max_delta"),
             (self._max_line, "safety/max_line"),
-            (self._max_inlet, "safety/max_inlet"),
             (self._minimum_margin, "safety/minimum_margin"),
             (self._max_overshoot, "safety/max_overshoot"),
         )
@@ -2072,15 +2077,10 @@ class DashboardWindow(QMainWindow):
             "calibration/delta_voltage_max": self._delta_voltage_max.value(),
             "calibration/delta_value_min": self._delta_value_min.value(),
             "calibration/delta_value_max": self._delta_value_max.value(),
-            "calibration/inlet_voltage_min": self._inlet_voltage_min.value(),
-            "calibration/inlet_voltage_max": self._inlet_voltage_max.value(),
-            "calibration/inlet_value_min": self._inlet_value_min.value(),
-            "calibration/inlet_value_max": self._inlet_value_max.value(),
             "safety/max_jacket": self._max_jacket.value(),
             "safety/max_injection": self._max_injection.value(),
             "safety/max_delta": self._max_delta.value(),
             "safety/max_line": self._max_line.value(),
-            "safety/max_inlet": self._max_inlet.value(),
             "safety/minimum_margin": self._minimum_margin.value(),
             "safety/max_overshoot": self._max_overshoot.value(),
         }
@@ -2195,7 +2195,7 @@ class DashboardWindow(QMainWindow):
         stage_id = self._stage.currentData()
         if isinstance(stage_id, int):
             stage = self._projects.get_stage(stage_id)
-            details = [stage.stage_type]
+            details: list[str] = []
             if stage.fluid:
                 details.append(stage.fluid)
             if stage.target_pressure_bar is not None:
@@ -2218,7 +2218,6 @@ class DashboardWindow(QMainWindow):
             calibration_snapshot={
                 "line_pressure": self._line_calibration_values(),
                 "differential_pressure": self._delta_calibration_values(),
-                "inlet_pressure": self._inlet_calibration_values(),
             },
             parent=self,
         )
@@ -2247,7 +2246,6 @@ class DashboardWindow(QMainWindow):
                 calibration_snapshot={
                     "line_pressure": self._line_calibration_values(),
                     "differential_pressure": self._delta_calibration_values(),
-                    "inlet_pressure": self._inlet_calibration_values(),
                 },
             )
             create_default_stages(self._projects, project.id)
@@ -2310,9 +2308,6 @@ class DashboardWindow(QMainWindow):
                 differential_calibration=LinearCalibration(
                     *self._delta_calibration_values()
                 ),
-                inlet_calibration=LinearCalibration(
-                    *self._inlet_calibration_values()
-                ),
                 safety_limits=SafetyLimits(
                     self._max_jacket.value(),
                     self._max_injection.value(),
@@ -2320,7 +2315,6 @@ class DashboardWindow(QMainWindow):
                     self._minimum_margin.value(),
                     self._max_overshoot.value(),
                     self._max_line.value(),
-                    self._max_inlet.value(),
                 ),
             )
         except ValueError as error:
@@ -2340,14 +2334,6 @@ class DashboardWindow(QMainWindow):
             self._delta_voltage_max.value(),
             self._delta_value_min.value(),
             self._delta_value_max.value(),
-        ]
-
-    def _inlet_calibration_values(self) -> list[float]:
-        return [
-            self._inlet_voltage_min.value(),
-            self._inlet_voltage_max.value(),
-            self._inlet_value_min.value(),
-            self._inlet_value_max.value(),
         ]
 
     def _current_configuration(self) -> dict[str, object]:
@@ -2389,6 +2375,13 @@ class DashboardWindow(QMainWindow):
             if self._current_project_file() is None:
                 raise RuntimeError("A projektspecifikus mérési fájl nem érhető el.")
             self._devices.start()
+            self._control_loop.reset_injected_volume_tracking()
+            self._measurement_time_origin = None
+            self._times.clear()
+            self._jacket_pressures.clear()
+            self._injection_pressures.clear()
+            self._injection_flows.clear()
+            self._line_pressures.clear()
             self._runtime.start(self._runtime_settings())
         except Exception as error:
             self._show_error(str(error))
@@ -2428,32 +2421,53 @@ class DashboardWindow(QMainWindow):
             f"jacket={snapshot.jacket_pump.pressure_bar:.3f} bar; "
             f"injection={snapshot.injection_pump.pressure_bar:.3f} bar; "
             f"line={snapshot.line_pressure_bar:.3f} bar; "
-            f"inlet={snapshot.inlet_pressure_bar:.3f} bar; "
             f"valve={result.command.output_percent}",
         )
         self._set_connection("jacket", snapshot.jacket_pump.connected)
         self._set_connection("injection", snapshot.injection_pump.connected)
         self._set_connection("line_daq", True)
         self._set_connection("delta_daq", True)
-        self._set_connection("inlet_daq", True)
         self._set_connection("valve", result.command.enabled)
         self._jacket_label.setText(f"{snapshot.jacket_pump.pressure_bar:.1f} bar")
         self._injection_label.setText(f"{snapshot.injection_pump.pressure_bar:.1f} bar")
+        self._jacket_remaining_label.setText(
+            f"Maradék folyadék: {snapshot.jacket_pump.remaining_volume_ml:.1f} ml"
+        )
+        self._injection_remaining_label.setText(
+            f"Maradék folyadék: {snapshot.injection_pump.remaining_volume_ml:.1f} ml"
+        )
+        self._injection_flow_label.setText(
+            f"Besajtolási sebesség: {snapshot.injection_pump.flow_ml_per_hour:.1f} ml/h"
+        )
+        self._injected_volume_label.setText(
+            f"Mérés óta besajtolt: {result.record.injected_volume_ml:.1f} ml"
+        )
         self._line_label.setText(f"{snapshot.line_pressure_bar:.1f} bar")
         self._delta_label.setText(f"{snapshot.differential_pressure_bar:.1f} bar")
-        self._inlet_label.setText(f"{snapshot.inlet_pressure_bar:.1f} bar")
         output = result.command.output_percent
         self._valve_label.setText("SAFE" if output is None else f"{output:.1f} %")
+        if (
+            self._measurement_time_origin is None
+            or snapshot.monotonic_seconds < self._measurement_time_origin
+        ):
+            self._measurement_time_origin = snapshot.monotonic_seconds
         self._times.append(snapshot.monotonic_seconds)
         self._jacket_pressures.append(snapshot.jacket_pump.pressure_bar)
         self._injection_pressures.append(snapshot.injection_pump.pressure_bar)
+        self._injection_flows.append(snapshot.injection_pump.flow_ml_per_hour)
         self._line_pressures.append(snapshot.line_pressure_bar)
-        self._inlet_pressures.append(snapshot.inlet_pressure_bar)
-        relative_times = [value - self._times[-1] for value in self._times]
-        self._jacket_curve.setData(relative_times, list(self._jacket_pressures))
-        self._injection_curve.setData(relative_times, list(self._injection_pressures))
-        self._line_curve.setData(relative_times, list(self._line_pressures))
-        self._inlet_curve.setData(relative_times, list(self._inlet_pressures))
+        elapsed_times = [
+            value - self._measurement_time_origin for value in self._times
+        ]
+        self._jacket_curve.setData(elapsed_times, list(self._jacket_pressures))
+        self._injection_curve.setData(elapsed_times, list(self._injection_pressures))
+        self._line_curve.setData(elapsed_times, list(self._line_pressures))
+        self._flow_curve.setData(elapsed_times, list(self._injection_flows))
+        latest = elapsed_times[-1]
+        x_minimum = max(0.0, latest - 600.0)
+        x_maximum = max(1.0, latest)
+        self._plot.setXRange(x_minimum, x_maximum, padding=0.0)
+        self._flow_plot.setXRange(x_minimum, x_maximum, padding=0.0)
         if result.record.safety_reasons:
             self._alarm_label.setText("; ".join(result.record.safety_reasons))
             self._alarm_label.setStyleSheet(
@@ -2533,7 +2547,7 @@ def build_simulated_dashboard(
         pressure_bar=100.0, flow_ml_per_hour=10.0, remaining_volume_ml=260.0
     )
     daq = SimulatedDataAcquisition()
-    daq.inputs.update(line_pressure=2.0, differential_pressure=1.5, inlet_pressure=2.0)
+    daq.inputs.update(line_pressure=2.0, differential_pressure=1.5)
     valve = SimulatedValveActuator()
     safety = SafetyMonitor(SafetyLimits(400.0, 350.0, 50.0))
     queue = NasSyncQueue(data_path.parent / "nas_sync_queue.sqlite3")
@@ -2545,7 +2559,6 @@ def build_simulated_dashboard(
         daq=daq,
         line_calibration=LinearCalibration(1.0, 5.0, 0.0, 400.0),
         differential_calibration=LinearCalibration(1.0, 5.0, 0.0, 40.0),
-        inlet_calibration=LinearCalibration(1.0, 5.0, 0.0, 400.0),
         safety_monitor=safety,
         writer=writer,
     )

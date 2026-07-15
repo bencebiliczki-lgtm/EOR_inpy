@@ -14,7 +14,6 @@ class DiagnosticCategory(StrEnum):
     INJECTION_PUMP = "injection_pump"
     NI_LINE = "ni_line"
     NI_DIFFERENTIAL = "ni_differential"
-    NI_INLET = "ni_inlet"
     NI_VALVE = "ni_valve"
     RUNTIME = "runtime"
 
