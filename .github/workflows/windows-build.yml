@@ -48,28 +48,15 @@ jobs:
           path: ${{ env.PACKAGE_PATH }}
       # Expected GitHub Secrets:
       # SSH_HOST, SSH_USERNAME, SSH_PASSWORD, SSH_PORT (optional), SSH_REMOTE_DIR
-      # Tailscale auth secrets:
       # TAILSCALE_CLIENT_ID, TAILSCALE_CLIENT_SECRET
       - name: Connect to Tailscale
-        env:
-          TAILSCALE_CLIENT_ID: ${{ secrets.TAILSCALE_CLIENT_ID }}
-          TAILSCALE_CLIENT_SECRET: ${{ secrets.TAILSCALE_CLIENT_SECRET }}
-        shell: pwsh
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_CLIENT_ID) -or [string]::IsNullOrWhiteSpace($env:TAILSCALE_CLIENT_SECRET)) {
-            Write-Host "Tailscale client credentials are not configured; skipping Tailscale connection."
-            exit 0
-          }
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TAILSCALE_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TAILSCALE_CLIENT_SECRET }}
+          tags: tag:ci
+          ping: ${{ secrets.SSH_HOST }}
 
-          try {
-            Invoke-WebRequest -Uri "https://tailscale.com/install.ps1" -OutFile "$env:TEMP\tailscale-install.ps1"
-            & "$env:TEMP\tailscale-install.ps1"
-            tailscale version | Out-Host
-            tailscale up --authkey="$env:TAILSCALE_CLIENT_ID:$env:TAILSCALE_CLIENT_SECRET" --hostname="github-runner-$env:GITHUB_RUN_ID" --accept-dns=false --accept-routes=false --ssh
-          }
-          catch {
-            Write-Host "Tailscale connection failed: $($_.Exception.Message)"
-          }
       - name: Upload package over SSH
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
@@ -77,23 +64,72 @@ jobs:
           SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
           SSH_REMOTE_DIR: ${{ secrets.SSH_REMOTE_DIR }}
-          TAILSCALE_CLIENT_ID: ${{ secrets.TAILSCALE_CLIENT_ID }}
-          TAILSCALE_CLIENT_SECRET: ${{ secrets.TAILSCALE_CLIENT_SECRET }}
         shell: pwsh
         run: |
           if ([string]::IsNullOrWhiteSpace($env:SSH_PORT)) {
             $env:SSH_PORT = "22"
           }
 
-          if ([string]::IsNullOrWhiteSpace($env:SSH_HOST) -or [string]::IsNullOrWhiteSpace($env:SSH_USERNAME) -or [string]::IsNullOrWhiteSpace($env:SSH_PASSWORD)) {
-            Write-Host "SSH upload skipped because required secrets are missing."
-            exit 0
-          }
-
-          if (-not [string]::IsNullOrWhiteSpace($env:TAILSCALE_CLIENT_ID) -and -not [string]::IsNullOrWhiteSpace($env:TAILSCALE_CLIENT_SECRET)) {
-            Write-Host "Tailscale auth secrets detected; SSH upload will use them when available."
+          if (
+            [string]::IsNullOrWhiteSpace($env:SSH_HOST) -or
+            [string]::IsNullOrWhiteSpace($env:SSH_USERNAME) -or
+            [string]::IsNullOrWhiteSpace($env:SSH_PASSWORD)
+          ) {
+            throw "Hiányzik az SSH_HOST, SSH_USERNAME vagy SSH_PASSWORD secret."
           }
 
           python -m pip install --quiet paramiko
-          python -c 'import os, pathlib, paramiko; host=os.environ["SSH_HOST"]; port=int(os.environ.get("SSH_PORT","22")); username=os.environ["SSH_USERNAME"]; password=os.environ["SSH_PASSWORD"]; remote_dir=os.environ.get("SSH_REMOTE_DIR", ""); package_path=os.environ["PACKAGE_PATH"]; client=paramiko.SSHClient(); client.set_missing_host_key_policy(paramiko.AutoAddPolicy()); client.connect(hostname=host, port=port, username=username, password=password, look_for_keys=False, allow_agent=False); client.exec_command("mkdir -p " + remote_dir); sftp=client.open_sftp(); target_path=(remote_dir.rstrip("/") + "/" + pathlib.Path(package_path).name) if remote_dir else pathlib.Path(package_path).name; sftp.put(package_path, target_path); sftp.close(); client.close()'
+
+          @'
+          import os
+          import pathlib
+          import posixpath
+          import paramiko
+
+          host = os.environ["SSH_HOST"]
+          port = int(os.environ.get("SSH_PORT", "22"))
+          username = os.environ["SSH_USERNAME"]
+          password = os.environ["SSH_PASSWORD"]
+          package_path = pathlib.Path(os.environ["PACKAGE_PATH"])
+          remote_dir = os.environ.get(
+              "SSH_REMOTE_DIR",
+              "C:/Users/Public/Downloads"
+          ).rstrip("/")
+
+          client = paramiko.SSHClient()
+          client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+          try:
+              client.connect(
+                  hostname=host,
+                  port=port,
+                  username=username,
+                  password=password,
+                  look_for_keys=False,
+                  allow_agent=False,
+                  timeout=30,
+                  banner_timeout=30,
+                  auth_timeout=30,
+              )
+
+              transport = client.get_transport()
+              if transport is not None:
+                  transport.set_keepalive(15)
+
+              sftp = client.open_sftp()
+              target_path = posixpath.join(
+                  remote_dir,
+                  package_path.name,
+              )
+
+              print(f"Uploading package to: {target_path}")
+              sftp.put(str(package_path), target_path)
+              sftp.close()
+
+              print("Package uploaded successfully.")
+          finally:
+              client.close()
+          '@ | Set-Content -Path "$env:RUNNER_TEMP\upload_package.py"
+
+          python "$env:RUNNER_TEMP\upload_package.py"
 
