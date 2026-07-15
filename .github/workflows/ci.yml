@@ -23,7 +23,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libegl1
       - name: Install Python dependencies
-        run: python -m pip install -e ".[dev,ui,hardware,export]"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,ui,hardware,export]"
+          python - <<'PY'
+import importlib
+for name in ["serial", "PySide6", "pyqtgraph", "openpyxl"]:
+    try:
+        importlib.import_module(name)
+        print(f"OK {name}")
+    except Exception as exc:
+        print(f"MISSING {name}: {exc}")
+        raise
+PY
       - name: Ruff
         run: ruff check .
       - name: Mypy
