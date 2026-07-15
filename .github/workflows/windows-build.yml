@@ -27,7 +27,27 @@ jobs:
       - name: Test
         run: pytest
       - name: Build executable
-        run: pyinstaller --clean --noconfirm --name AFKI-EOR --onefile src/eor_control/__main__.py
+        run: python -m PyInstaller --clean --noconfirm AFKI-EOR.spec
+      - name: Verify packaged hardware discovery modules
+        shell: pwsh
+        run: |
+          @'
+          from PyInstaller.archive.readers import ZlibArchiveReader
+
+          required = {
+              "nidaqmx",
+              "nidaqmx.system",
+              "serial",
+              "serial.tools",
+              "serial.tools.list_ports",
+              "serial.tools.list_ports_windows",
+          }
+          packaged = set(ZlibArchiveReader("build/AFKI-EOR/PYZ-00.pyz").toc)
+          missing = sorted(required - packaged)
+          if missing:
+              raise SystemExit(f"Missing packaged hardware modules: {missing}")
+          print("Packaged hardware modules verified:", sorted(required))
+          '@ | python -
       - name: Create installer package
         shell: pwsh
         run: |

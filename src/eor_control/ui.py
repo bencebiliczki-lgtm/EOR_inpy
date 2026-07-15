@@ -474,12 +474,14 @@ class DeviceSettingsDialog(QDialog):
         settings: QSettings,
         current_mode: RunMode,
         discoverer: Callable[[], HardwareDiscovery] = discover_hardware,
+        diagnostics: DiagnosticLogger | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._tester = tester
         self._settings = settings
         self._discoverer = discoverer
+        self._diagnostics = diagnostics
         self._test_succeeded = False
         self._configuration: HardwareConfiguration | None = None
         self.setWindowTitle("Eszközbeállítások")
@@ -683,8 +685,10 @@ class DeviceSettingsDialog(QDialog):
         try:
             discovery = self._discoverer()
         except Exception as error:
-            self._discovery_status.setText(f"A felderítés sikertelen: {error}")
+            message = f"A felderítés sikertelen: {type(error).__name__}: {error}"
+            self._discovery_status.setText(message)
             self._discovery_status.setStyleSheet("color:#b00020")
+            self._log_discovery(message, level="ERROR")
             return
         self._replace_choices(self.jacket_port, discovery.serial_ports)
         self._replace_choices(self.injection_port, discovery.serial_ports)
@@ -702,6 +706,16 @@ class DeviceSettingsDialog(QDialog):
         else:
             self._discovery_status.setStyleSheet("color:#1b7f3a")
         self._discovery_status.setText(summary)
+        self._log_discovery(summary, level="WARNING" if discovery.warnings else "INFO")
+
+    def _log_discovery(self, message: str, *, level: str) -> None:
+        if self._diagnostics is not None:
+            self._diagnostics.emit(
+                DiagnosticCategory.SYSTEM,
+                "DISCOVERY",
+                message,
+                level=level,
+            )
 
     def _read_configuration(self) -> HardwareConfiguration:
         return HardwareConfiguration(
@@ -982,8 +996,9 @@ class LoggingSettingsDialog(QDialog):
             categories_layout.addWidget(checkbox)
             self.category_checks[category] = checkbox
         layout.addWidget(categories_box)
-        path_label = QLabel("Logfájl: data/logs/communication.log")
+        path_label = QLabel(f"Logfájl: {logger.path}")
         path_label.setStyleSheet("color:#66788a")
+        path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(path_label)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -1955,6 +1970,7 @@ class DashboardWindow(QMainWindow):
             PhysicalHardwareConnectionTester(diagnostics=self._diagnostics),
             settings=self._user_settings,
             current_mode=self._run_mode,
+            diagnostics=self._diagnostics,
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted or dialog.configuration is None:

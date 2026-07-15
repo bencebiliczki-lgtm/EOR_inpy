@@ -46,6 +46,10 @@ class DiagnosticLogger:
             return self._enabled
 
     @property
+    def path(self) -> Path:
+        return self._path
+
+    @property
     def categories(self) -> frozenset[DiagnosticCategory]:
         with self._lock:
             return frozenset(self._categories)

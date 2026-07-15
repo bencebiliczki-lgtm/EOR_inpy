@@ -8,7 +8,7 @@ from PySide6.QtCore import QSettings  # noqa: E402
 from PySide6.QtWidgets import QApplication, QComboBox, QSplitter  # noqa: E402
 
 from eor_control.application import RunMode  # noqa: E402
-from eor_control.diagnostics import DiagnosticCategory  # noqa: E402
+from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger  # noqa: E402
 from eor_control.hardware import ConnectionTestResult, HardwareDiscovery  # noqa: E402
 from eor_control.projects import ProjectRepository  # noqa: E402
 from eor_control.ui import (  # noqa: E402
@@ -36,10 +36,14 @@ class UnusedTester:
 def test_device_settings_discovers_dropdown_choices(tmp_path: Path) -> None:
     application()
     settings = QSettings(str(tmp_path / "hardware.ini"), QSettings.Format.IniFormat)
+    log_path = tmp_path / "communication.log"
+    diagnostics = DiagnosticLogger(log_path)
+    diagnostics.configure(enabled=True, categories=[DiagnosticCategory.SYSTEM])
     dialog = DeviceSettingsDialog(
         UnusedTester(),  # type: ignore[arg-type]
         settings=settings,
         current_mode=RunMode.SIMULATION,
+        diagnostics=diagnostics,
         discoverer=lambda: HardwareDiscovery(
             serial_ports=("COM8", "COM9"),
             ni_input_channels=("Dev2/ai0", "Dev2/ai1"),
@@ -55,6 +59,7 @@ def test_device_settings_discovers_dropdown_choices(tmp_path: Path) -> None:
     assert dialog.delta_channel.findText("Dev2/ai1") >= 0
     assert dialog.valve_channel.findText("Dev2/ao0") >= 0
     assert "2 COM-port" in dialog._discovery_status.text()
+    assert "system\tDISCOVERY\t2 COM-port" in log_path.read_text(encoding="utf-8")
     dialog.close()
 
 

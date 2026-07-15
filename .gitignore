@@ -10,6 +10,7 @@ build/
 dist/
 *.spec
 !eor_control.spec
+!AFKI-EOR.spec
 *.log
 data/
 measurements/

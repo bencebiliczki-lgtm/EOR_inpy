@@ -7,6 +7,7 @@ def test_disabled_logger_does_not_record_or_create_file(tmp_path: Path) -> None:
     path = tmp_path / "communication.log"
     logger = DiagnosticLogger(path)
 
+    assert logger.path == path
     logger.emit(DiagnosticCategory.JACKET_PUMP, "TX", "RSVP")
 
     assert logger.events_after(0) == ()

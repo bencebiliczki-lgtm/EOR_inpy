@@ -92,6 +92,9 @@ bekapcsolható, és külön választható a két pumpa, a négy NI funkció, a r
 rendszer. Engedélyezve a napló a `data/logs/communication.log` fájlba kerül. A
 `Developer` → `Eszközkommunikáció…` nézet élő TX/RX/timeout/hiba táblát és
 kategóriaszűrőt biztosít.
+A `Rendszer és módváltás` kategória a port- és NI-csatornafelderítés összesítését,
+valamint a teljes import- vagy driverhibát `DISCOVERY` iránnyal rögzíti. A
+Naplózás ablak a tényleges abszolút logfájlnevet mutatja.
 
 Sikeresen aktivált hardvermódban és csatlakoztatott (`READY`) állapotban a
 `Beállítások` → `Felügyelt pumpavezérlés…` ablakból kezelhető mindkét ISCO pumpa.
@@ -120,6 +123,12 @@ A PyInstaller `onedir` csomag a `dist/EOR_Controller/` könyvtárba kerül. A
 beállítások a hordozható mappa `config/`, a projektek és várólisták a `data/`
 könyvtárában maradnak; a program futásához nem szükséges internet. Az NI-DAQmx és
 a soros adapter Windows-drivereit a célgépen külön kell telepíteni.
+
+A GitHub Actions Windows workflow az `AFKI-EOR.spec` alapján egyfájlos
+`dist/AFKI-EOR.exe` kiadást készít és ezt csomagolja a célgépre feltöltött ZIP-be.
+A workflow a build után kötelezően ellenőrzi, hogy a `serial.tools.list_ports`, a
+Windowsos sorosport-felderítő és a `nidaqmx.system` modulok bekerültek-e az EXE-be;
+hiányos csomag nem tölthető fel.
 
 A Windows-csomag a `constraints-windows-legacy.txt` alapján NumPy 1.26.4-et
 használ, hogy ne igényelje a NumPy 2.x `X86_V2` CPU-baseline-ját. A workflow a
