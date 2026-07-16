@@ -27,9 +27,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "mode",
         nargs="?",
-        choices=("gui", "terminal"),
+        choices=("gui", "terminal", "diagnose-ni"),
         default="gui",
-        help="gui: grafikus felület; terminal: interaktív szimulációs vezérlés",
+        help=(
+            "gui: grafikus felület; terminal: interaktív szimulációs vezérlés; "
+            "diagnose-ni: csak olvasási NI-DAQmx diagnosztika"
+        ),
     )
     return parser
 
@@ -40,6 +43,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         from eor_control.terminal import run_terminal
 
         raise SystemExit(run_terminal(sys.stdin, sys.stdout))
+    if arguments.mode == "diagnose-ni":
+        from eor_control.ni_diagnostic import run_ni_diagnostic
+
+        raise SystemExit(run_ni_diagnostic(sys.stdout))
     _hide_private_windows_console()
     from eor_control.ui import run_ui
 

@@ -177,6 +177,13 @@ Ez garantálja, hogy a csomagolt alkalmazás NumPy 1.26.4-et tartalmazzon; a cé
 nem szükséges külön Python- vagy NumPy-telepítés. Python 3.14-es környezetből a
 célgépes csomag szándékosan nem készíthető el.
 
+A célgépen a becsomagolt Python-, NumPy- és NI-DAQmx környezet, valamint a helyileg
+felismert NI-eszközök kimeneti parancs nélküli ellenőrzése:
+
+```powershell
+.\AFKI-EOR.exe diagnose-ni
+```
+
 A PyInstaller `onefile` csomag egyetlen `dist/EOR_Controller.exe` fájlba kerül. A
 beállítások, projektek és várólisták az EXE-től független, írható `config/` és
 `data/` könyvtárakban maradnak; a program futásához nem szükséges internet. Az
