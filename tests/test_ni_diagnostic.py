@@ -1,5 +1,6 @@
 import importlib
 import io
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -46,3 +47,9 @@ def test_ni_diagnostic_reports_import_failure(monkeypatch: pytest.MonkeyPatch) -
 
     assert ni_diagnostic.run_ni_diagnostic(output) == 1
     assert "HIBA – NumPy import: RuntimeError: X86_V2 nem támogatott" in output.getvalue()
+
+
+def test_required_frozen_package_metadata_is_configured() -> None:
+    for spec_name in ("AFKI-EOR.spec", "eor_control.spec"):
+        spec = Path(spec_name).read_text(encoding="utf-8")
+        assert 'copy_metadata("nidaqmx", recursive=True)' in spec

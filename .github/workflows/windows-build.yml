@@ -28,6 +28,28 @@ jobs:
         run: pytest
       - name: Build executable
         run: python -m PyInstaller --clean --noconfirm AFKI-EOR.spec
+      - name: Verify packaged NI runtime metadata
+        shell: pwsh
+        run: |
+          $output = & .\dist\AFKI-EOR.exe diagnose-ni 2>&1 | Out-String
+          $diagnosticExitCode = $LASTEXITCODE
+          Write-Host $output
+
+          if ($output -notmatch "NumPy csomag: 1\.26\.4") {
+            throw "A csomagolt NumPy 1.26.4 metaadata hiányzik."
+          }
+          if ($output -notmatch "nidaqmx csomag: \d") {
+            throw "A csomagolt nidaqmx metaadata hiányzik."
+          }
+          if ($output -notmatch "NumPy import: OK \(1\.26\.4\)") {
+            throw "A csomagolt NumPy importja sikertelen."
+          }
+          if ($output -match "PackageNotFoundError|nincs becsomagolva") {
+            throw "Hiányos Python csomag-metaadat került az EXE-be."
+          }
+          if ($diagnosticExitCode -notin 0, 2, 3) {
+            throw "Az NI diagnosztika váratlan hibakóddal állt le: $diagnosticExitCode"
+          }
       - name: Verify packaged hardware discovery modules
         shell: pwsh
         run: |

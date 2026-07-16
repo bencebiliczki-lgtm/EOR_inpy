@@ -1,8 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+from PyInstaller.utils.hooks import copy_metadata
 
 root = Path(SPECPATH)
+package_metadata = copy_metadata("nidaqmx", recursive=True)
 
 a = Analysis(
     [str(root / "src" / "eor_control" / "__main__.py")],
@@ -11,7 +13,7 @@ a = Analysis(
     datas=[
         (str(root / "img"), "img"),
         (str(root / "docs" / "drivers_readme.txt"), "."),
-    ],
+    ] + package_metadata,
     hiddenimports=[
         "openpyxl",
         "nidaqmx",
