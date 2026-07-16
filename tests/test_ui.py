@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QLabel,
     QMessageBox,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QTabWidget,
 )
@@ -238,6 +239,10 @@ def test_device_settings_keeps_actions_visible_on_small_screen(tmp_path: Path) -
 
     assert dialog._content_scroll.verticalScrollBar().maximum() > 0
     assert dialog._content_scroll.horizontalScrollBar().maximum() == 0
+    assert dialog._content_widget.minimumWidth() == 0
+    assert dialog._content_widget.sizePolicy().horizontalPolicy() == (
+        QSizePolicy.Policy.Ignored
+    )
     for button in (
         dialog._save_button,
         dialog._test_button,

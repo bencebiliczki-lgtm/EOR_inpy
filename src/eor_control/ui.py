@@ -1044,9 +1044,13 @@ class DeviceSettingsDialog(QDialog):
         self._content_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        self._content_scroll.setWidget(content)
+        self._content_widget = QWidget()
+        self._content_widget.setMinimumWidth(0)
+        self._content_widget.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        layout = QVBoxLayout(self._content_widget)
+        self._content_scroll.setWidget(self._content_widget)
         outer_layout.addWidget(self._content_scroll, 1)
         self._mode_label = QLabel(f"Jelenlegi mód: {current_mode.value.upper()}")
         self._mode_label.setObjectName("device_mode_label")
@@ -1137,7 +1141,7 @@ class DeviceSettingsDialog(QDialog):
             ("Kapcsolati sebesség", self.baud_rate),
             ("Kábelezési megjegyzés", self.pump_cabling_notes),
         ):
-            pump_form.addRow(label, pump_widget)
+            self._add_responsive_form_row(pump_form, label, pump_widget)
 
         ni_box = QGroupBox("Nyomásmérés és szelepvezérlés")
         ni_form = QFormLayout(ni_box)
@@ -1156,7 +1160,7 @@ class DeviceSettingsDialog(QDialog):
             ("Szelep 0%-os jele", self.zero_voltage),
             ("Szelep 100%-os jele", self.hundred_voltage),
         ):
-            ni_form.addRow(label, ni_widget)
+            self._add_responsive_form_row(ni_form, label, ni_widget)
 
         self.device_tabs = QTabWidget()
         self.device_tabs.setObjectName("device_settings_tabs")
@@ -1172,14 +1176,18 @@ class DeviceSettingsDialog(QDialog):
         self.device_tabs.addTab(ni_tab, "NI mérés és szelep")
         layout.addWidget(self.device_tabs)
 
-        discovery_row = QHBoxLayout()
+        discovery_row = QVBoxLayout()
         self._discovery_status = QLabel()
         self._discovery_status.setWordWrap(True)
+        self._discovery_status.setMinimumWidth(0)
+        self._discovery_status.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         self._discovery_status.setVisible(developer_mode)
         refresh_button = QPushButton("Csatlakoztatott eszközök keresése")
         refresh_button.clicked.connect(self._refresh_hardware_choices)
         discovery_row.addWidget(refresh_button)
-        discovery_row.addWidget(self._discovery_status, 1)
+        discovery_row.addWidget(self._discovery_status)
         layout.addLayout(discovery_row)
         validation = QGroupBox("Helyszíni validáció felhasználói adatai")
         validation_form = QFormLayout(validation)
@@ -1203,13 +1211,26 @@ class DeviceSettingsDialog(QDialog):
         self.supervised_test.setChecked(
             self._stored_bool("supervised_test_completed", False)
         )
-        validation_form.addRow("Felügyelt próba előírt időtartama", self.supervised_test_minutes)
-        validation_form.addRow(
+        self._add_responsive_form_row(
+            validation_form,
+            "Felügyelt próba előírt időtartama",
+            self.supervised_test_minutes,
+        )
+        self._add_responsive_form_row(
+            validation_form,
             "Kábelkihúzási/kommunikációvesztési próba",
             self.cable_disconnect_test,
         )
-        validation_form.addRow("Vészleállítás fizikai próbája", self.emergency_stop_test)
-        validation_form.addRow("Felügyelt kommunikációs próba", self.supervised_test)
+        self._add_responsive_form_row(
+            validation_form,
+            "Vészleállítás fizikai próbája",
+            self.emergency_stop_test,
+        )
+        self._add_responsive_form_row(
+            validation_form,
+            "Felügyelt kommunikációs próba",
+            self.supervised_test,
+        )
         layout.addWidget(validation)
         calibration_help = QLabel(
             "A differenciálnyomás-érzékelő tényleges feszültség–bar tartományát a "
@@ -1241,6 +1262,22 @@ class DeviceSettingsDialog(QDialog):
     @property
     def configuration(self) -> HardwareConfiguration | None:
         return self._configuration
+
+    @staticmethod
+    def _add_responsive_form_row(
+        form: QFormLayout, label: str, field: QWidget
+    ) -> None:
+        label_widget = QLabel(label)
+        label_widget.setWordWrap(True)
+        label_widget.setMinimumWidth(0)
+        label_widget.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        field.setMinimumWidth(0)
+        field.setSizePolicy(
+            QSizePolicy.Policy.Ignored, field.sizePolicy().verticalPolicy()
+        )
+        form.addRow(label_widget, field)
 
     def _stored(self, key: str, default: str) -> str:
         return str(self._settings.value(f"hardware/{key}", default))
