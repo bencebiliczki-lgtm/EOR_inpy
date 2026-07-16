@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings, Qt  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
+    QAbstractItemView,
     QAbstractScrollArea,
     QApplication,
     QComboBox,
@@ -113,6 +114,8 @@ def test_scrollbars_are_covered_by_both_themes() -> None:
         assert "QScrollBar:vertical" in stylesheet
         assert "QScrollBar:horizontal" in stylesheet
         assert "QScrollBar::handle:vertical" in stylesheet
+        assert "QTableWidget" in stylesheet
+        assert "QHeaderView::section" in stylesheet
         assert "QScrollBar::handle:horizontal" in stylesheet
         assert "QScrollBar::add-line" in stylesheet
         assert "QScrollBar::sub-line" in stylesheet
@@ -218,6 +221,32 @@ def test_device_settings_shows_when_no_device_is_available(tmp_path: Path) -> No
     assert dialog.line_channel.currentText() == "Előbb válassz NI eszközt"
     assert not dialog.line_channel.isEnabled()
     assert dialog._discovery_status.isHidden()
+    dialog.close()
+
+
+def test_device_settings_keeps_actions_visible_on_small_screen(tmp_path: Path) -> None:
+    app = application()
+    dialog = DeviceSettingsDialog(
+        UnusedTester(),  # type: ignore[arg-type]
+        settings=QSettings(str(tmp_path / "small-screen.ini"), QSettings.Format.IniFormat),
+        current_mode=RunMode.SIMULATION,
+        discoverer=HardwareDiscovery,
+    )
+    dialog.resize(480, 420)
+    dialog.show()
+    app.processEvents()
+
+    assert dialog._content_scroll.verticalScrollBar().maximum() > 0
+    assert dialog._content_scroll.horizontalScrollBar().maximum() == 0
+    for button in (
+        dialog._save_button,
+        dialog._test_button,
+        dialog._activate_button,
+        dialog._cancel_button,
+    ):
+        assert button.isVisible()
+        assert button.geometry().bottom() <= dialog.contentsRect().bottom()
+
     dialog.close()
 
 
@@ -863,10 +892,39 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     logging_dialog._save()
     restored._diagnostics.emit(DiagnosticCategory.NI_LINE, "RX", "hidden")
     restored._diagnostics.emit(DiagnosticCategory.JACKET_PUMP, "TX", "visible")
+    restored._diagnostics.emit(DiagnosticCategory.JACKET_PUMP, "RX", "READY")
     developer = DeveloperViewDialog(restored._diagnostics, parent=restored)
+    developer.resize(700, 420)
+    developer.show()
+    application().processEvents()
     developer._refresh()
-    assert developer._table.rowCount() == 1
-    assert developer._table.item(0, 3).text() == "jacket_pump"
-    assert developer._table.item(0, 5).text() == "visible"
+    assert developer.objectName() == "device_communication_dialog"
+    assert developer._table.objectName() == "device_communication_table"
+    assert developer._table.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
+    assert developer._table.selectionBehavior() == (
+        QAbstractItemView.SelectionBehavior.SelectRows
+    )
+    assert developer._table.sizeAdjustPolicy() == (
+        QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+    )
+    assert developer._table.minimumWidth() == 0
+    assert developer._table.horizontalHeader().sectionResizeMode(3) == (
+        developer._table.horizontalHeader().ResizeMode.Stretch
+    )
+    assert developer._buttons.isVisible()
+    assert developer._buttons.geometry().bottom() <= developer.contentsRect().bottom()
+    assert developer._table.rowCount() == 2
+    assert developer._table.item(0, 3).text() == "EOR vezérlőalkalmazás"
+    assert developer._table.item(0, 4).text() == "TX"
+    assert developer._table.item(0, 5).text() == "Köpenypumpa"
+    assert developer._table.item(0, 6).text() == "DASNET / RS-232"
+    assert developer._table.item(0, 7).text() == "visible"
+    assert developer._table.item(1, 3).text() == "Köpenypumpa"
+    assert developer._table.item(1, 4).text() == "RX"
+    assert developer._table.item(1, 5).text() == "EOR vezérlőalkalmazás"
+    assert developer._table.item(1, 7).text() == "READY"
+    assert "Köpenypumpa → EOR vezérlőalkalmazás" in (
+        developer._table.item(1, 7).toolTip()
+    )
     developer.close()
     restored.close()

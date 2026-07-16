@@ -67,7 +67,7 @@ from eor_control.data_management import (
     read_measurement_tables,
     safe_filename,
 )
-from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
+from eor_control.diagnostics import DiagnosticCategory, DiagnosticEvent, DiagnosticLogger
 from eor_control.domain import PumpStatus
 from eor_control.hardware import (
     ConnectionTestResult,
@@ -192,6 +192,17 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
 }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 QAbstractScrollArea::corner { background: #e7edf3; border: none; }
+QTableWidget {
+    background: #ffffff; alternate-background-color: #f5f7fa;
+    border: 1px solid #d7dee7; border-radius: 6px; gridline-color: #d7dee7;
+    selection-background-color: #dce7f3; selection-color: #1f2933;
+}
+QHeaderView::section {
+    background: #e8eef6; color: #1f2933; border: none;
+    border-right: 1px solid #c4cfdd; border-bottom: 1px solid #c4cfdd;
+    padding: 7px 8px; font-weight: 600;
+}
+QTableCornerButton::section { background: #e8eef6; border: 1px solid #c4cfdd; }
 QSplitter::handle { background: #c4cfdd; border-radius: 3px; }
 QSplitter::handle:horizontal { margin: 4px 1px; }
 QSplitter::handle:vertical { margin: 1px 4px; }
@@ -295,6 +306,17 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
 }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 QAbstractScrollArea::corner { background: #171d24; border: none; }
+QTableWidget {
+    background: #1b2129; alternate-background-color: #202832;
+    border: 1px solid #35404d; border-radius: 6px; gridline-color: #35404d;
+    selection-background-color: #355a78; selection-color: #ffffff;
+}
+QHeaderView::section {
+    background: #28323d; color: #e6edf3; border: none;
+    border-right: 1px solid #465362; border-bottom: 1px solid #465362;
+    padding: 7px 8px; font-weight: 600;
+}
+QTableCornerButton::section { background: #28323d; border: 1px solid #465362; }
 QSplitter::handle { background: #465362; border-radius: 3px; }
 QSplitter::handle:horizontal { margin: 4px 1px; }
 QSplitter::handle:vertical { margin: 1px 4px; }
@@ -1007,8 +1029,25 @@ class DeviceSettingsDialog(QDialog):
         self._test_succeeded = False
         self._configuration: HardwareConfiguration | None = None
         self.setWindowTitle("Eszközbeállítások")
-        self.resize(720, 820)
-        layout = QVBoxLayout(self)
+        self.setMinimumSize(420, 360)
+        screen = QApplication.primaryScreen()
+        available_size = screen.availableGeometry().size() if screen is not None else None
+        width = min(720, max(420, available_size.width() - 40)) if available_size else 720
+        height = min(820, max(360, available_size.height() - 40)) if available_size else 820
+        self.resize(width, height)
+
+        outer_layout = QVBoxLayout(self)
+        self._content_scroll = QScrollArea()
+        self._content_scroll.setObjectName("device_settings_scroll")
+        self._content_scroll.setWidgetResizable(True)
+        self._content_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._content_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        self._content_scroll.setWidget(content)
+        outer_layout.addWidget(self._content_scroll, 1)
         self._mode_label = QLabel(f"Jelenlegi mód: {current_mode.value.upper()}")
         self._mode_label.setObjectName("device_mode_label")
         self._mode_label.setStyleSheet(
@@ -1084,6 +1123,10 @@ class DeviceSettingsDialog(QDialog):
         )
         pump_box = QGroupBox("Pumpák csatlakoztatása")
         pump_form = QFormLayout(pump_box)
+        pump_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        pump_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
         for label, pump_widget in (
             ("Köpenypumpa csatlakozója", self.jacket_port),
             ("Köpenypumpa vezérlőazonosítója", self.jacket_id),
@@ -1098,6 +1141,10 @@ class DeviceSettingsDialog(QDialog):
 
         ni_box = QGroupBox("Nyomásmérés és szelepvezérlés")
         ni_form = QFormLayout(ni_box)
+        ni_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        ni_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
         for label, ni_widget in (
             ("NI adatgyűjtő", self.ni_device),
             ("Vonali nyomás bemenete", self.line_channel),
@@ -1136,6 +1183,10 @@ class DeviceSettingsDialog(QDialog):
         layout.addLayout(discovery_row)
         validation = QGroupBox("Helyszíni validáció felhasználói adatai")
         validation_form = QFormLayout(validation)
+        validation_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        validation_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
         self.supervised_test_minutes = self._integer_field(
             "supervised_test_minutes", 60, 1, 1440
         )
@@ -1166,22 +1217,22 @@ class DeviceSettingsDialog(QDialog):
         )
         calibration_help.setWordWrap(True)
         layout.addWidget(calibration_help)
-        save_button = QPushButton("Eszköz- és csatornabeállítások mentése")
-        save_button.clicked.connect(self._save_only)
-        layout.addWidget(save_button)
+        self._save_button = QPushButton("Eszköz- és csatornabeállítások mentése")
+        self._save_button.clicked.connect(self._save_only)
         self._test_button = QPushButton("Kapcsolatok tesztelése (csak olvasás)")
         self._test_button.clicked.connect(self._start_test)
-        layout.addWidget(self._test_button)
         self._result_label = QLabel("A hardvermód aktiválásához sikeres kapcsolatpróba szükséges.")
         self._result_label.setWordWrap(True)
-        layout.addWidget(self._result_label)
         self._activate_button = QPushButton("HARDVER mód aktiválása")
         self._activate_button.setEnabled(False)
         self._activate_button.clicked.connect(self._activate)
-        layout.addWidget(self._activate_button)
-        cancel = QPushButton("Mégse")
-        cancel.clicked.connect(self.reject)
-        layout.addWidget(cancel)
+        self._cancel_button = QPushButton("Mégse")
+        self._cancel_button.clicked.connect(self.reject)
+        outer_layout.addWidget(self._result_label)
+        outer_layout.addWidget(self._save_button)
+        outer_layout.addWidget(self._test_button)
+        outer_layout.addWidget(self._activate_button)
+        outer_layout.addWidget(self._cancel_button)
         self._bridge = DeviceTestBridge(self)
         self._bridge.succeeded.connect(self._test_passed)
         self._bridge.failed.connect(self._test_failed)
@@ -1778,38 +1829,113 @@ class LoggingSettingsDialog(QDialog):
 
 
 class DeveloperViewDialog(QDialog):
+    APPLICATION_ENDPOINT = "EOR vezérlőalkalmazás"
+    ENDPOINT_LABELS = {
+        DiagnosticCategory.SYSTEM: "EOR alkalmazásrendszer",
+        DiagnosticCategory.RUNTIME: "Vezérlési runtime / watchdog",
+        DiagnosticCategory.JACKET_PUMP: "Köpenypumpa",
+        DiagnosticCategory.INJECTION_PUMP: "Besajtolópumpa",
+        DiagnosticCategory.NI_LINE: "NI USB-6001 – vonali nyomásbemenet",
+        DiagnosticCategory.NI_DIFFERENTIAL: "NI USB-6001 – differenciálnyomás-bemenet",
+        DiagnosticCategory.NI_VALVE: "NI USB-6001 – szelep analóg kimenet",
+    }
+    TRANSPORT_LABELS = {
+        DiagnosticCategory.SYSTEM: "Belső esemény",
+        DiagnosticCategory.RUNTIME: "Belső esemény",
+        DiagnosticCategory.JACKET_PUMP: "DASNET / RS-232",
+        DiagnosticCategory.INJECTION_PUMP: "DASNET / RS-232",
+        DiagnosticCategory.NI_LINE: "NI-DAQmx",
+        DiagnosticCategory.NI_DIFFERENTIAL: "NI-DAQmx",
+        DiagnosticCategory.NI_VALVE: "NI-DAQmx",
+    }
+
     def __init__(self, logger: DiagnosticLogger, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._logger = logger
         self._last_sequence = 0
-        self.setWindowTitle("Developer nézet — eszközkommunikáció")
-        self.resize(1100, 620)
+        self.setObjectName("device_communication_dialog")
+        self.setWindowTitle("Eszközkommunikáció")
+        self.setMinimumSize(620, 400)
+        screen = QApplication.primaryScreen()
+        available_size = screen.availableGeometry().size() if screen is not None else None
+        width = min(1180, max(620, available_size.width() - 40)) if available_size else 1100
+        height = min(720, max(400, available_size.height() - 40)) if available_size else 620
+        self.resize(width, height)
         layout = QVBoxLayout(self)
-        controls = QGridLayout()
+
+        title = QLabel("Eszközkommunikáció")
+        title.setObjectName("device_communication_title")
+        title.setStyleSheet("font-size:18px;font-weight:700")
+        layout.addWidget(title)
+        help_text = QLabel(
+            "A napló megmutatja, melyik komponens honnan, hová és milyen "
+            "kapcsolaton küldött vagy fogadott adatot. A megjelenítés nem indít "
+            "új hardverműveletet."
+        )
+        help_text.setObjectName("device_communication_help")
+        help_text.setWordWrap(True)
+        help_text.setStyleSheet("color:#66788a")
+        layout.addWidget(help_text)
+
+        controls_box = QGroupBox("Megjelenítés")
+        controls = QGridLayout(controls_box)
         self._filter = QComboBox()
+        self._filter.setObjectName("device_communication_filter")
         self._filter.addItem("Minden kategória", None)
         for category, label in LoggingSettingsDialog.CATEGORY_LABELS.items():
             self._filter.addItem(label, category.value)
         self._filter.currentIndexChanged.connect(self._rebuild)
-        clear = QPushButton("Memórianapló törlése")
-        clear.clicked.connect(self._clear)
+        self._clear_button = QPushButton("Memórianapló törlése")
+        self._clear_button.clicked.connect(self._clear)
         self._status = QLabel()
+        self._status.setObjectName("device_communication_status")
         controls.addWidget(QLabel("Szűrés"), 0, 0)
-        controls.addWidget(self._filter, 0, 1)
-        controls.addWidget(clear, 0, 2)
-        controls.addWidget(self._status, 0, 3)
-        layout.addLayout(controls)
-        self._table = QTableWidget(0, 6)
+        controls.addWidget(self._filter, 0, 1, 1, 2)
+        controls.addWidget(self._status, 1, 0, 1, 2)
+        controls.addWidget(self._clear_button, 1, 2)
+        controls.setColumnStretch(1, 1)
+        layout.addWidget(controls_box)
+
+        events_box = QGroupBox("Kommunikációs események")
+        events_layout = QVBoxLayout(events_box)
+        self._table = QTableWidget(0, 8)
+        self._table.setObjectName("device_communication_table")
         self._table.setHorizontalHeaderLabels(
-            ("UTC idő", "Monotonic", "Szint", "Eszköz", "Irány", "Üzenet")
+            (
+                "UTC idő",
+                "Monotonic",
+                "Szint",
+                "Forrás",
+                "Irány",
+                "Cél / címzett",
+                "Kapcsolat",
+                "Küldött / fogadott tartalom",
+            )
         )
         self._table.setAlternatingRowColors(True)
         self._table.setWordWrap(False)
-        self._table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self._table)
-        close = QPushButton("Bezárás")
-        close.clicked.connect(self.accept)
-        layout.addWidget(close)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+        )
+        self._table.setMinimumWidth(0)
+        self._table.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        header = self._table.horizontalHeader()
+        header.setStretchLastSection(False)
+        for column in (0, 1, 2, 4, 6):
+            header.setSectionResizeMode(column, header.ResizeMode.ResizeToContents)
+        for column in (3, 5, 7):
+            header.setSectionResizeMode(column, header.ResizeMode.Stretch)
+        events_layout.addWidget(self._table)
+        layout.addWidget(events_box, 1)
+
+        self._buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        self._buttons.setObjectName("device_communication_buttons")
+        self._buttons.button(QDialogButtonBox.StandardButton.Close).setText("Bezárás")
+        self._buttons.rejected.connect(self.accept)
+        layout.addWidget(self._buttons)
         self._timer = QTimer(self)
         self._timer.setInterval(250)
         self._timer.timeout.connect(self._refresh)
@@ -1825,16 +1951,26 @@ class DeveloperViewDialog(QDialog):
                 continue
             row = self._table.rowCount()
             self._table.insertRow(row)
+            source, destination, transport = self._event_route(event)
             values = (
                 event.recorded_at.isoformat(),
                 f"{event.monotonic_seconds:.6f}",
                 event.level,
-                event.category.value,
+                source,
                 event.direction,
+                destination,
+                transport,
                 event.message,
             )
             for column, value in enumerate(values):
-                self._table.setItem(row, column, QTableWidgetItem(value))
+                item = QTableWidgetItem(value)
+                item.setToolTip(
+                    f"{source} → {destination}\n"
+                    f"Kapcsolat: {transport}\n"
+                    f"Irány/esemény: {event.direction}\n"
+                    f"Tartalom: {event.message}"
+                )
+                self._table.setItem(row, column, item)
         state = "BE" if self._logger.enabled else "KI"
         self._status.setText(f"Naplózás: {state} | sorok: {self._table.rowCount()}")
 
@@ -1847,6 +1983,19 @@ class DeveloperViewDialog(QDialog):
         self._table.setRowCount(0)
         self._last_sequence = 0
         self._refresh()
+
+    @classmethod
+    def _event_route(cls, event: DiagnosticEvent) -> tuple[str, str, str]:
+        endpoint = cls.ENDPOINT_LABELS[event.category]
+        transport = cls.TRANSPORT_LABELS[event.category]
+        direction = event.direction.upper()
+        if "RX" in direction:
+            return endpoint, cls.APPLICATION_ENDPOINT, transport
+        if "TX" in direction or direction == "SAFE":
+            return cls.APPLICATION_ENDPOINT, endpoint, transport
+        if event.category in DiagnosticLogger.HARDWARE_CATEGORIES:
+            return endpoint, cls.APPLICATION_ENDPOINT, transport
+        return endpoint, "Kezelői felület / diagnosztika", transport
 
 
 class DataManagementBridge(QObject):

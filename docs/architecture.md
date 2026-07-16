@@ -249,6 +249,11 @@ A DASNET kliens a nyers TX/RX kereteket, timeoutokat, kerethibákat és pumpa
 safe-state-et rögzíti. A `DeveloperViewDialog` 250 ms-os UI-időzítővel csak az új
 memóriaeseményeket olvassa, így nem blokkolja a kommunikációs szálakat. A naplózás
 engedélye és kategóriái `QSettings` alatt megmaradnak.
+A nézet a többi beállítóablakkal azonos cím–magyarázat–kártya–tartalom–alsó
+műveletsor hierarchiát használja. A reszponzív eseménytábla külön forrás, cél,
+irány, kapcsolat és tartalom mezőben mutatja a kommunikáció útvonalát; a változó
+szélességű oszlopok kitöltik az elérhető helyet, a technikai oszlopok pedig csak a
+szükséges szélességet foglalják el.
 A Developer mód külön, az INI-ben megmaradó kapcsoló. Normál módban a sikeres
 eszközfelderítés technikai összegzése és az eszközkommunikációs Developer nézet
 rejtve marad; a felderítési figyelmeztetések és hibák azonban minden módban
