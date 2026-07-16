@@ -166,9 +166,16 @@ indításkori érték fölé nőtt.
 ## Hordozható Windows-csomag
 
 ```powershell
-python -m pip install -e ".[ui,hardware,export,package]"
+# A .venv környezetet Python 3.12 x64 verzióval kell létrehozni.
+py -3.12 -m venv .venv
 .\scripts\build_windows.ps1
 ```
+
+A build script kizárólag Python 3.12-es virtuális környezetet fogad el, és a
+`constraints-windows-legacy.txt` alapján telepíti az összes csomagolási függőséget.
+Ez garantálja, hogy a csomagolt alkalmazás NumPy 1.26.4-et tartalmazzon; a célgépen
+nem szükséges külön Python- vagy NumPy-telepítés. Python 3.14-es környezetből a
+célgépes csomag szándékosan nem készíthető el.
 
 A PyInstaller `onefile` csomag egyetlen `dist/EOR_Controller.exe` fájlba kerül. A
 beállítások, projektek és várólisták az EXE-től független, írható `config/` és
