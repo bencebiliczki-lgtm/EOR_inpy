@@ -2,10 +2,25 @@ import os
 from pathlib import Path
 from time import sleep
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSettings  # noqa: E402
-from PySide6.QtWidgets import QApplication, QComboBox, QSplitter  # noqa: E402
+from PySide6.QtCore import QSettings, Qt  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QAbstractScrollArea,
+    QApplication,
+    QComboBox,
+    QDialog,
+    QFormLayout,
+    QGroupBox,
+    QInputDialog,
+    QLabel,
+    QMessageBox,
+    QScrollArea,
+    QSplitter,
+    QTabWidget,
+)
 
 from eor_control.application import RunMode  # noqa: E402
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger  # noqa: E402
@@ -17,20 +32,92 @@ from eor_control.hardware import (  # noqa: E402
 )
 from eor_control.projects import ProjectRepository  # noqa: E402
 from eor_control.ui import (  # noqa: E402
+    ADD_STAGE_ACTION_DATA,
+    DARK_STYLESHEET,
+    LIGHT_STYLESHEET,
+    SYSTEM_STYLESHEET,
+    WINDOWS_APP_USER_MODEL_ID,
     DeveloperViewDialog,
     DeviceSettingsDialog,
     LoggingSettingsDialog,
-    MeasurementHistoryDialog,
+    MeasurementHistoryView,
+    ProjectSelectionDialog,
     ProjectSettingsDialog,
+    StageSettingsDialog,
     application_icon,
     application_icon_path,
     build_simulated_dashboard,
+    configure_windows_application_identity,
+    resolved_theme_stylesheet,
 )
 
 
 def application() -> QApplication:
     instance = QApplication.instance()
     return instance if isinstance(instance, QApplication) else QApplication([])
+
+
+def test_text_labels_have_no_theme_background_fill() -> None:
+    transparent_rule = "QLabel { background: transparent; }"
+    for stylesheet in (LIGHT_STYLESHEET, DARK_STYLESHEET, SYSTEM_STYLESHEET):
+        assert transparent_rule in stylesheet
+        assert "QLineEdit, QTextEdit, QPlainTextEdit" in stylesheet
+        assert "background: transparent" in stylesheet
+
+
+def test_windows_application_identity_is_set_for_taskbar_icon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeSetter:
+        argtypes: list[object] = []
+        restype: object = None
+
+        def __call__(self, app_id: str) -> None:
+            calls.append(app_id)
+
+    class FakeShell:
+        SetCurrentProcessExplicitAppUserModelID = FakeSetter()
+
+    monkeypatch.setattr("eor_control.ui.sys.platform", "win32")
+    monkeypatch.setattr(
+        "eor_control.ui.ctypes.WinDLL", lambda *_args, **_kwargs: FakeShell()
+    )
+
+    configure_windows_application_identity()
+
+    assert calls == [WINDOWS_APP_USER_MODEL_ID]
+
+
+def test_form_control_subbuttons_are_covered_by_both_themes() -> None:
+    for theme, stylesheet in (("light", LIGHT_STYLESHEET), ("dark", DARK_STYLESHEET)):
+        assert "border-top-left-radius: 6px" in stylesheet
+        assert "border-top-right-radius: 6px" in stylesheet
+        assert "QComboBox::drop-down" in stylesheet
+        assert "QComboBox QAbstractItemView" in stylesheet
+        assert "QDoubleSpinBox::up-button" in stylesheet
+        assert "QDoubleSpinBox::down-button" in stylesheet
+        assert "QSpinBox::up-button" in stylesheet
+        assert "QSpinBox::down-button" in stylesheet
+        assert "QComboBox:focus" in stylesheet
+        assert "QDoubleSpinBox:disabled" in stylesheet
+        resolved = resolved_theme_stylesheet(stylesheet, theme)
+        assert "__THEME_" not in resolved
+        assert f"arrow-down-{theme}.svg" in resolved
+        assert f"arrow-up-{theme}.svg" in resolved
+
+
+def test_scrollbars_are_covered_by_both_themes() -> None:
+    for stylesheet in (LIGHT_STYLESHEET, DARK_STYLESHEET):
+        assert "QScrollBar:vertical" in stylesheet
+        assert "QScrollBar:horizontal" in stylesheet
+        assert "QScrollBar::handle:vertical" in stylesheet
+        assert "QScrollBar::handle:horizontal" in stylesheet
+        assert "QScrollBar::add-line" in stylesheet
+        assert "QScrollBar::sub-line" in stylesheet
+        assert "QAbstractScrollArea::corner" in stylesheet
+        assert "QSplitter::handle" in stylesheet
 
 
 class UnusedTester:
@@ -49,6 +136,7 @@ def test_device_settings_discovers_dropdown_choices(tmp_path: Path) -> None:
         settings=settings,
         current_mode=RunMode.SIMULATION,
         diagnostics=diagnostics,
+        developer_mode=True,
         discoverer=lambda: HardwareDiscovery(
             serial_ports=(
                 SerialPortInfo("COM8", "USB Serial Port", "FTDI", "FT232R"),
@@ -65,6 +153,9 @@ def test_device_settings_discovers_dropdown_choices(tmp_path: Path) -> None:
     )
 
     assert isinstance(dialog.jacket_port, QComboBox)
+    assert dialog.device_tabs.count() == 2
+    assert dialog.device_tabs.tabText(0) == "Pumpák"
+    assert dialog.device_tabs.tabText(1) == "NI mérés és szelep"
     assert not dialog.jacket_port.isEditable()
     assert dialog.jacket_port.findData("COM8") >= 0
     assert dialog.jacket_port.itemText(dialog.jacket_port.findData("COM8")) == (
@@ -105,6 +196,7 @@ def test_device_settings_discovers_dropdown_choices(tmp_path: Path) -> None:
     dialog.valve_channel.setCurrentIndex(dialog.valve_channel.findData("Dev2/ao0"))
     assert dialog._read_configuration().line_pressure_channel == "Dev2/ai0"
     assert "2 soros csatlakozó" in dialog._discovery_status.text()
+    assert not dialog._discovery_status.isHidden()
     assert "system\tDISCOVERY\t2 COM-port" in log_path.read_text(encoding="utf-8")
     dialog.close()
 
@@ -125,7 +217,310 @@ def test_device_settings_shows_when_no_device_is_available(tmp_path: Path) -> No
     assert not dialog.ni_device.isEnabled()
     assert dialog.line_channel.currentText() == "Előbb válassz NI eszközt"
     assert not dialog.line_channel.isEnabled()
+    assert dialog._discovery_status.isHidden()
     dialog.close()
+
+
+def test_project_selector_lists_last_stage_and_can_create_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    settings = QSettings(str(tmp_path / "selector.ini"), QSettings.Format.IniFormat)
+    with ProjectRepository(tmp_path / "selector.sqlite3") as repository:
+        older = repository.create_project(
+            name="Korábbi projekt",
+            configuration={},
+            calibration_snapshot={},
+        )
+        repository.add_stage(older.id, "Első fázis")
+        last_stage = repository.add_stage(older.id, "Olajkiszorítás")
+        repository.create_project(
+            name="Újabb projekt",
+            configuration={},
+            calibration_snapshot={},
+        )
+        settings.setValue(
+            f"project/last_stage_by_project/{older.id}", last_stage.id
+        )
+        dialog = ProjectSelectionDialog(
+            repository,
+            settings=settings,
+            selected_project_id=older.id,
+            selected_stage_id=last_stage.id,
+            configuration={"mode": "simulation"},
+            calibration_snapshot={},
+        )
+
+        older_row = next(
+            row
+            for row in range(dialog.project_table.rowCount())
+            if dialog.project_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            == older.id
+        )
+        assert dialog.project_table.rowCount() == 2
+        assert dialog.project_table.item(older_row, 1).text() == "Olajkiszorítás"
+        assert dialog.selected_project_id == older.id
+        assert dialog.selected_stage_id == last_stage.id
+
+        monkeypatch.setattr(
+            QInputDialog, "getText", lambda *_args, **_kwargs: ("Új projekt", True)
+        )
+        monkeypatch.setattr(
+            QInputDialog,
+            "getMultiLineText",
+            lambda *_args, **_kwargs: ("Megjegyzés", True),
+        )
+        dialog._create_project()
+        assert dialog.project_table.item(dialog.project_table.currentRow(), 0).text() == (
+            "Új projekt"
+        )
+        assert dialog.stage_selector.currentText() == "Hidegvizes mérés"
+        dialog.close()
+
+
+def test_project_selector_can_delete_project_but_keeps_raw_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    settings = QSettings(str(tmp_path / "delete.ini"), QSettings.Format.IniFormat)
+    raw_file = tmp_path / "data" / "projects" / "archived_raw.csv"
+    raw_file.parent.mkdir(parents=True)
+    raw_file.write_text("measurement", encoding="utf-8")
+    with ProjectRepository(tmp_path / "delete.sqlite3") as repository:
+        project = repository.create_project(
+            name="Törlendő projekt",
+            configuration={},
+            calibration_snapshot={},
+        )
+        stage = repository.add_stage(project.id, "Mérési fázis")
+        settings.setValue("project/last_project_id", project.id)
+        settings.setValue("project/last_stage_id", stage.id)
+        settings.setValue(f"project/last_stage_by_project/{project.id}", stage.id)
+        dialog = ProjectSelectionDialog(
+            repository,
+            settings=settings,
+            selected_project_id=project.id,
+            selected_stage_id=stage.id,
+            configuration={},
+            calibration_snapshot={},
+        )
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        )
+
+        dialog._delete_project()
+
+        assert repository.list_projects() == ()
+        assert dialog.project_table.rowCount() == 0
+        assert settings.value("project/last_project_id") is None
+        assert settings.value("project/last_stage_id") is None
+        assert settings.value(f"project/last_stage_by_project/{project.id}") is None
+        assert raw_file.read_text(encoding="utf-8") == "measurement"
+        dialog.close()
+
+
+def test_dashboard_requires_project_selector_without_last_project(tmp_path: Path) -> None:
+    application()
+    project_path = tmp_path / "startup-projects.sqlite3"
+    with ProjectRepository(project_path) as repository:
+        project = repository.create_project(
+            name="Választható projekt",
+            configuration={},
+            calibration_snapshot={},
+        )
+        repository.add_stage(project.id, "Hidegvizes mérés")
+    window = build_simulated_dashboard(
+        tmp_path / "startup.csv",
+        project_path,
+        settings=QSettings(
+            str(tmp_path / "startup.ini"), QSettings.Format.IniFormat
+        ),
+    )
+
+    assert window._project_selector_required
+    assert window._project.currentData() is None
+    assert window._active_project_label.text() == "Nincs kiválasztva"
+    assert window._stage.currentText() == "Nincs kiválasztott projekt"
+    assert not window._stage.isEnabled()
+    window.close()
+
+
+def test_stage_selector_last_item_creates_stage_with_notes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    project_path = tmp_path / "stage-projects.sqlite3"
+    with ProjectRepository(project_path) as repository:
+        project = repository.create_project(
+            name="Szakasz projekt", configuration={}, calibration_snapshot={}
+        )
+        original = repository.add_stage(project.id, "Első szakasz")
+    settings = QSettings(str(tmp_path / "stage.ini"), QSettings.Format.IniFormat)
+    settings.setValue("project/last_project_id", project.id)
+    settings.setValue("project/last_stage_id", original.id)
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", project_path, settings=settings
+    )
+    selector = window._stage
+
+    assert selector.itemData(selector.count() - 1) == ADD_STAGE_ACTION_DATA
+    assert selector.itemText(selector.count() - 1) == "+ Új szakasz hozzáadása…"
+    monkeypatch.setattr(
+        StageSettingsDialog,
+        "exec",
+        lambda _dialog: QDialog.DialogCode.Accepted,
+    )
+    monkeypatch.setattr(
+        StageSettingsDialog,
+        "values",
+        lambda _dialog: {
+            "name": "Új tesztszakasz",
+            "fluid": "tesztfolyadék",
+            "target_pressure_bar": 75.0,
+            "target_flow_ml_per_hour": 4.0,
+            "notes": "Operátori megjegyzés",
+        },
+    )
+
+    selector.setCurrentIndex(selector.count() - 1)
+
+    created_id = selector.currentData()
+    assert isinstance(created_id, int)
+    created = window._projects.get_stage(created_id)
+    assert created.name == "Új tesztszakasz"
+    assert created.notes == "Operátori megjegyzés"
+    assert selector.itemData(selector.count() - 1) == ADD_STAGE_ACTION_DATA
+
+    monkeypatch.setattr(
+        StageSettingsDialog,
+        "exec",
+        lambda _dialog: QDialog.DialogCode.Rejected,
+    )
+    selector.setCurrentIndex(selector.count() - 1)
+    assert selector.currentData() == created_id
+    window.close()
+
+
+def test_pid_profile_can_be_saved_loaded_overwritten_and_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    project_path = tmp_path / "pid-projects.sqlite3"
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        project_path,
+        settings=QSettings(str(tmp_path / "pid.ini"), QSettings.Format.IniFormat),
+    )
+    window._kp.setValue(2.5)
+    window._ki.setValue(0.15)
+    window._kd.setValue(0.01)
+    window._output_min.setValue(5.0)
+    window._output_max.setValue(75.0)
+    window._direction.setCurrentIndex(
+        window._direction.findData("reverse")
+    )
+    window._source.setCurrentIndex(window._source.findData("line_sensor"))
+    monkeypatch.setattr(
+        QInputDialog,
+        "getText",
+        lambda *_args, **_kwargs: ("Olaj profil", True),
+    )
+
+    window._save_pid_profile()
+
+    profile_id = window._pid_profile.currentData()
+    assert isinstance(profile_id, int)
+    saved = window._projects.get_pid_profile(profile_id)
+    assert saved.name == "Olaj profil"
+    assert saved.kp == 2.5
+    assert saved.direction == "reverse"
+    assert saved.pressure_source == "line_sensor"
+
+    window._kp.setValue(9.0)
+    assert window._pid_profile.currentData() is None
+    window._pid_profile.setCurrentIndex(window._pid_profile.findData(profile_id))
+    assert window._kp.value() == 2.5
+    assert window._source.currentData() == "line_sensor"
+
+    window._kp.setValue(3.5)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+    window._save_pid_profile(profile_name="Olaj profil")
+    assert window._projects.get_pid_profile(profile_id).kp == 3.5
+    settings_path = Path(window._user_settings.fileName())
+    window.close()
+
+    restored = build_simulated_dashboard(
+        tmp_path / "restored.csv",
+        project_path,
+        settings=QSettings(str(settings_path), QSettings.Format.IniFormat),
+    )
+    assert restored._pid_profile.currentData() == profile_id
+    assert restored._kp.value() == 3.5
+    assert restored._source.currentData() == "line_sensor"
+
+    restored._delete_pid_profile()
+    assert restored._projects.list_pid_profiles() == ()
+    assert restored._pid_profile.currentData() is None
+    restored.close()
+
+
+def test_developer_can_switch_back_to_non_persistent_simulation(tmp_path: Path) -> None:
+    application()
+    settings = QSettings(str(tmp_path / "simulation.ini"), QSettings.Format.IniFormat)
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3", settings=settings
+    )
+    window._set_developer_mode(True)
+    window._run_mode = RunMode.HARDWARE
+    window._sync_simulation_mode_action()
+
+    window._simulation_mode_action.setChecked(True)
+
+    assert window._run_mode is RunMode.SIMULATION
+    assert window._devices.status.mode is RunMode.SIMULATION
+    assert not window._measurement_writer.persistence_enabled
+    assert window._measurement_writer.current_path is None
+    assert "NINCS ADATMENTÉS" in window._current_mode_message
+    assert "szimuláció" in window.windowTitle().lower()
+    assert not (tmp_path / "projects").exists()
+    window.close()
+
+
+def test_background_alert_flashes_taskbar_once_per_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+    )
+    taskbar_alerts: list[bool] = []
+    window._last_notification_key = None
+    monkeypatch.setattr(window, "isMinimized", lambda: True)
+    monkeypatch.setattr(
+        window, "_request_taskbar_attention", lambda: taskbar_alerts.append(True)
+    )
+
+    window._notify_user(
+        "Biztonsági riasztás",
+        "Teszt hiba",
+        critical=True,
+        notification_key="alarm:test",
+    )
+    window._notify_user(
+        "Biztonsági riasztás",
+        "Teszt hiba",
+        critical=True,
+        notification_key="alarm:test",
+    )
+
+    assert taskbar_alerts == [True]
+    window.close()
 
 
 def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None:
@@ -141,16 +536,19 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
             configuration={},
             calibration_snapshot={},
         )
-        repository.add_stage(
+        stage = repository.add_stage(
             project.id,
             "Water stage",
             fluid="water",
             target_pressure_bar=88.0,
             target_flow_ml_per_hour=10.0,
         )
+        alternate_stage = repository.add_stage(project.id, "Oil stage", fluid="oil")
 
     settings_path = tmp_path / "config" / "AFKI" / "EORControl.ini"
     user_settings = QSettings(str(settings_path), QSettings.Format.IniFormat)
+    user_settings.setValue("project/last_project_id", project.id)
+    user_settings.setValue("project/last_stage_id", stage.id)
     window = build_simulated_dashboard(
         tmp_path / "raw.csv", project_path, settings=user_settings
     )
@@ -161,8 +559,28 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     assert project_selector.currentText() == "UI project"
     assert stage_selector is not None
     assert stage_selector.currentText() == "Water stage"
+    project_summary = window.findChild(QGroupBox, "active_project_summary")
+    assert project_summary is not None
+    assert project_summary.findChild(QComboBox, "stage_selector") is stage_selector
+    assert stage_selector.isEnabled()
+    stage_selector.setCurrentIndex(stage_selector.findData(alternate_stage.id))
+    assert window._runtime_settings().active_stage == "Oil stage"
+    assert window._active_stage_label.text() == "Oil stage"
+    stage_selector.setCurrentIndex(stage_selector.findData(stage.id))
     assert window._active_project_label.text() == "UI project"
     assert window._active_stage_label.text() == "Water stage"
+    assert not window._project_selector_required
+    assert "SZIMULÁCIÓ" in window._current_mode_message
+    assert "NINCS ADATMENTÉS" in window._current_mode_message
+    assert window.findChild(QLabel, "dashboard_mode_label") is None
+    assert not hasattr(window, "_alarm_label")
+    assert window._active_alarm_text == "Nincs aktív riasztás"
+    assert not window._developer_mode
+    window._set_developer_mode(True)
+    assert window._developer_view_action.isVisible()
+    assert window._simulation_mode_action.isVisible()
+    assert window._simulation_mode_action.isChecked()
+    assert user_settings.value("developer/enabled") is True
     assert window._setpoint.value() == 88.0
     assert "water" in window._active_stage_label.toolTip()
     assert "Projekt" in [action.text() for action in window.menuBar().actions()]
@@ -170,14 +588,104 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     splitter = window.findChild(QSplitter, "dashboard_splitter")
     assert splitter is not None
     assert splitter.count() == 3
+    assert splitter.handleWidth() == 5
+    assert splitter.opaqueResize()
     assert splitter.widget(0).objectName() == "status_scroll_area"
-    assert splitter.widget(1).objectName() == "live_chart_splitter"
+    status_scroll = splitter.widget(0)
+    assert isinstance(status_scroll, QScrollArea)
+    assert status_scroll.widgetResizable()
+    assert status_scroll.sizeAdjustPolicy() == (
+        QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+    )
+    assert status_scroll.minimumWidth() == 170
+    assert status_scroll.verticalScrollBarPolicy() == (
+        Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    )
+    assert status_scroll.horizontalScrollBarPolicy() == (
+        Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+    assert status_scroll.widget() is not None
+    assert status_scroll.widget().minimumWidth() == 0
+    assert window._injection_flow_label.wordWrap()
+    for label in (
+        window._state_label,
+        window._jacket_label,
+        window._jacket_remaining_label,
+        window._jacket_net_volume_label,
+        window._injection_label,
+        window._injection_remaining_label,
+        window._injection_flow_label,
+        window._injected_volume_label,
+        window._line_label,
+        window._delta_label,
+        window._valve_label,
+        *window._connection_labels.values(),
+    ):
+        assert "background:transparent" in label.styleSheet()
+    for label in window.findChildren(QLabel):
+        assert "background:#" not in label.styleSheet().replace(" ", "").lower()
+    assert splitter.widget(1).objectName() == "dashboard_measurement_tabs"
     assert splitter.widget(2).objectName() == "control_scroll_area"
+    control_scroll = splitter.widget(2)
+    assert isinstance(control_scroll, QScrollArea)
+    assert control_scroll.widgetResizable()
+    assert control_scroll.sizeAdjustPolicy() == (
+        QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+    )
+    assert control_scroll.minimumWidth() == 260
+    assert control_scroll.horizontalScrollBarPolicy() == (
+        Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+    assert control_scroll.verticalScrollBarPolicy() == (
+        Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    )
+    assert control_scroll.widget() is not None
+    assert control_scroll.widget().minimumWidth() == 0
+    valve_settings = window.findChild(QGroupBox, "valve_control_settings")
+    assert valve_settings is not None
+    control_form = valve_settings.layout()
+    assert isinstance(control_form, QFormLayout)
+    assert control_form.rowWrapPolicy() == QFormLayout.RowWrapPolicy.DontWrapRows
+    window.resize(1200, 420)
+    window.show()
+    application().processEvents()
+    control_fields = (
+        window._mode,
+        window._source,
+        window._manual_output,
+        window._setpoint,
+        window._recording_interval,
+        window._pid_profile,
+        window._kp,
+        window._ki,
+        window._kd,
+        window._direction,
+        window._output_min,
+        window._output_max,
+    )
+    assert len({field.width() for field in control_fields}) == 1
+    assert status_scroll.verticalScrollBar().isVisible()
+    assert control_scroll.verticalScrollBar().isVisible()
+    left_width = status_scroll.width()
+    splitter.moveSplitter(splitter.handle(1).x() + 50, 1)
+    application().processEvents()
+    assert status_scroll.width() > left_width
+    right_width = control_scroll.width()
+    splitter.moveSplitter(splitter.handle(2).x() - 50, 2)
+    application().processEvents()
+    assert control_scroll.width() > right_width
+    assert len({field.width() for field in control_fields}) == 1
     chart_splitter = window.findChild(QSplitter, "live_chart_splitter")
     assert chart_splitter is not None
     assert chart_splitter.count() == 2
     assert chart_splitter.widget(0).objectName() == "live_measurement_plot"
     assert chart_splitter.widget(1).objectName() == "live_injection_flow_plot"
+    measurement_tabs = window.findChild(QTabWidget, "dashboard_measurement_tabs")
+    assert measurement_tabs is not None
+    assert measurement_tabs.count() == 2
+    assert measurement_tabs.tabText(0) == "Élő mérés"
+    assert measurement_tabs.tabText(1) == "Teljes mérés"
+    assert isinstance(measurement_tabs.widget(1), MeasurementHistoryView)
     configuration = window._current_configuration()
     assert configuration["pid"]["direction"] == "direct"
     window._apply_pid()
@@ -192,7 +700,10 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     assert "ml" in window._jacket_remaining_label.text()
     assert "ml" in window._injection_remaining_label.text()
     assert "ml/h" in window._injection_flow_label.text()
-    assert "Mérés óta besajtolt:" in window._injected_volume_label.text()
+    assert "Indítás óta nettó besajtolt:" in window._injected_volume_label.text()
+    assert "Indítás óta nettó köpenytérfogat:" in (
+        window._jacket_net_volume_label.text()
+    )
     x_values, _ = window._jacket_curve.getData()
     assert x_values is not None
     assert all(value >= 0.0 for value in x_values)
@@ -205,16 +716,19 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     window._runtime.stop()
     window._devices.stop()
     measurement_path = window._measurement_writer.current_path
-    assert measurement_path is not None
-    assert "000001_UI_project" in str(measurement_path)
-    history = MeasurementHistoryDialog(measurement_path, "UI project", parent=window)
-    assert len(history._table.rows) >= 1
+    assert measurement_path is None
+    assert not tuple((tmp_path / "projects").rglob("*_raw.csv"))
+    window._open_measurement_history()
+    assert window._measurement_tabs.currentWidget() is window._history_view
+    history = window._history_view
+    assert history._table.rows == ()
+    assert "Nincs rögzített minta" in history._status.text()
+    assert history._stage_plot.objectName() == "measurement_stage_timeline"
     assert history._checks["jacket_pressure_bar"].isChecked()
     history._time_range.setCurrentIndex(4)
     assert history._custom_minutes.isEnabled()
     history._auto_y.setChecked(False)
     assert history._y_min.isEnabled()
-    history.close()
 
     dialog = ProjectSettingsDialog(
         window._projects,
@@ -228,8 +742,26 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     assert dialog.stage_selector.currentText() == "Water stage"
     dialog.close()
 
-    window._measurement_settings_action.setChecked(True)
-    assert not window._measurement_settings.isHidden()
+    assert not window._measurement_settings_action.isCheckable()
+    calibration_tabs = window._measurement_settings.findChild(
+        QTabWidget, "calibration_settings_tabs"
+    )
+    assert calibration_tabs is not None
+    assert calibration_tabs.count() == 2
+    assert calibration_tabs.tabText(0) == "Érzékelők kalibrációja"
+    assert calibration_tabs.tabText(1) == "Biztonsági határértékek"
+    assert window._minimum_margin.minimum() == 20.0
+    window._open_measurement_overview()
+    overview = window._overview_dialog
+    assert overview is not None
+    overview.refresh()
+    assert overview.value_labels["project"].text() == "UI project"
+    assert overview.value_labels["stage"].text() == "Water stage"
+    assert overview.value_labels["line_calibration"].text() == (
+        "1–5 V → 0–400 bar"
+    )
+    assert overview.value_labels["minimum_margin"].text() == "20 bar"
+    overview.close()
     window._manual_output.setValue(33.0)
     window._recording_interval.setValue(7)
     window._set_theme("dark")
@@ -253,7 +785,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     restored._set_theme("light")
     assert "#f5f7fa" in application().styleSheet()
     restored._set_theme("system")
-    assert application().styleSheet() == ""
+    assert application().styleSheet() == SYSTEM_STYLESHEET
 
     def dev7_discovery() -> HardwareDiscovery:
         return HardwareDiscovery(

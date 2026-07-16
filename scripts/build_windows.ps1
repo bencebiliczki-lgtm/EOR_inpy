@@ -25,7 +25,7 @@ try {
     }
 
     & $python -m PyInstaller --noconfirm --clean eor_control.spec
-    Write-Host "Elkészült: $root\dist\EOR_Controller\EOR_Controller.exe"
+    Write-Host "Elkészült: $root\dist\EOR_Controller.exe"
 }
 finally {
     Pop-Location

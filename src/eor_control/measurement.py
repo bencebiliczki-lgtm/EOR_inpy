@@ -40,6 +40,7 @@ class MeasurementService:
         writer: MeasurementWriter,
         clock: Clock | None = None,
         channels: MeasurementChannels | None = None,
+        persistence_enabled: bool = True,
     ) -> None:
         self._jacket_pump = jacket_pump
         self._injection_pump = injection_pump
@@ -50,10 +51,13 @@ class MeasurementService:
         self._writer = writer
         self._clock = clock or SystemClock()
         self._channels = channels or MeasurementChannels()
+        self._persistence_enabled = persistence_enabled
+        self._initial_jacket_volume_ml: float | None = None
         self._initial_injection_volume_ml: float | None = None
 
     def reset_injected_volume_tracking(self) -> None:
         """Start the injected-volume counter from the next acquired pump status."""
+        self._initial_jacket_volume_ml = None
         self._initial_injection_volume_ml = None
 
     def sample_once(
@@ -68,6 +72,8 @@ class MeasurementService:
     ) -> MeasurementRecord:
         jacket = self._jacket_pump.read_status()
         injection = self._injection_pump.read_status()
+        if self._initial_jacket_volume_ml is None:
+            self._initial_jacket_volume_ml = jacket.remaining_volume_ml
         if self._initial_injection_volume_ml is None:
             self._initial_injection_volume_ml = injection.remaining_volume_ml
 
@@ -98,13 +104,16 @@ class MeasurementService:
         )
         record = MeasurementRecord(
             snapshot=snapshot,
-            injected_volume_ml=max(
-                0.0, self._initial_injection_volume_ml - injection.remaining_volume_ml
+            injected_volume_ml=(
+                self._initial_injection_volume_ml - injection.remaining_volume_ml
             ),
             active_stage=active_stage,
+            jacket_net_volume_ml=(
+                self._initial_jacket_volume_ml - jacket.remaining_volume_ml
+            ),
             safety_reasons=decision.reasons,
         )
-        if persist:
+        if persist and self._persistence_enabled:
             self._writer.write(record)
         if not decision.safe:
             self.request_safe_state()

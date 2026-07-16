@@ -35,4 +35,11 @@ class MeasurementRecord:
     snapshot: MeasurementSnapshot
     injected_volume_ml: float
     active_stage: str
+    jacket_net_volume_ml: float = 0.0
     safety_reasons: tuple[str, ...] = ()
+
+    @property
+    def injection_net_volume_ml(self) -> float:
+        """Signed net injection-pump volume change since measurement start."""
+
+        return self.injected_volume_ml

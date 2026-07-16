@@ -29,4 +29,6 @@
 
 - Kötelező projektmezők és fájlelnevezési séma.
 - A projektek közösek, nincs projekttulajdonos vagy projektenkénti szerepkör.
-- PID profilok száma és hozzáférése.
+- A PID-profilok implementáltan korlátlan számú, közös SQLite-adatok; minden kezelő
+  kiválaszthatja, felülírhatja és törölheti őket. Ha később felhasználói jogosultsági
+  modell készül, a profilok hozzáférését azzal együtt kell újraértékelni.

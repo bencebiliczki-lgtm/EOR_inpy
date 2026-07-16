@@ -38,7 +38,10 @@ class FakeClock:
 
 
 def service(
-    *, jacket_pressure: float = 120.0, injection_pressure: float = 100.0
+    *,
+    jacket_pressure: float = 120.0,
+    injection_pressure: float = 100.0,
+    persistence_enabled: bool = True,
 ) -> tuple[
     MeasurementService,
     SimulatedPump,
@@ -65,24 +68,37 @@ def service(
         safety_monitor=SafetyMonitor(SafetyLimits(400.0, 350.0, 50.0)),
         writer=writer,
         clock=FakeClock(),
+        persistence_enabled=persistence_enabled,
     )
     return measurement_service, jacket, injection, daq, writer
 
 
 def test_sample_calibrates_and_tracks_injected_volume() -> None:
-    measurement_service, _, injection, _, writer = service()
+    measurement_service, jacket, injection, _, writer = service()
     first = measurement_service.sample_once(active_stage="water", valve_percent=25.0)
     injection.remaining_volume_ml = 247.5
+    jacket.remaining_volume_ml = 258.0
     second = measurement_service.sample_once(active_stage="water", valve_percent=25.0)
 
     assert first.snapshot.line_pressure_bar == pytest.approx(100.0)
     assert first.snapshot.differential_pressure_bar == pytest.approx(5.0)
     assert second.injected_volume_ml == pytest.approx(2.5)
+    assert second.injection_net_volume_ml == pytest.approx(2.5)
+    assert second.jacket_net_volume_ml == pytest.approx(2.0)
     assert writer.records == [first, second]
+
+    injection.remaining_volume_ml = 252.0
+    jacket.remaining_volume_ml = 263.0
+    reversed_flow = measurement_service.sample_once(
+        active_stage="water", valve_percent=25.0
+    )
+    assert reversed_flow.injection_net_volume_ml == pytest.approx(-2.0)
+    assert reversed_flow.jacket_net_volume_ml == pytest.approx(-3.0)
 
     measurement_service.reset_injected_volume_tracking()
     restarted = measurement_service.sample_once(active_stage="water", valve_percent=25.0)
     assert restarted.injected_volume_ml == pytest.approx(0.0)
+    assert restarted.jacket_net_volume_ml == pytest.approx(0.0)
 
 
 def test_non_persistent_control_sample_is_not_written() -> None:
@@ -93,6 +109,17 @@ def test_non_persistent_control_sample_is_not_written() -> None:
     )
 
     assert record.active_stage == "water"
+    assert writer.records == []
+
+
+def test_simulation_persistence_policy_never_writes_records() -> None:
+    measurement_service, _, _, _, writer = service(persistence_enabled=False)
+
+    record = measurement_service.sample_once(
+        active_stage="simulation", valve_percent=25.0, persist=True
+    )
+
+    assert record.active_stage == "simulation"
     assert writer.records == []
 
 

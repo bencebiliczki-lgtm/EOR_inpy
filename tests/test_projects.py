@@ -41,6 +41,54 @@ def test_database_can_be_reopened(tmp_path: Path) -> None:
         assert repository.get_project(project_id).name == "EOR-001"
 
 
+def test_pid_profiles_can_be_saved_updated_and_deleted(tmp_path: Path) -> None:
+    path = tmp_path / "profiles.sqlite3"
+    with ProjectRepository(path) as repository:
+        profile = repository.save_pid_profile(
+            name="Viszkózus olaj",
+            kp=2.5,
+            ki=0.15,
+            kd=0.01,
+            direction="reverse",
+            output_min_percent=5.0,
+            output_max_percent=70.0,
+            pressure_source="line_sensor",
+        )
+        updated = repository.save_pid_profile(
+            name="Viszkózus olaj",
+            kp=3.0,
+            ki=0.2,
+            kd=0.02,
+            direction="direct",
+            output_min_percent=10.0,
+            output_max_percent=80.0,
+            pressure_source="injection_pump",
+        )
+
+        assert updated.id == profile.id
+        assert repository.list_pid_profiles() == (updated,)
+        assert repository.get_pid_profile_by_name("viszkózus OLAJ") == updated
+        repository.delete_pid_profile(updated.id)
+        assert repository.list_pid_profiles() == ()
+
+
+def test_invalid_pid_profile_is_rejected(tmp_path: Path) -> None:
+    with (
+        ProjectRepository(tmp_path / "profiles.sqlite3") as repository,
+        pytest.raises(ValueError, match="output limits"),
+    ):
+        repository.save_pid_profile(
+            name="Hibás",
+            kp=1.0,
+            ki=0.0,
+            kd=0.0,
+            direction="direct",
+            output_min_percent=70.0,
+            output_max_percent=20.0,
+            pressure_source="injection_pump",
+        )
+
+
 def test_stages_are_added_in_order_and_can_be_renamed(tmp_path: Path) -> None:
     with ProjectRepository(tmp_path / "projects.sqlite3") as repository:
         project_id = create_project(repository)
@@ -85,6 +133,20 @@ def test_stage_metadata_can_be_edited_reordered_and_deleted(tmp_path: Path) -> N
     assert stages[0].target_pressure_bar == 120.0
     assert stages[0].target_flow_ml_per_hour == 8.0
     assert stages[0].notes == "second phase"
+
+
+def test_project_can_be_deleted_with_all_stage_metadata(tmp_path: Path) -> None:
+    with ProjectRepository(tmp_path / "projects.sqlite3") as repository:
+        project_id = create_project(repository)
+        stage = repository.add_stage(project_id, "Cold water")
+
+        repository.delete_project(project_id)
+
+        assert repository.list_projects() == ()
+        with pytest.raises(KeyError, match=f"project {project_id}"):
+            repository.get_project(project_id)
+        with pytest.raises(KeyError, match=f"stage {stage.id}"):
+            repository.get_stage(stage.id)
 
 
 @pytest.mark.parametrize("name", ["", "   "])
@@ -155,7 +217,7 @@ def test_version_one_database_is_migrated_with_stage_metadata(tmp_path: Path) ->
     assert stage.name == "Chemical"
     assert stage.fluid == "A"
     check = sqlite3.connect(path)
-    assert check.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert check.execute("PRAGMA user_version").fetchone()[0] == 4
     assert check.execute(
         "SELECT stage_type FROM measurement_stages WHERE id = ?", (stage.id,)
     ).fetchone()[0] == "Chemical"

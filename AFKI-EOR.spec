@@ -9,7 +9,7 @@ a = Analysis(
     pathex=[str(root / "src")],
     binaries=[],
     datas=[
-        (str(root / "img" / "icon.png"), "img"),
+        (str(root / "img"), "img"),
         (str(root / "docs" / "drivers_readme.txt"), "."),
     ],
     hiddenimports=[
@@ -44,7 +44,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    console=True,
     icon=str(root / "img" / "icon.png"),
     disable_windowed_traceback=False,
     argv_emulation=False,

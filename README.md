@@ -30,10 +30,36 @@ pytest
 python -m eor_control
 ```
 
+Interaktív, állapotot megőrző terminálos szimuláció indítása:
+
+```powershell
+python -m eor_control terminal
+# vagy a kiadott csomagból:
+.\AFKI-EOR.exe terminal
+```
+
+A terminál `help` parancsa listázza a kapcsolat-, mérés-, vészleállítás- és
+szabályozási parancsokat. A terminál mód jelenleg tudatosan csak szimulációt vezérel:
+nem ment mérési adatot és nem ér el fizikai kimenetet. A fizikai hardvermód
+felderítése, tesztje és kezelői engedélyezése továbbra is kizárólag a grafikus
+eszközbeállítási folyamatban történhet.
+
 A jelenlegi belépési pont szimulátoros PySide6 dashboardot indít. A felületen a
 csatlakozás és a mérés külön indítható, a kézi/automata szelepvezérlés választható,
-az élő nyomások diagramon láthatók. A nyers rekordok projektenként elkülönítve a
-`data/projects/<projektazonosító>_<projektnév>/<projektnév>_raw.csv` fájlba kerülnek.
+az élő nyomások diagramon láthatók. A nyers rekordok projektenként és mérési
+fázisonként elkülönítve a
+`data/projects/<év>/<dátum>_<projektazonosító>_<projektnév>/<projektnév>_<fázis>_live_raw.csv`
+fájlokba kerülnek.
+Szimulációs módban a mért értékek csak élőben jelennek meg: nyers CSV, projekt-
+pillanatkép és NAS-feladat nem készül. Az üzemmódváltást és a biztonsági hibákat
+eseményalapú rendszerértesítés jelzi; a dashboardon nincs állandó mód- vagy
+riasztási sáv. Minimalizált vagy háttérben lévő ablaknál a Windows tálcagomb is
+figyelmeztet. A részletes áttekintés továbbra is mutatja az aktuális üzemmódot és
+riasztási állapotot.
+A Developer mód bekapcsolása után a `Developer` → `Szimulációs mód` kapcsolóval
+lehet visszatérni a mentés nélküli szimulációhoz. A váltás csak leválasztott,
+`IDLE` állapotban engedélyezett. A kapcsoló kikapcsolása az eszközbeállítási
+ablakot nyitja meg; az éles mód továbbra is felderítést és külön megerősítést kér.
 
 Első indításkor nyisd meg a `Projekt` → `Projektkezelő…` ablakot, hozz létre egy
 projektet és legalább egy mérési szakaszt, majd kattints a `Csatlakozás` és a
@@ -45,6 +71,19 @@ Projekt létrehozásakor nem szükséges felhasználót vagy tulajdonost megadni
 mérés minden kezelő számára elérhető.
 A mérési szakasz neve egyben a típusa, ezért létrehozáskor és szerkesztéskor csak
 egyetlen közös mezőt kell megadni.
+Az **Aktív projekt** szakaszválasztójának utolsó eleme mindig az
+**„+ Új szakasz hozzáadása…”** művelet. Ez külön ablakban kéri be a szakasz adatait
+és az opcionális megjegyzést, majd mentés után automatikusan az új szakaszt választja.
+Projekt a projektválasztó képernyőről és a projektkezelőből is törölhető külön
+megerősítés után. Ez a projekt- és fázis-metaadatokat törli; a korábbi nyers mérési
+CSV-k biztonsági és visszakövethetőségi okból megmaradnak.
+
+A **Szelepvezérlés** panelen a PID-beállítások névvel menthető profilokba
+rendezhetők. A profil a `Kp`, `Ki`, `Kd`, hatásirány, kimeneti minimum/maximum és
+nyomásforrás értékeket tárolja. A profilok közös SQLite-adatok: kiválaszthatók,
+felülírhatók és megerősítés után törölhetők. Egy mentett profil kézi módosítása
+automatikusan **Egyéni beállítások** állapotra vált; az utoljára kiválasztott profil
+alkalmazásindításkor visszatöltődik.
 
 A dashboardon a vonali és differenciálnyomás-csatorna kétpontos kalibrációja,
 valamint a köpeny-, besajtolási és differenciálnyomás-határ és a minimális
@@ -106,13 +145,23 @@ külön pontos megerősítő szöveget kér. Elérhető külön STOP, STOP ALL, 
 
 A `Projekt` → `Adatkezelés és export…` ablak pontosvesszős vagy más elválasztójú,
 igény szerint tizedesvesszős CSV-t, továbbá diagramot is tartalmazó Excel-fájlt
-készít. Ugyanitt kapcsolható be a NAS-mentés. A másolás háttérszálon fut; sikertelen
+készít az aktív mérési fázis saját nyers CSV-jéből. Nem készül az összes fázist
+egyesítő exportfájl. Ugyanitt kapcsolható be a NAS-mentés. A másolás háttérszálon fut; sikertelen
 hálózati művelet SQLite-várólistán marad, és a program automatikusan újrapróbálja.
 
-A `Megjelenítés` → `Teljes rögzített mérés…` ablak a kiválasztott projekt korábbi
-adatait is visszatölti. Az adatsorok külön kapcsolhatók, választható vagy egyéni
+A dashboard középső részén az **Élő mérés** és a **Teljes mérés** fülek között lehet
+váltani. A **Teljes mérés** fül a kiválasztott projekt korábbi adatait is
+visszatölti. Az adatsorok külön kapcsolhatók, választható vagy egyéni
 időtartomány adható meg, az Y tengely automatikus vagy kézi lehet, a grafikon pedig
-egérrel szabadon nagyítható és mozgatható.
+egérrel szabadon nagyítható és mozgatható. A nézet mérési fázisra szűrhető, az
+összes fázis folytonos szakaszait pedig külön, színes idősáv mutatja. Ehhez a nézet
+a külön fázis-CSV-ket csak memóriában rendezi közös időrendbe.
+A `Megjelenítés` → `Teljes mérés fül` menüpont és a `Ctrl+Shift+G` gyorsbillentyű
+közvetlenül erre a dashboard-fülre vált, külön ablakot nem nyit.
+
+A dashboard mindkét pumpánál előjelesen mutatja az indítás óta számított nettó
+térfogatváltozást. Negatív érték azt jelenti, hogy a pumpa maradék térfogata az
+indításkori érték fölé nőtt.
 
 ## Hordozható Windows-csomag
 
@@ -121,13 +170,16 @@ python -m pip install -e ".[ui,hardware,export,package]"
 .\scripts\build_windows.ps1
 ```
 
-A PyInstaller `onedir` csomag a `dist/EOR_Controller/` könyvtárba kerül. A
-beállítások a hordozható mappa `config/`, a projektek és várólisták a `data/`
-könyvtárában maradnak; a program futásához nem szükséges internet. Az NI-DAQmx és
-a soros adapter Windows-drivereit a célgépen külön kell telepíteni.
+A PyInstaller `onefile` csomag egyetlen `dist/EOR_Controller.exe` fájlba kerül. A
+beállítások, projektek és várólisták az EXE-től független, írható `config/` és
+`data/` könyvtárakban maradnak; a program futásához nem szükséges internet. Az
+NI-DAQmx és a soros adapter Windows-drivereit a célgépen külön kell telepíteni.
 
 A GitHub Actions Windows workflow az `AFKI-EOR.spec` alapján egyfájlos
 `dist/AFKI-EOR.exe` kiadást készít és ezt csomagolja a célgépre feltöltött ZIP-be.
+A Windows EXE erőforrásikonja, az alkalmazásablak és a tálcagomb az `img/icon.png`
+képet használja. A stabil `AFKI.EOR.Control` Windows AppUserModelID megakadályozza,
+hogy futás közben a Python alapikonja jelenjen meg a tálcán.
 A workflow a build után kötelezően ellenőrzi, hogy a `serial.tools.list_ports`, a
 Windowsos sorosport-felderítő és a `nidaqmx.system` modulok bekerültek-e az EXE-be;
 hiányos csomag nem tölthető fel.

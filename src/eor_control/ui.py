@@ -1,6 +1,7 @@
+import ctypes
 import sys
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from threading import Thread
@@ -8,8 +9,10 @@ from typing import cast
 
 import pyqtgraph as pg  # type: ignore[import-untyped]
 from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon
+from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon, QShowEvent
 from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QAbstractScrollArea,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -28,10 +31,13 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
+    QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -54,8 +60,11 @@ from eor_control.data_management import (
     ProjectMeasurementWriter,
     export_measurement_csv,
     export_measurement_excel,
+    filter_measurement_table_by_stage,
+    measurement_stage_segments,
+    measurement_stages,
     numeric_series,
-    read_measurement_table,
+    read_measurement_tables,
     safe_filename,
 )
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
@@ -73,7 +82,12 @@ from eor_control.hardware import (
 from eor_control.isco import open_isco_pump
 from eor_control.measurement import MeasurementService
 from eor_control.ni import AnalogValveActuator, NidaqmxBackend, NidaqmxDataAcquisition
-from eor_control.projects import MeasurementProject, MeasurementStage, ProjectRepository
+from eor_control.projects import (
+    MeasurementProject,
+    MeasurementStage,
+    PidProfile,
+    ProjectRepository,
+)
 from eor_control.pump_control import PumpControlService, PumpOperatingMode, PumpRole
 from eor_control.runtime import BackgroundControlRunner, RuntimeSettings
 from eor_control.safety import SafetyLimits, SafetyMonitor
@@ -85,33 +99,239 @@ from eor_control.simulators import (
 
 LIGHT_STYLESHEET = """
 QMainWindow, QWidget { background: #f5f7fa; color: #1f2933; }
+QLabel { background: transparent; }
 QGroupBox { background: #ffffff; border: 1px solid #d7dee7; border-radius: 8px;
             margin-top: 10px; padding: 8px; font-weight: 600; }
 QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
+QTabWidget::pane { border: 1px solid #d7dee7; border-radius: 6px; background: #ffffff; }
+QTabBar::tab {
+    background: #e8eef6; border: 1px solid #c4cfdd; padding: 8px 18px;
+    border-top-left-radius: 6px; border-top-right-radius: 6px;
+}
+QTabBar::tab:selected { background: #ffffff; font-weight: 600; }
 QPushButton { background: #e8eef6; border: 1px solid #c4cfdd; border-radius: 6px;
               padding: 7px 10px; }
 QPushButton:hover { background: #dce7f3; }
 QPushButton:disabled { color: #9aa5b1; background: #edf1f5; }
-QComboBox, QDoubleSpinBox { background: #ffffff; border: 1px solid #b8c4d2;
-                            border-radius: 5px; padding: 5px; min-height: 22px; }
+QComboBox, QDoubleSpinBox, QSpinBox {
+    background: #ffffff; color: #1f2933; border: 1px solid #b8c4d2;
+    border-radius: 6px; padding: 5px 34px 5px 8px; min-height: 24px;
+    selection-background-color: #dce7f3; selection-color: #1f2933;
+}
+QComboBox:hover, QDoubleSpinBox:hover, QSpinBox:hover {
+    border-color: #8296aa;
+}
+QComboBox:focus, QDoubleSpinBox:focus, QSpinBox:focus {
+    border: 2px solid #2878b5; padding: 4px 33px 4px 7px;
+}
+QComboBox:disabled, QDoubleSpinBox:disabled, QSpinBox:disabled {
+    background: #edf1f5; color: #8a98a8; border-color: #d5dde6;
+}
+QLineEdit, QTextEdit, QPlainTextEdit {
+    background: transparent; color: #1f2933; border: 1px solid #b8c4d2;
+    border-radius: 6px; padding: 5px 8px; min-height: 24px;
+    selection-background-color: #dce7f3; selection-color: #1f2933;
+}
+QLineEdit:hover, QTextEdit:hover, QPlainTextEdit:hover { border-color: #8296aa; }
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
+    background: transparent; border: 2px solid #2878b5; padding: 4px 7px;
+}
+QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {
+    background: transparent; color: #8a98a8; border-color: #d5dde6;
+}
+QComboBox::drop-down {
+    subcontrol-origin: border; subcontrol-position: top right; width: 30px;
+    background: #e8eef6; border-left: 1px solid #b8c4d2;
+    border-top-right-radius: 6px; border-bottom-right-radius: 6px;
+}
+QComboBox::drop-down:hover { background: #d7e4f1; }
+QComboBox::down-arrow, QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {
+    image: url(__THEME_DOWN_ARROW__); width: 10px; height: 6px;
+}
+QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {
+    image: url(__THEME_UP_ARROW__); width: 10px; height: 6px;
+}
+QComboBox QAbstractItemView {
+    background: #ffffff; color: #1f2933; border: 1px solid #8296aa;
+    border-radius: 5px; padding: 4px; outline: 0;
+    selection-background-color: #dce7f3; selection-color: #1f2933;
+}
+QDoubleSpinBox::up-button, QSpinBox::up-button {
+    subcontrol-origin: border; subcontrol-position: top right; width: 28px;
+    background: #e8eef6; border-left: 1px solid #b8c4d2;
+    border-bottom: 1px solid #c4cfdd; border-top-right-radius: 6px;
+}
+QDoubleSpinBox::down-button, QSpinBox::down-button {
+    subcontrol-origin: border; subcontrol-position: bottom right; width: 28px;
+    background: #e8eef6; border-left: 1px solid #b8c4d2;
+    border-bottom-right-radius: 6px;
+}
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover,
+QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: #d7e4f1; }
+QScrollBar:vertical {
+    background: #e7edf3; width: 12px; margin: 0; border: none; border-radius: 6px;
+}
+QScrollBar::handle:vertical {
+    background: #9aabba; min-height: 32px; margin: 2px; border-radius: 4px;
+}
+QScrollBar::handle:vertical:hover { background: #72889b; }
+QScrollBar::handle:vertical:pressed { background: #526d82; }
+QScrollBar:horizontal {
+    background: #e7edf3; height: 12px; margin: 0; border: none; border-radius: 6px;
+}
+QScrollBar::handle:horizontal {
+    background: #9aabba; min-width: 32px; margin: 2px; border-radius: 4px;
+}
+QScrollBar::handle:horizontal:hover { background: #72889b; }
+QScrollBar::handle:horizontal:pressed { background: #526d82; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0; background: transparent; border: none;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0; background: transparent; border: none;
+}
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+QAbstractScrollArea::corner { background: #e7edf3; border: none; }
+QSplitter::handle { background: #c4cfdd; border-radius: 3px; }
+QSplitter::handle:horizontal { margin: 4px 1px; }
+QSplitter::handle:vertical { margin: 1px 4px; }
+QSplitter::handle:hover { background: #2878b5; }
+QSplitter::handle:pressed { background: #1f5f91; }
 QMenuBar, QMenu { background: #ffffff; color: #1f2933; }
 """
 
 DARK_STYLESHEET = """
 QMainWindow, QWidget { background: #11151a; color: #e6edf3; }
+QLabel { background: transparent; }
 QGroupBox { background: #1b2129; border: 1px solid #35404d; border-radius: 8px;
             margin-top: 10px; padding: 8px; font-weight: 600; }
 QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
+QTabWidget::pane { border: 1px solid #35404d; border-radius: 6px; background: #1b2129; }
+QTabBar::tab {
+    background: #202832; border: 1px solid #465362; padding: 8px 18px;
+    border-top-left-radius: 6px; border-top-right-radius: 6px;
+}
+QTabBar::tab:selected { background: #1b2129; font-weight: 600; }
 QPushButton { background: #28323d; color: #e6edf3; border: 1px solid #465362;
               border-radius: 6px; padding: 7px 10px; }
 QPushButton:hover { background: #334150; }
 QPushButton:disabled { color: #65717e; background: #1d242c; }
-QComboBox, QDoubleSpinBox { background: #202832; color: #e6edf3;
-                            border: 1px solid #465362; border-radius: 5px;
-                            padding: 5px; min-height: 22px; }
+QComboBox, QDoubleSpinBox, QSpinBox {
+    background: #202832; color: #e6edf3; border: 1px solid #465362;
+    border-radius: 6px; padding: 5px 34px 5px 8px; min-height: 24px;
+    selection-background-color: #355a78; selection-color: #ffffff;
+}
+QComboBox:hover, QDoubleSpinBox:hover, QSpinBox:hover {
+    border-color: #71849a;
+}
+QComboBox:focus, QDoubleSpinBox:focus, QSpinBox:focus {
+    border: 2px solid #4da3df; padding: 4px 33px 4px 7px;
+}
+QComboBox:disabled, QDoubleSpinBox:disabled, QSpinBox:disabled {
+    background: #1a2027; color: #65717e; border-color: #303944;
+}
+QLineEdit, QTextEdit, QPlainTextEdit {
+    background: transparent; color: #e6edf3; border: 1px solid #465362;
+    border-radius: 6px; padding: 5px 8px; min-height: 24px;
+    selection-background-color: #355a78; selection-color: #ffffff;
+}
+QLineEdit:hover, QTextEdit:hover, QPlainTextEdit:hover { border-color: #71849a; }
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
+    background: transparent; border: 2px solid #4da3df; padding: 4px 7px;
+}
+QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {
+    background: transparent; color: #65717e; border-color: #303944;
+}
+QComboBox::drop-down {
+    subcontrol-origin: border; subcontrol-position: top right; width: 30px;
+    background: #2b3642; border-left: 1px solid #465362;
+    border-top-right-radius: 6px; border-bottom-right-radius: 6px;
+}
+QComboBox::drop-down:hover { background: #39495a; }
+QComboBox::down-arrow, QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {
+    image: url(__THEME_DOWN_ARROW__); width: 10px; height: 6px;
+}
+QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {
+    image: url(__THEME_UP_ARROW__); width: 10px; height: 6px;
+}
+QComboBox QAbstractItemView {
+    background: #202832; color: #e6edf3; border: 1px solid #5a6b7d;
+    border-radius: 5px; padding: 4px; outline: 0;
+    selection-background-color: #355a78; selection-color: #ffffff;
+}
+QDoubleSpinBox::up-button, QSpinBox::up-button {
+    subcontrol-origin: border; subcontrol-position: top right; width: 28px;
+    background: #2b3642; border-left: 1px solid #465362;
+    border-bottom: 1px solid #465362; border-top-right-radius: 6px;
+}
+QDoubleSpinBox::down-button, QSpinBox::down-button {
+    subcontrol-origin: border; subcontrol-position: bottom right; width: 28px;
+    background: #2b3642; border-left: 1px solid #465362;
+    border-bottom-right-radius: 6px;
+}
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover,
+QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: #39495a; }
+QScrollBar:vertical {
+    background: #171d24; width: 12px; margin: 0; border: none; border-radius: 6px;
+}
+QScrollBar::handle:vertical {
+    background: #526170; min-height: 32px; margin: 2px; border-radius: 4px;
+}
+QScrollBar::handle:vertical:hover { background: #6d8092; }
+QScrollBar::handle:vertical:pressed { background: #8ca0b2; }
+QScrollBar:horizontal {
+    background: #171d24; height: 12px; margin: 0; border: none; border-radius: 6px;
+}
+QScrollBar::handle:horizontal {
+    background: #526170; min-width: 32px; margin: 2px; border-radius: 4px;
+}
+QScrollBar::handle:horizontal:hover { background: #6d8092; }
+QScrollBar::handle:horizontal:pressed { background: #8ca0b2; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0; background: transparent; border: none;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0; background: transparent; border: none;
+}
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+QAbstractScrollArea::corner { background: #171d24; border: none; }
+QSplitter::handle { background: #465362; border-radius: 3px; }
+QSplitter::handle:horizontal { margin: 4px 1px; }
+QSplitter::handle:vertical { margin: 1px 4px; }
+QSplitter::handle:hover { background: #4da3df; }
+QSplitter::handle:pressed { background: #77bceb; }
 QMenuBar, QMenu { background: #1b2129; color: #e6edf3; }
 QMenu::item:selected { background: #334150; }
 """
+
+SYSTEM_STYLESHEET = """
+QLabel { background: transparent; }
+QLineEdit, QTextEdit, QPlainTextEdit { background: transparent; }
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus { background: transparent; }
+QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {
+    background: transparent;
+}
+QSplitter::handle { background: #7b8794; border-radius: 3px; }
+QSplitter::handle:hover { background: #2878b5; }
+"""
+
+WINDOWS_APP_USER_MODEL_ID = "AFKI.EOR.Control"
+
+
+def configure_windows_application_identity() -> None:
+    """Give Windows a stable taskbar identity before QApplication is created."""
+    if sys.platform != "win32":
+        return
+    try:
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+        setter = shell32.SetCurrentProcessExplicitAppUserModelID
+        setter.argtypes = [ctypes.c_wchar_p]
+        setter.restype = ctypes.c_long
+        setter(WINDOWS_APP_USER_MODEL_ID)
+    except (AttributeError, OSError):
+        # Older or restricted Windows environments can omit this shell API.
+        # Qt still receives the explicit icon below.
+        return
 
 
 def application_icon_path() -> Path:
@@ -119,6 +339,15 @@ def application_icon_path() -> Path:
     if isinstance(bundle_directory, str):
         return Path(bundle_directory) / "img" / "icon.png"
     return Path(__file__).resolve().parents[2] / "img" / "icon.png"
+
+
+def resolved_theme_stylesheet(stylesheet: str, theme: str) -> str:
+    asset_directory = application_icon_path().parent
+    down_arrow = (asset_directory / f"arrow-down-{theme}.svg").as_posix()
+    up_arrow = (asset_directory / f"arrow-up-{theme}.svg").as_posix()
+    return stylesheet.replace("__THEME_DOWN_ARROW__", down_arrow).replace(
+        "__THEME_UP_ARROW__", up_arrow
+    )
 
 
 def application_root_path() -> Path:
@@ -160,6 +389,7 @@ DEFAULT_STAGE_TEMPLATES = (
     ("Vegyszeres mérés", ""),
     ("Öblítés", ""),
 )
+ADD_STAGE_ACTION_DATA = "__add_measurement_stage__"
 
 
 def create_default_stages(
@@ -201,7 +431,9 @@ class StageSettingsDialog(QDialog):
         self, stage: MeasurementStage | None = None, parent: QWidget | None = None
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Mérési szakasz")
+        self.setWindowTitle(
+            "Új mérési szakasz" if stage is None else "Mérési szakasz szerkesztése"
+        )
         layout = QVBoxLayout(self)
         form = QFormLayout()
         self.name = QComboBox()
@@ -252,6 +484,252 @@ class StageSettingsDialog(QDialog):
         }
 
 
+class ProjectSelectionDialog(QDialog):
+    """Startup-friendly project and measurement-stage chooser."""
+
+    def __init__(
+        self,
+        repository: ProjectRepository,
+        *,
+        settings: QSettings,
+        selected_project_id: int | None,
+        selected_stage_id: int | None,
+        configuration: dict[str, object],
+        calibration_snapshot: dict[str, object],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._repository = repository
+        self._settings = settings
+        self._configuration = configuration
+        self._calibration_snapshot = calibration_snapshot
+        self._preferred_stage_id = selected_stage_id
+        self.setWindowTitle("Projekt kiválasztása")
+        self.resize(760, 480)
+        layout = QVBoxLayout(self)
+
+        title = QLabel("Melyik projekttel szeretnél dolgozni?")
+        title.setStyleSheet("font-size:18px;font-weight:700")
+        layout.addWidget(title)
+        help_text = QLabel(
+            "Válassz egy korábbi projektet és mérési fázist, vagy hozz létre "
+            "egy új projektet."
+        )
+        help_text.setWordWrap(True)
+        help_text.setStyleSheet("color:#66788a")
+        layout.addWidget(help_text)
+
+        self.project_table = QTableWidget(0, 3)
+        self.project_table.setObjectName("project_selection_table")
+        self.project_table.setHorizontalHeaderLabels(
+            ("Projekt", "Utoljára használt mérési fázis", "Létrehozva")
+        )
+        self.project_table.horizontalHeader().setStretchLastSection(False)
+        self.project_table.horizontalHeader().setSectionResizeMode(
+            0, self.project_table.horizontalHeader().ResizeMode.Stretch
+        )
+        self.project_table.horizontalHeader().setSectionResizeMode(
+            1, self.project_table.horizontalHeader().ResizeMode.Stretch
+        )
+        self.project_table.setColumnWidth(2, 145)
+        self.project_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.project_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.project_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.project_table.currentCellChanged.connect(self._project_changed)
+        self.project_table.cellDoubleClicked.connect(
+            lambda _row, _column: self._accept_if_complete()
+        )
+        layout.addWidget(self.project_table, 1)
+
+        self.empty_message = QLabel(
+            "Még nincs korábbi projekt. Hozd létre az első projektet az alábbi gombbal."
+        )
+        self.empty_message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_message.setStyleSheet("padding:16px;color:#66788a")
+        layout.addWidget(self.empty_message)
+
+        stage_row = QHBoxLayout()
+        stage_row.addWidget(QLabel("Megnyitandó mérési fázis"))
+        self.stage_selector = QComboBox()
+        self.stage_selector.setObjectName("project_selection_stage")
+        self.stage_selector.currentIndexChanged.connect(self._update_open_button)
+        stage_row.addWidget(self.stage_selector, 1)
+        layout.addLayout(stage_row)
+
+        actions = QHBoxLayout()
+        create_button = QPushButton("Új projekt létrehozása…")
+        create_button.setObjectName("create_project_from_selector")
+        create_button.clicked.connect(self._create_project)
+        actions.addWidget(create_button)
+        self.delete_button = QPushButton("Kijelölt projekt törlése…")
+        self.delete_button.setObjectName("delete_project_from_selector")
+        self.delete_button.clicked.connect(self._delete_project)
+        actions.addWidget(self.delete_button)
+        actions.addStretch()
+        cancel_button = QPushButton("Mégse")
+        cancel_button.clicked.connect(self.reject)
+        actions.addWidget(cancel_button)
+        self.open_button = QPushButton("Projekt megnyitása")
+        self.open_button.setDefault(True)
+        self.open_button.clicked.connect(self._accept_if_complete)
+        actions.addWidget(self.open_button)
+        layout.addLayout(actions)
+
+        self._reload_projects(selected_project_id)
+
+    @property
+    def selected_project_id(self) -> int | None:
+        row = self.project_table.currentRow()
+        item = self.project_table.item(row, 0) if row >= 0 else None
+        value = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        return value if isinstance(value, int) else None
+
+    @property
+    def selected_stage_id(self) -> int | None:
+        value = self.stage_selector.currentData()
+        return value if isinstance(value, int) else None
+
+    def _stored_stage_id(self, project_id: int) -> int | None:
+        value = self._settings.value(f"project/last_stage_by_project/{project_id}")
+        if value is None and self._stored_int("project/last_project_id") == project_id:
+            value = self._settings.value("project/last_stage_id")
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _stored_int(self, key: str) -> int | None:
+        value = self._settings.value(key)
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _reload_projects(self, selected_project_id: int | None) -> None:
+        projects = tuple(reversed(self._repository.list_projects()))
+        self.project_table.blockSignals(True)
+        self.project_table.setRowCount(len(projects))
+        selected_row = -1
+        for row, project in enumerate(projects):
+            stages = self._repository.list_stages(project.id)
+            stored_stage_id = self._stored_stage_id(project.id)
+            last_stage = next(
+                (stage for stage in stages if stage.id == stored_stage_id), None
+            )
+            project_item = QTableWidgetItem(project.name)
+            project_item.setData(Qt.ItemDataRole.UserRole, project.id)
+            project_item.setToolTip(project.notes)
+            self.project_table.setItem(row, 0, project_item)
+            self.project_table.setItem(
+                row,
+                1,
+                QTableWidgetItem(
+                    last_stage.name if last_stage is not None else "Nincs korábbi adat"
+                ),
+            )
+            self.project_table.setItem(
+                row,
+                2,
+                QTableWidgetItem(project.created_at.astimezone().strftime("%Y-%m-%d %H:%M")),
+            )
+            if project.id == selected_project_id:
+                selected_row = row
+        self.project_table.blockSignals(False)
+        self.empty_message.setVisible(not projects)
+        if projects:
+            self.project_table.selectRow(selected_row if selected_row >= 0 else 0)
+            self.project_table.setCurrentCell(selected_row if selected_row >= 0 else 0, 0)
+            self._project_changed()
+        else:
+            self.stage_selector.clear()
+            self._update_open_button()
+
+    def _project_changed(self, *_args: object) -> None:
+        self.stage_selector.clear()
+        project_id = self.selected_project_id
+        if project_id is None:
+            self._update_open_button()
+            return
+        stages = self._repository.list_stages(project_id)
+        for stage in stages:
+            self.stage_selector.addItem(stage.name, stage.id)
+        preferred_stage_id = self._preferred_stage_id or self._stored_stage_id(project_id)
+        self._preferred_stage_id = None
+        if preferred_stage_id is not None:
+            index = self.stage_selector.findData(preferred_stage_id)
+            if index >= 0:
+                self.stage_selector.setCurrentIndex(index)
+        self._update_open_button()
+
+    def _create_project(self) -> None:
+        name, accepted = QInputDialog.getText(self, "Új projekt", "Projekt neve")
+        if not accepted:
+            return
+        notes, accepted = QInputDialog.getMultiLineText(
+            self, "Új projekt", "Megjegyzések"
+        )
+        if not accepted:
+            return
+        try:
+            project = self._repository.create_project(
+                name=name,
+                notes=notes,
+                configuration=self._configuration,
+                calibration_snapshot=self._calibration_snapshot,
+            )
+            stage = create_default_stages(self._repository, project.id)
+            self._preferred_stage_id = stage.id
+            self._reload_projects(project.id)
+        except ValueError as error:
+            QMessageBox.critical(self, "EOR hiba", str(error))
+
+    def _delete_project(self) -> None:
+        project_id = self.selected_project_id
+        if project_id is None:
+            return
+        project_name = self._repository.get_project(project_id).name
+        answer = QMessageBox.question(
+            self,
+            "Projekt törlése",
+            f"Biztosan törlöd ezt a projektet: {project_name}?\n\n"
+            "A projekt és a mérési fázisok eltűnnek a projektlistából. "
+            "A korábban rögzített nyers mérési CSV-fájlok biztonsági okból "
+            "megmaradnak.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._repository.delete_project(project_id)
+        self._settings.remove(f"project/last_stage_by_project/{project_id}")
+        if self._stored_int("project/last_project_id") == project_id:
+            self._settings.remove("project/last_project_id")
+            self._settings.remove("project/last_stage_id")
+        self._settings.sync()
+        self._preferred_stage_id = None
+        self._reload_projects(None)
+
+    def _update_open_button(self, *_args: object) -> None:
+        self.delete_button.setEnabled(self.selected_project_id is not None)
+        self.open_button.setEnabled(
+            self.selected_project_id is not None and self.selected_stage_id is not None
+        )
+
+    def _accept_if_complete(self) -> None:
+        if self.selected_project_id is None or self.selected_stage_id is None:
+            QMessageBox.critical(
+                self, "EOR hiba", "Válassz projektet és mérési fázist."
+            )
+            return
+        self.accept()
+
+
 class ProjectSettingsDialog(QDialog):
     def __init__(
         self,
@@ -267,6 +745,7 @@ class ProjectSettingsDialog(QDialog):
         self._repository = repository
         self._configuration = configuration
         self._calibration_snapshot = calibration_snapshot
+        self._projects_changed = False
         self.setWindowTitle("Projektbeállítások")
         self.resize(560, 280)
         layout = QVBoxLayout(self)
@@ -276,6 +755,8 @@ class ProjectSettingsDialog(QDialog):
         self.stage_selector = QComboBox()
         self.stage_selector.setObjectName("dialog_stage_selector")
         new_project = QPushButton("Új projekt")
+        delete_project = QPushButton("Projekt törlése…")
+        delete_project.setObjectName("delete_project_from_settings")
         add_stage = QPushButton("Új szakasz")
         rename_stage = QPushButton("Szakasz szerkesztése")
         move_up = QPushButton("Fel")
@@ -283,6 +764,7 @@ class ProjectSettingsDialog(QDialog):
         delete_stage = QPushButton("Törlés")
         self.project_selector.currentIndexChanged.connect(self._reload_stages)
         new_project.clicked.connect(self._create_project)
+        delete_project.clicked.connect(self._delete_project)
         add_stage.clicked.connect(self._add_stage)
         rename_stage.clicked.connect(self._rename_stage)
         move_up.clicked.connect(lambda: self._move_stage(-1))
@@ -290,7 +772,8 @@ class ProjectSettingsDialog(QDialog):
         delete_stage.clicked.connect(self._delete_stage)
         form.addWidget(QLabel("Projekt"), 0, 0)
         form.addWidget(self.project_selector, 0, 1, 1, 2)
-        form.addWidget(new_project, 1, 1, 1, 2)
+        form.addWidget(new_project, 1, 1)
+        form.addWidget(delete_project, 1, 2)
         form.addWidget(QLabel("Aktív mérési szakasz"), 2, 0)
         form.addWidget(self.stage_selector, 2, 1, 1, 2)
         form.addWidget(add_stage, 3, 1)
@@ -316,6 +799,10 @@ class ProjectSettingsDialog(QDialog):
     def selected_stage_id(self) -> int | None:
         value = self.stage_selector.currentData()
         return value if isinstance(value, int) else None
+
+    @property
+    def projects_changed(self) -> bool:
+        return self._projects_changed
 
     def _reload_projects(
         self, selected_project_id: int | None = None, selected_stage_id: int | None = None
@@ -362,9 +849,31 @@ class ProjectSettingsDialog(QDialog):
                 calibration_snapshot=self._calibration_snapshot,
             )
             stage = create_default_stages(self._repository, project.id)
+            self._projects_changed = True
             self._reload_projects(project.id, stage.id)
         except ValueError as error:
             QMessageBox.critical(self, "EOR hiba", str(error))
+
+    def _delete_project(self) -> None:
+        project_id = self.selected_project_id
+        if project_id is None:
+            return
+        project_name = self.project_selector.currentText()
+        answer = QMessageBox.question(
+            self,
+            "Projekt törlése",
+            f"Biztosan törlöd ezt a projektet: {project_name}?\n\n"
+            "A projekt és a mérési fázisok eltűnnek a projektlistából. "
+            "A korábban rögzített nyers mérési CSV-fájlok biztonsági okból "
+            "megmaradnak.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._repository.delete_project(project_id)
+        self._projects_changed = True
+        self._reload_projects()
 
     def _add_stage(self) -> None:
         project_id = self.selected_project_id
@@ -486,6 +995,7 @@ class DeviceSettingsDialog(QDialog):
         current_mode: RunMode,
         discoverer: Callable[[], HardwareDiscovery] = discover_hardware,
         diagnostics: DiagnosticLogger | None = None,
+        developer_mode: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -493,6 +1003,7 @@ class DeviceSettingsDialog(QDialog):
         self._settings = settings
         self._discoverer = discoverer
         self._diagnostics = diagnostics
+        self._developer_mode = developer_mode
         self._test_succeeded = False
         self._configuration: HardwareConfiguration | None = None
         self.setWindowTitle("Eszközbeállítások")
@@ -501,7 +1012,8 @@ class DeviceSettingsDialog(QDialog):
         self._mode_label = QLabel(f"Jelenlegi mód: {current_mode.value.upper()}")
         self._mode_label.setObjectName("device_mode_label")
         self._mode_label.setStyleSheet(
-            "padding:10px;background:#fff3cd;color:#664d03;font-weight:700;border-radius:6px"
+            "padding:10px;background:transparent;color:#9a6700;font-weight:700;"
+            "border:1px solid #c58a00;border-radius:6px"
         )
         layout.addWidget(self._mode_label)
         channel_help = QLabel(
@@ -583,7 +1095,6 @@ class DeviceSettingsDialog(QDialog):
             ("Kábelezési megjegyzés", self.pump_cabling_notes),
         ):
             pump_form.addRow(label, pump_widget)
-        layout.addWidget(pump_box)
 
         ni_box = QGroupBox("Nyomásmérés és szelepvezérlés")
         ni_form = QFormLayout(ni_box)
@@ -599,11 +1110,25 @@ class DeviceSettingsDialog(QDialog):
             ("Szelep 100%-os jele", self.hundred_voltage),
         ):
             ni_form.addRow(label, ni_widget)
-        layout.addWidget(ni_box)
+
+        self.device_tabs = QTabWidget()
+        self.device_tabs.setObjectName("device_settings_tabs")
+        pump_tab = QWidget()
+        pump_tab_layout = QVBoxLayout(pump_tab)
+        pump_tab_layout.addWidget(pump_box)
+        pump_tab_layout.addStretch()
+        ni_tab = QWidget()
+        ni_tab_layout = QVBoxLayout(ni_tab)
+        ni_tab_layout.addWidget(ni_box)
+        ni_tab_layout.addStretch()
+        self.device_tabs.addTab(pump_tab, "Pumpák")
+        self.device_tabs.addTab(ni_tab, "NI mérés és szelep")
+        layout.addWidget(self.device_tabs)
 
         discovery_row = QHBoxLayout()
         self._discovery_status = QLabel()
         self._discovery_status.setWordWrap(True)
+        self._discovery_status.setVisible(developer_mode)
         refresh_button = QPushButton("Csatlakoztatott eszközök keresése")
         refresh_button.clicked.connect(self._refresh_hardware_choices)
         discovery_row.addWidget(refresh_button)
@@ -866,6 +1391,7 @@ class DeviceSettingsDialog(QDialog):
             message = f"A felderítés sikertelen: {type(error).__name__}: {error}"
             self._discovery_status.setText(message)
             self._discovery_status.setStyleSheet("color:#b00020")
+            self._discovery_status.setVisible(True)
             self._log_discovery(message, level="ERROR")
             return
         self._replace_port_choices(
@@ -910,8 +1436,10 @@ class DeviceSettingsDialog(QDialog):
                 discovery.warnings
             )
             self._discovery_status.setStyleSheet("color:#8a5a00")
+            self._discovery_status.setVisible(True)
         else:
             self._discovery_status.setStyleSheet("color:#1b7f3a")
+            self._discovery_status.setVisible(self._developer_mode)
         self._discovery_status.setText(summary)
         self._log_discovery(
             diagnostic_summary,
@@ -1056,7 +1584,8 @@ class PumpControlDialog(QDialog):
         )
         warning.setWordWrap(True)
         warning.setStyleSheet(
-            "padding:10px;background:#b00020;color:white;font-weight:800;border-radius:6px"
+            "padding:10px;background:transparent;color:#d32f4b;font-weight:800;"
+            "border:1px solid #d32f4b;border-radius:6px"
         )
         layout.addWidget(warning)
         pumps = QGridLayout()
@@ -1331,6 +1860,7 @@ class DataManagementDialog(QDialog):
         *,
         source_path: Path,
         project_name: str,
+        phase_name: str,
         data_root: Path,
         synchronizer: BackgroundNasSynchronizer,
         settings: QSettings,
@@ -1339,6 +1869,8 @@ class DataManagementDialog(QDialog):
         super().__init__(parent)
         self._source_path = source_path
         self._project_name = project_name
+        self._phase_name = phase_name
+        self._export_name = f"{project_name}_{phase_name}"
         self._data_root = data_root
         self._synchronizer = synchronizer
         self._settings = settings
@@ -1349,9 +1881,10 @@ class DataManagementDialog(QDialog):
         self.resize(650, 360)
         layout = QVBoxLayout(self)
 
-        source_box = QGroupBox("Aktív projekt nyers adatai")
+        source_box = QGroupBox("Aktív mérési fázis nyers adatai")
         source_layout = QFormLayout(source_box)
         source_layout.addRow("Projekt", QLabel(project_name))
+        source_layout.addRow("Mérési fázis", QLabel(phase_name))
         source_path_label = QLabel(str(source_path))
         source_path_label.setWordWrap(True)
         source_layout.addRow("Helyi fájl", source_path_label)
@@ -1417,7 +1950,7 @@ class DataManagementDialog(QDialog):
 
     def _export_csv(self) -> None:
         default = str(
-            self._source_path.parent / f"{safe_filename(self._project_name)}_export.csv"
+            self._source_path.parent / f"{safe_filename(self._export_name)}_export.csv"
         )
         destination, _ = QFileDialog.getSaveFileName(
             self, "CSV export", default, "CSV fájl (*.csv)"
@@ -1437,7 +1970,7 @@ class DataManagementDialog(QDialog):
 
     def _export_excel(self) -> None:
         default = str(
-            self._source_path.parent / f"{safe_filename(self._project_name)}.xlsx"
+            self._source_path.parent / f"{safe_filename(self._export_name)}.xlsx"
         )
         destination, _ = QFileDialog.getSaveFileName(
             self, "Excel export", default, "Excel munkafüzet (*.xlsx)"
@@ -1469,7 +2002,7 @@ class DataManagementDialog(QDialog):
         self._settings.setValue("nas/target_path", path_text)
         self._settings.sync()
         if enabled:
-            for source in (self._data_root / "projects").rglob("*_raw.csv"):
+            for source in (self._data_root / "projects").rglob("*_live_raw.csv"):
                 relative = source.relative_to(self._data_root)
                 self._synchronizer.enqueue(source, Path(*relative.parts[1:]))
         self._refresh_nas_status()
@@ -1495,7 +2028,7 @@ class DataManagementDialog(QDialog):
         )
 
 
-class MeasurementHistoryDialog(QDialog):
+class MeasurementHistoryView(QWidget):
     SERIES = (
         ("jacket_pressure_bar", "Köpenynyomás", "#1565c0"),
         ("injection_pressure_bar", "Besajtolási nyomás", "#c62828"),
@@ -1505,17 +2038,25 @@ class MeasurementHistoryDialog(QDialog):
         ("jacket_remaining_volume_ml", "Köpeny maradék térfogat", "#5c6bc0"),
         ("injection_flow_ml_per_hour", "Besajtolási térfogatáram", "#ef6c00"),
         ("injection_remaining_volume_ml", "Besajtolás maradék térfogat", "#d81b60"),
-        ("injected_volume_ml", "Besajtolt térfogat", "#6d4c41"),
+        ("jacket_net_volume_ml", "Köpeny nettó térfogat", "#5e35b1"),
+        ("injection_net_volume_ml", "Besajtolás nettó térfogat", "#6d4c41"),
         ("valve_percent", "Szelep", "#546e7a"),
     )
 
     def __init__(
-        self, source_path: Path, project_name: str, parent: QWidget | None = None
+        self,
+        source_path: Path | Iterable[Path] = (),
+        project_name: str = "",
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._source_path = source_path
-        self.setWindowTitle(f"Teljes mérés — {project_name}")
-        self.resize(1400, 800)
+        self._source_paths = (
+            (source_path,) if isinstance(source_path, Path) else tuple(source_path)
+        )
+        self._project_name = project_name
+        self.setObjectName("measurement_history_view")
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         layout = QVBoxLayout(self)
         controls = QGridLayout()
         self._checks: dict[str, QCheckBox] = {}
@@ -1524,11 +2065,15 @@ class MeasurementHistoryDialog(QDialog):
             checkbox.setChecked(index < 4)
             checkbox.toggled.connect(self._refresh_plot)
             self._checks[key] = checkbox
-            row, column = divmod(index, 5)
+            row, column = divmod(index, 4)
             controls.addWidget(checkbox, row, column)
         layout.addLayout(controls)
 
-        range_row = QHBoxLayout()
+        range_grid = QGridLayout()
+        self._stage_filter = QComboBox()
+        self._stage_filter.setObjectName("history_stage_filter")
+        self._stage_filter.addItem("Összes mérési fázis", None)
+        self._stage_filter.currentIndexChanged.connect(self._refresh_plot)
         self._time_range = QComboBox()
         self._time_range.addItem("Teljes mérés", None)
         self._time_range.addItem("Utolsó 10 perc", 600.0)
@@ -1555,19 +2100,20 @@ class MeasurementHistoryDialog(QDialog):
         self._auto_y.toggled.connect(self._axis_changed)
         self._y_min.valueChanged.connect(self._refresh_plot)
         self._y_max.valueChanged.connect(self._refresh_plot)
-        for widget in (
-            QLabel("Időtartomány"),
-            self._time_range,
-            self._custom_minutes,
-            self._auto_y,
-            QLabel("Y minimum"),
-            self._y_min,
-            QLabel("Y maximum"),
-            self._y_max,
-            refresh,
-        ):
-            range_row.addWidget(widget)
-        layout.addLayout(range_row)
+        range_grid.addWidget(QLabel("Mérési fázis"), 0, 0)
+        range_grid.addWidget(self._stage_filter, 0, 1)
+        range_grid.addWidget(QLabel("Időtartomány"), 0, 2)
+        range_grid.addWidget(self._time_range, 0, 3)
+        range_grid.addWidget(self._custom_minutes, 0, 4)
+        range_grid.addWidget(self._auto_y, 1, 0, 1, 2)
+        range_grid.addWidget(QLabel("Y minimum"), 1, 2)
+        range_grid.addWidget(self._y_min, 1, 3)
+        range_grid.addWidget(QLabel("Y maximum"), 1, 4)
+        range_grid.addWidget(self._y_max, 1, 5)
+        range_grid.addWidget(refresh, 0, 5)
+        range_grid.setColumnStretch(1, 1)
+        range_grid.setColumnStretch(3, 1)
+        layout.addLayout(range_grid)
 
         self._plot = pg.PlotWidget(title="Teljes rögzített mérés")
         self._plot.setLabel("left", "Érték")
@@ -1575,23 +2121,42 @@ class MeasurementHistoryDialog(QDialog):
         self._plot.showGrid(x=True, y=True, alpha=0.25)
         self._plot.setMouseEnabled(x=True, y=True)
         layout.addWidget(self._plot, stretch=1)
+        self._stage_plot = pg.PlotWidget(title="Mérési fázisok idővonala")
+        self._stage_plot.setObjectName("measurement_stage_timeline")
+        self._stage_plot.setMaximumHeight(130)
+        self._stage_plot.setMouseEnabled(x=True, y=False)
+        self._stage_plot.setYRange(0.0, 1.0, padding=0.0)
+        self._stage_plot.hideAxis("left")
+        self._stage_plot.setLabel("bottom", "Eltelt idő", units="s")
+        self._stage_plot.setXLink(self._plot)
+        layout.addWidget(self._stage_plot)
         self._status = QLabel()
         layout.addWidget(self._status)
-        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        close.rejected.connect(self.reject)
-        layout.addWidget(close)
         self._table = MeasurementTable((), ())
+        self._load()
+
+    def set_sources(
+        self, source_paths: Iterable[Path], project_name: str = ""
+    ) -> None:
+        self._source_paths = tuple(source_paths)
+        self._project_name = project_name
         self._load()
 
     def _load(self) -> None:
         try:
-            self._table = read_measurement_table(self._source_path)
+            self._table = read_measurement_tables(self._source_paths)
         except (OSError, ValueError) as error:
             QMessageBox.critical(self, "Mérési adatok", str(error))
             return
-        self._status.setText(
-            f"{len(self._table.rows)} rögzített minta — {self._source_path}"
-        )
+        selected_stage = self._stage_filter.currentData()
+        self._stage_filter.blockSignals(True)
+        self._stage_filter.clear()
+        self._stage_filter.addItem("Összes mérési fázis", None)
+        for stage in measurement_stages(self._table):
+            self._stage_filter.addItem(stage, stage)
+        selected_index = self._stage_filter.findData(selected_stage)
+        self._stage_filter.setCurrentIndex(max(0, selected_index))
+        self._stage_filter.blockSignals(False)
         self._refresh_plot()
 
     def _range_changed(self, *_args: object) -> None:
@@ -1614,19 +2179,51 @@ class MeasurementHistoryDialog(QDialog):
 
     def _refresh_plot(self, *_args: object) -> None:
         self._plot.clear()
+        self._stage_plot.clear()
         if not self._table.rows:
+            self._status.setText(
+                f"Nincs rögzített minta — {len(self._source_paths)} fázisfájl"
+            )
             return
         times = self._elapsed_times()
+        selected_stage = self._stage_filter.currentData()
+        stage = selected_stage if isinstance(selected_stage, str) else None
+        filtered_table = filter_measurement_table_by_stage(self._table, stage)
+        stage_index = self._table.header.index("active_stage")
+        selected_indices = [
+            index
+            for index, row in enumerate(self._table.rows)
+            if stage is None or row[stage_index] == stage
+        ]
         seconds = self._time_range.currentData()
         if seconds == "custom":
             seconds = self._custom_minutes.value() * 60.0
         minimum_time = times[-1] - float(seconds) if isinstance(seconds, float) else times[0]
-        start = next((index for index, value in enumerate(times) if value >= minimum_time), 0)
+        selected_indices = [
+            index for index in selected_indices if times[index] >= minimum_time
+        ]
         series = numeric_series(self._table, (item[0] for item in self.SERIES))
         self._plot.addLegend()
         for key, label, color in self.SERIES:
             if self._checks[key].isChecked():
-                self._plot.plot(times[start:], series[key][start:], pen=color, name=label)
+                self._plot.plot(
+                    [times[index] for index in selected_indices],
+                    [series[key][index] for index in selected_indices],
+                    pen=color,
+                    name=label,
+                )
+        self._draw_stage_timeline(times, stage)
+        duration = (
+            times[selected_indices[-1]] - times[selected_indices[0]]
+            if len(selected_indices) > 1
+            else 0.0
+        )
+        stage_label = stage or "Összes mérési fázis"
+        self._status.setText(
+            f"{stage_label}: {len(filtered_table.rows)} rögzített minta, "
+            f"{duration:.1f} s megjelenített időtartam — "
+            f"{len(self._source_paths)} fázisfájl"
+        )
         if self._auto_y.isChecked():
             self._plot.enableAutoRange(axis="y")
         elif self._y_max.value() > self._y_min.value():
@@ -1635,6 +2232,340 @@ class MeasurementHistoryDialog(QDialog):
             self._plot.setXRange(max(times[0], minimum_time), times[-1], padding=0.0)
         else:
             self._plot.enableAutoRange(axis="x")
+
+    def _draw_stage_timeline(
+        self, times: tuple[float, ...], selected_stage: str | None
+    ) -> None:
+        palette = (
+            "#1565c0",
+            "#2e7d32",
+            "#ef6c00",
+            "#8e24aa",
+            "#00838f",
+            "#c62828",
+        )
+        colors = {
+            stage: palette[index % len(palette)]
+            for index, stage in enumerate(measurement_stages(self._table))
+        }
+        for stage, start, end in measurement_stage_segments(self._table):
+            if selected_stage is not None and stage != selected_stage:
+                continue
+            start_time = times[start]
+            if end < len(times):
+                end_time = times[end]
+            elif end - start > 1:
+                end_time = times[end - 1] + (times[end - 1] - times[end - 2])
+            else:
+                end_time = start_time + 1.0
+            color = colors.get(stage, "#607d8b")
+            region = pg.LinearRegionItem(
+                values=(start_time, end_time),
+                movable=False,
+                brush=pg.mkBrush(f"{color}66"),
+                pen=pg.mkPen(color),
+            )
+            self._stage_plot.addItem(region)
+            label = pg.TextItem(stage or "Nincs fázis", color="#e6edf3", anchor=(0.5, 0.5))
+            label.setPos((start_time + end_time) / 2.0, 0.5)
+            self._stage_plot.addItem(label)
+
+
+class CalibrationSettingsDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Kalibráció és biztonsági határértékek")
+        self.resize(620, 520)
+        layout = QVBoxLayout(self)
+        help_text = QLabel(
+            "A kalibráció a mért feszültséget alakítja fizikai nyomássá. "
+            "A biztonsági határértékek túllépése safe-state állapotot vált ki."
+        )
+        help_text.setWordWrap(True)
+        help_text.setStyleSheet("padding:8px;color:#66788a")
+        layout.addWidget(help_text)
+        tabs = QTabWidget()
+        tabs.setObjectName("calibration_settings_tabs")
+        layout.addWidget(tabs, 1)
+
+        calibration_page = QWidget()
+        calibration_layout = QVBoxLayout(calibration_page)
+        self.line_voltage_min = self._value_spinbox(1.0, -10.0, 10.0, " V")
+        self.line_voltage_max = self._value_spinbox(5.0, -10.0, 10.0, " V")
+        self.line_value_min = self._value_spinbox(0.0, -1000.0, 1000.0, " bar")
+        self.line_value_max = self._value_spinbox(400.0, -1000.0, 1000.0, " bar")
+        self.delta_voltage_min = self._value_spinbox(1.0, -10.0, 10.0, " V")
+        self.delta_voltage_max = self._value_spinbox(5.0, -10.0, 10.0, " V")
+        self.delta_value_min = self._value_spinbox(0.0, -1000.0, 1000.0, " bar")
+        self.delta_value_max = self._value_spinbox(40.0, -1000.0, 1000.0, " bar")
+        for title, fields in (
+            (
+                "Vonali nyomásérzékelő",
+                (
+                    ("Minimum bemeneti feszültség", self.line_voltage_min),
+                    ("Maximum bemeneti feszültség", self.line_voltage_max),
+                    ("Minimum nyomásérték", self.line_value_min),
+                    ("Maximum nyomásérték", self.line_value_max),
+                ),
+            ),
+            (
+                "Differenciálnyomás-érzékelő",
+                (
+                    ("Minimum bemeneti feszültség", self.delta_voltage_min),
+                    ("Maximum bemeneti feszültség", self.delta_voltage_max),
+                    ("Minimum nyomásérték", self.delta_value_min),
+                    ("Maximum nyomásérték", self.delta_value_max),
+                ),
+            ),
+        ):
+            box = QGroupBox(title)
+            form = QFormLayout(box)
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            for label, field in fields:
+                form.addRow(label, field)
+            calibration_layout.addWidget(box)
+        calibration_layout.addStretch()
+        tabs.addTab(calibration_page, "Érzékelők kalibrációja")
+
+        safety_page = QWidget()
+        safety_layout = QVBoxLayout(safety_page)
+        safety_box = QGroupBox("Nyomás- és szabályozási korlátok")
+        safety_form = QFormLayout(safety_box)
+        safety_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        self.max_jacket = self._value_spinbox(400.0, 0.1, 1000.0, " bar")
+        self.max_injection = self._value_spinbox(350.0, 0.1, 1000.0, " bar")
+        self.max_line = self._value_spinbox(400.0, 0.1, 1000.0, " bar")
+        self.max_delta = self._value_spinbox(50.0, 0.1, 1000.0, " bar")
+        self.minimum_margin = self._value_spinbox(20.0, 20.0, 1000.0, " bar")
+        self.max_overshoot = self._value_spinbox(5.0, 0.1, 1000.0, " bar")
+        for label, field in (
+            ("Köpenypumpa maximális nyomása", self.max_jacket),
+            ("Besajtolópumpa maximális nyomása", self.max_injection),
+            ("Vonali nyomás maximuma", self.max_line),
+            ("Differenciálnyomás maximuma", self.max_delta),
+            ("Köpenynyomás minimális többlete", self.minimum_margin),
+            ("Célérték maximális túllövése", self.max_overshoot),
+        ):
+            safety_form.addRow(label, field)
+        safety_layout.addWidget(safety_box)
+        safety_note = QLabel(
+            "A köpenynyomás minimális többlete üzemi mérésnél nem lehet 20 bar alatti."
+        )
+        safety_note.setWordWrap(True)
+        safety_note.setStyleSheet("padding:8px;color:#8a5a00;font-weight:600")
+        safety_layout.addWidget(safety_note)
+        safety_layout.addStretch()
+        tabs.addTab(safety_page, "Biztonsági határértékek")
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText(
+            "Mentés és alkalmazás"
+        )
+        buttons.accepted.connect(self._accept_if_valid)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @staticmethod
+    def _value_spinbox(
+        value: float, minimum: float, maximum: float, suffix: str
+    ) -> QDoubleSpinBox:
+        spinbox = QDoubleSpinBox()
+        spinbox.setRange(minimum, maximum)
+        spinbox.setDecimals(4)
+        spinbox.setValue(value)
+        spinbox.setSuffix(suffix)
+        spinbox.setMinimumWidth(150)
+        return spinbox
+
+    def snapshot(self) -> tuple[float, ...]:
+        return tuple(field.value() for field in self._fields())
+
+    def restore_snapshot(self, values: tuple[float, ...]) -> None:
+        for field, value in zip(self._fields(), values, strict=True):
+            field.setValue(value)
+
+    def _fields(self) -> tuple[QDoubleSpinBox, ...]:
+        return (
+            self.line_voltage_min,
+            self.line_voltage_max,
+            self.line_value_min,
+            self.line_value_max,
+            self.delta_voltage_min,
+            self.delta_voltage_max,
+            self.delta_value_min,
+            self.delta_value_max,
+            self.max_jacket,
+            self.max_injection,
+            self.max_delta,
+            self.max_line,
+            self.minimum_margin,
+            self.max_overshoot,
+        )
+
+    def _accept_if_valid(self) -> None:
+        try:
+            LinearCalibration(*self.line_values())
+            LinearCalibration(*self.delta_values())
+            SafetyLimits(*self.safety_values())
+        except ValueError as error:
+            QMessageBox.critical(self, "Érvénytelen beállítás", str(error))
+            return
+        self.accept()
+
+    def line_values(self) -> list[float]:
+        return [
+            self.line_voltage_min.value(),
+            self.line_voltage_max.value(),
+            self.line_value_min.value(),
+            self.line_value_max.value(),
+        ]
+
+    def delta_values(self) -> list[float]:
+        return [
+            self.delta_voltage_min.value(),
+            self.delta_voltage_max.value(),
+            self.delta_value_min.value(),
+            self.delta_value_max.value(),
+        ]
+
+    def safety_values(self) -> tuple[float, ...]:
+        return (
+            self.max_jacket.value(),
+            self.max_injection.value(),
+            self.max_delta.value(),
+            self.minimum_margin.value(),
+            self.max_overshoot.value(),
+            self.max_line.value(),
+        )
+
+
+class MeasurementOverviewDialog(QDialog):
+    calibration_requested = Signal()
+
+    SECTIONS = (
+        (
+            "Aktív mérés",
+            (
+                ("state", "Rendszerállapot"),
+                ("mode", "Üzemmód"),
+                ("project", "Aktív projekt"),
+                ("stage", "Mérési fázis"),
+                ("control_mode", "Szelepvezérlés módja"),
+                ("pressure_source", "Szabályozott nyomásforrás"),
+                ("setpoint", "Beállított célérték"),
+                ("recording_interval", "Adatrögzítési időköz"),
+                ("last_update", "Utolsó adatfrissítés"),
+                ("data_quality", "Adatminőség"),
+                ("alarm", "Riasztás / biztonsági állapot"),
+            ),
+        ),
+        (
+            "Pumpák élő állapota",
+            (
+                ("jacket_connection", "Köpenypumpa kapcsolat"),
+                ("jacket_pressure", "Köpenypumpa nyomása"),
+                ("jacket_remaining", "Köpenypumpa maradék térfogata"),
+                ("jacket_net_volume", "Indítás óta nettó köpenytérfogat"),
+                ("injection_connection", "Besajtolópumpa kapcsolat"),
+                ("injection_pressure", "Besajtolópumpa nyomása"),
+                ("injection_remaining", "Besajtolópumpa maradék térfogata"),
+                ("injection_flow", "Besajtolási sebesség"),
+                ("injected_volume", "Indítás óta nettó besajtolt térfogat"),
+            ),
+        ),
+        (
+            "NI mérés és szelep",
+            (
+                ("line_connection", "Vonali nyomás kapcsolat"),
+                ("line_pressure", "Vonali nyomás"),
+                ("delta_connection", "Differenciálnyomás kapcsolat"),
+                ("delta_pressure", "Differenciálnyomás"),
+                ("valve_connection", "Szelep kapcsolat"),
+                ("valve_output", "Szelep kimenete"),
+            ),
+        ),
+        (
+            "Kalibráció és biztonság",
+            (
+                ("line_calibration", "Vonali érzékelő kalibrációja"),
+                ("delta_calibration", "Differenciálérzékelő kalibrációja"),
+                ("max_jacket", "Köpenynyomás maximuma"),
+                ("max_injection", "Besajtolási nyomás maximuma"),
+                ("max_line", "Vonali nyomás maximuma"),
+                ("max_delta", "Differenciálnyomás maximuma"),
+                ("minimum_margin", "Minimális köpenynyomás-többlet"),
+                ("max_overshoot", "Maximális céltúllövés"),
+            ),
+        ),
+    )
+
+    def __init__(
+        self,
+        provider: Callable[[], dict[str, str]],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._provider = provider
+        self.setWindowTitle("Mérési áttekintés")
+        self.resize(860, 720)
+        layout = QVBoxLayout(self)
+        title = QLabel("Részletes mérési és rendszeráttekintés")
+        title.setStyleSheet("font-size:18px;font-weight:700")
+        layout.addWidget(title)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        self.value_labels: dict[str, QLabel] = {}
+        for section_title, fields in self.SECTIONS:
+            box = QGroupBox(section_title)
+            form = QFormLayout(box)
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            for key, label in fields:
+                value = QLabel("—")
+                value.setWordWrap(True)
+                value.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextSelectableByMouse
+                )
+                form.addRow(label, value)
+                self.value_labels[key] = value
+            content_layout.addWidget(box)
+        content_layout.addStretch()
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+        actions = QHBoxLayout()
+        calibration_button = QPushButton("Kalibráció és határértékek beállítása…")
+        calibration_button.clicked.connect(self.calibration_requested.emit)
+        actions.addWidget(calibration_button)
+        actions.addStretch()
+        close_button = QPushButton("Bezárás")
+        close_button.clicked.connect(self.close)
+        actions.addWidget(close_button)
+        layout.addLayout(actions)
+        self._timer = QTimer(self)
+        self._timer.setInterval(250)
+        self._timer.timeout.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self) -> None:
+        values = self._provider()
+        for key, label in self.value_labels.items():
+            label.setText(values.get(key, "—"))
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self.refresh()
+        self._timer.start()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self._timer.stop()
+        super().closeEvent(event)
 
 
 class DashboardWindow(QMainWindow):
@@ -1652,6 +2583,9 @@ class DashboardWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self._user_settings = settings or portable_user_settings()
+        self._developer_mode = str(
+            self._user_settings.value("developer/enabled", "false")
+        ).lower() in {"1", "true", "yes", "on"}
         self._devices = devices
         self._control_loop = control_loop
         self._valve = valve
@@ -1662,6 +2596,16 @@ class DashboardWindow(QMainWindow):
         self._run_mode = RunMode.SIMULATION
         self._pump_control: PumpControlService | None = None
         self._measurement_time_origin: float | None = None
+        self._last_cycle_result: ControlCycleResult | None = None
+        self._overview_dialog: MeasurementOverviewDialog | None = None
+        self._active_alarm_text = "Nincs aktív riasztás"
+        self._current_mode_message = ""
+        self._last_notification_key: str | None = None
+        self._tray_icon = QSystemTrayIcon(application_icon(), self)
+        self._tray_icon.setToolTip("AFKI EOR mérőrendszer")
+        self._tray_available = QSystemTrayIcon.isSystemTrayAvailable()
+        if self._tray_available:
+            self._tray_icon.show()
         self._diagnostics = DiagnosticLogger(
             data_directory / "logs" / "application.log",
             hardware_path=data_directory / "logs" / "hardware_communication.log",
@@ -1688,7 +2632,8 @@ class DashboardWindow(QMainWindow):
         self._build_menu()
         self._restore_theme()
         self._restore_control_settings()
-        self._restore_project_selection()
+        self._project_selector_required = not self._restore_project_selection()
+        self._project_selector_prompted = False
         self._refresh_state()
 
     def _build_ui(self) -> None:
@@ -1697,18 +2642,16 @@ class DashboardWindow(QMainWindow):
         root = QWidget()
         layout = QVBoxLayout(root)
 
-        self._dashboard_mode_label = QLabel()
-        self._dashboard_mode_label.setObjectName("dashboard_mode_label")
-        self._dashboard_mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self._dashboard_mode_label)
         self._refresh_mode_label()
 
         status_container = QWidget()
         status_container.setObjectName("status_sidebar")
-        status_container.setMinimumWidth(230)
-        status_container.setMaximumWidth(360)
+        status_container.setMinimumWidth(0)
+        status_container.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding
+        )
         status_layout = QVBoxLayout(status_container)
-        status_layout.setContentsMargins(4, 0, 8, 4)
+        status_layout.setContentsMargins(4, 0, 4, 4)
         status_title = QLabel("ÉLŐ ÁLLAPOTOK")
         status_title.setStyleSheet("font-size:13px;font-weight:700;padding:4px")
         status_layout.addWidget(status_title)
@@ -1716,9 +2659,18 @@ class DashboardWindow(QMainWindow):
         self._jacket_label = QLabel("— bar")
         self._injection_label = QLabel("— bar")
         self._jacket_remaining_label = QLabel("Maradék folyadék: — ml")
+        self._jacket_net_volume_label = QLabel(
+            "Indítás óta nettó köpenytérfogat: — ml"
+        )
         self._injection_remaining_label = QLabel("Maradék folyadék: — ml")
         self._injection_flow_label = QLabel("Besajtolási sebesség: — ml/h")
-        self._injected_volume_label = QLabel("Mérés óta besajtolt: — ml")
+        self._injected_volume_label = QLabel("Indítás óta nettó besajtolt: — ml")
+        volume_tooltip = (
+            "Negatív érték esetén a pumpa maradék térfogata az indításkori "
+            "érték fölé nőtt."
+        )
+        self._jacket_net_volume_label.setToolTip(volume_tooltip)
+        self._injected_volume_label.setToolTip(volume_tooltip)
         self._line_label = QLabel("— bar")
         self._delta_label = QLabel("— bar")
         self._valve_label = QLabel("— %")
@@ -1743,34 +2695,55 @@ class DashboardWindow(QMainWindow):
             box = QGroupBox(title)
             box.setMinimumHeight(76)
             box_layout = QVBoxLayout(box)
-            value.setStyleSheet("font-size: 20px; font-weight: 600")
+            value.setStyleSheet(
+                "background:transparent;font-size:20px;font-weight:600"
+            )
+            value.setWordWrap(True)
             box_layout.addWidget(value)
             if title == "Köpenypumpa":
                 self._jacket_remaining_label.setStyleSheet(
-                    "color:#66788a;font-size:12px;font-weight:600"
+                    "background:transparent;color:#66788a;font-size:12px;font-weight:600"
                 )
+                self._jacket_remaining_label.setWordWrap(True)
                 box_layout.addWidget(self._jacket_remaining_label)
+                self._jacket_net_volume_label.setStyleSheet(
+                    "background:transparent;color:#66788a;font-size:12px;font-weight:600"
+                )
+                self._jacket_net_volume_label.setWordWrap(True)
+                box_layout.addWidget(self._jacket_net_volume_label)
             elif title == "Besajtolópumpa":
                 for detail in (
                     self._injection_remaining_label,
                     self._injection_flow_label,
                     self._injected_volume_label,
                 ):
-                    detail.setStyleSheet("color:#66788a;font-size:12px;font-weight:600")
+                    detail.setStyleSheet(
+                        "background:transparent;color:#66788a;"
+                        "font-size:12px;font-weight:600"
+                    )
+                    detail.setWordWrap(True)
                     box_layout.addWidget(detail)
             connection_key = connection_keys[index]
             if connection_key is not None:
                 connection = QLabel("NINCS ADAT")
-                connection.setStyleSheet("color:#66788a;font-size:11px;font-weight:600")
+                connection.setStyleSheet(
+                    "background:transparent;color:#66788a;"
+                    "font-size:11px;font-weight:600"
+                )
+                connection.setWordWrap(True)
                 box_layout.addWidget(connection)
                 self._connection_labels[connection_key] = connection
             status_layout.addWidget(box)
         status_layout.addStretch(1)
 
         right_container = QWidget()
-        right_container.setMinimumWidth(340)
-        right_container.setMaximumWidth(440)
+        right_container.setObjectName("control_sidebar")
+        right_container.setMinimumWidth(0)
+        right_container.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding
+        )
         right_layout = QVBoxLayout(right_container)
+        right_layout.setContentsMargins(4, 0, 4, 4)
 
         controls = QGridLayout()
         self._connect_button = QPushButton("Csatlakozás")
@@ -1809,6 +2782,7 @@ class DashboardWindow(QMainWindow):
         self._project.setObjectName("project_selector")
         self._stage = QComboBox()
         self._stage.setObjectName("stage_selector")
+        self._last_selected_stage_id: int | None = None
         new_project = QPushButton("Új projekt")
         add_stage = QPushButton("Új szakasz")
         rename_stage = QPushButton("Szakasz átnevezése")
@@ -1820,25 +2794,37 @@ class DashboardWindow(QMainWindow):
         project_layout.addWidget(QLabel("Projekt"), 0, 0)
         project_layout.addWidget(self._project, 0, 1, 1, 2)
         project_layout.addWidget(new_project, 1, 0, 1, 3)
-        project_layout.addWidget(QLabel("Aktív szakasz"), 2, 0)
-        project_layout.addWidget(self._stage, 2, 1, 1, 2)
         project_layout.addWidget(add_stage, 3, 0)
         project_layout.addWidget(rename_stage, 3, 1, 1, 2)
         right_layout.addWidget(project_box)
         project_box.setVisible(False)
         project_summary = QGroupBox("Aktív projekt")
+        project_summary.setObjectName("active_project_summary")
         project_summary_layout = QFormLayout(project_summary)
+        project_summary_layout.setRowWrapPolicy(
+            QFormLayout.RowWrapPolicy.WrapLongRows
+        )
+        project_summary_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
         self._active_project_label = QLabel("Nincs kiválasztva")
-        self._active_stage_label = QLabel("Nincs kiválasztva")
-        open_projects = QPushButton("Projektkezelő megnyitása…")
-        open_projects.clicked.connect(self._open_project_settings)
+        self._active_stage_label = QLabel("Nincs kiválasztva", project_summary)
+        self._active_stage_label.hide()
+        open_projects = QPushButton("Másik projekt megnyitása…")
+        open_projects.clicked.connect(self._open_project_selector)
+        open_overview = QPushButton("Részletes mérési áttekintés…")
+        open_overview.clicked.connect(self._open_measurement_overview)
         project_summary_layout.addRow("Projekt", self._active_project_label)
-        project_summary_layout.addRow("Szakasz", self._active_stage_label)
+        project_summary_layout.addRow("Szakasz", self._stage)
         project_summary_layout.addRow(open_projects)
+        project_summary_layout.addRow(open_overview)
         right_layout.addWidget(project_summary)
 
         settings = QGroupBox("Szelepvezérlés")
+        settings.setObjectName("valve_control_settings")
         form = QFormLayout(settings)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self._mode = QComboBox()
         self._mode.addItem("Kézi", ControlMode.MANUAL)
         self._mode.addItem("Automata", ControlMode.AUTOMATIC)
@@ -1865,6 +2851,16 @@ class DashboardWindow(QMainWindow):
         self._direction = QComboBox()
         self._direction.addItem("Közvetlen", ControlDirection.DIRECT)
         self._direction.addItem("Fordított", ControlDirection.REVERSE)
+        self._loading_pid_profile = False
+        self._pid_profile = QComboBox()
+        self._pid_profile.setObjectName("pid_profile_selector")
+        self._save_pid_profile_button = QPushButton("Mentés…")
+        self._delete_pid_profile_button = QPushButton("Törlés")
+        profile_actions = QWidget()
+        profile_actions_layout = QHBoxLayout(profile_actions)
+        profile_actions_layout.setContentsMargins(0, 0, 0, 0)
+        profile_actions_layout.addWidget(self._save_pid_profile_button)
+        profile_actions_layout.addWidget(self._delete_pid_profile_button)
         apply_pid = QPushButton("PID beállítások alkalmazása")
         apply_pid.clicked.connect(self._apply_pid)
         form.addRow("Mód", self._mode)
@@ -1873,6 +2869,8 @@ class DashboardWindow(QMainWindow):
         form.addRow("Célérték", self._setpoint)
         form.addRow("Adatrögzítési időköz", self._recording_interval)
         form.addRow("PID ciklus", QLabel("100 ms (háttérszál)"))
+        form.addRow("PID profil", self._pid_profile)
+        form.addRow("", profile_actions)
         form.addRow("Kp", self._kp)
         form.addRow("Ki", self._ki)
         form.addRow("Kd", self._kd)
@@ -1880,6 +2878,27 @@ class DashboardWindow(QMainWindow):
         form.addRow("Kimeneti minimum", self._output_min)
         form.addRow("Kimeneti maximum", self._output_max)
         form.addRow(apply_pid)
+        for field in (
+            self._mode,
+            self._source,
+            self._manual_output,
+            self._setpoint,
+            self._recording_interval,
+            self._pid_profile,
+            self._kp,
+            self._ki,
+            self._kd,
+            self._direction,
+            self._output_min,
+            self._output_max,
+        ):
+            field.setMinimumWidth(0)
+            policy = field.sizePolicy()
+            policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+            field.setSizePolicy(policy)
+            label = form.labelForField(field)
+            if isinstance(label, QLabel):
+                label.setWordWrap(True)
         for widget in (
             self._mode,
             self._source,
@@ -1891,60 +2910,45 @@ class DashboardWindow(QMainWindow):
                 widget.currentIndexChanged.connect(self._update_runtime_settings)
             else:
                 widget.valueChanged.connect(self._update_runtime_settings)
+        self._pid_profile.currentIndexChanged.connect(self._pid_profile_changed)
+        self._save_pid_profile_button.clicked.connect(self._save_pid_profile)
+        self._delete_pid_profile_button.clicked.connect(self._delete_pid_profile)
+        for widget in (
+            self._source,
+            self._kp,
+            self._ki,
+            self._kd,
+            self._direction,
+            self._output_min,
+            self._output_max,
+        ):
+            if isinstance(widget, QComboBox):
+                widget.currentIndexChanged.connect(self._pid_values_changed)
+            else:
+                widget.valueChanged.connect(self._pid_values_changed)
+        self._reload_pid_profiles()
         right_layout.addWidget(settings)
 
-        self._measurement_settings = QGroupBox("Kalibráció és biztonsági határértékek")
-        measurement_form = QGridLayout(self._measurement_settings)
-        self._line_voltage_min = self._value_spinbox(1.0, -10.0, 10.0, " V")
-        self._line_voltage_max = self._value_spinbox(5.0, -10.0, 10.0, " V")
-        self._line_value_min = self._value_spinbox(0.0, -1000.0, 1000.0, " bar")
-        self._line_value_max = self._value_spinbox(400.0, -1000.0, 1000.0, " bar")
-        self._delta_voltage_min = self._value_spinbox(1.0, -10.0, 10.0, " V")
-        self._delta_voltage_max = self._value_spinbox(5.0, -10.0, 10.0, " V")
-        self._delta_value_min = self._value_spinbox(0.0, -1000.0, 1000.0, " bar")
-        self._delta_value_max = self._value_spinbox(40.0, -1000.0, 1000.0, " bar")
-        self._max_jacket = self._value_spinbox(400.0, 0.1, 1000.0, " bar")
-        self._max_injection = self._value_spinbox(350.0, 0.1, 1000.0, " bar")
-        self._max_delta = self._value_spinbox(50.0, 0.1, 1000.0, " bar")
-        self._max_line = self._value_spinbox(400.0, 0.1, 1000.0, " bar")
-        self._minimum_margin = self._value_spinbox(20.0, 0.1, 1000.0, " bar")
-        self._max_overshoot = self._value_spinbox(5.0, 0.1, 1000.0, " bar")
-        calibration_fields = (
-            ("Vonali U min", self._line_voltage_min),
-            ("Vonali U max", self._line_voltage_max),
-            ("Vonali érték min", self._line_value_min),
-            ("Vonali érték max", self._line_value_max),
-            ("Δp U min", self._delta_voltage_min),
-            ("Δp U max", self._delta_voltage_max),
-            ("Δp érték min", self._delta_value_min),
-            ("Δp érték max", self._delta_value_max),
-            ("Köpeny maximum", self._max_jacket),
-            ("Besajtolás maximum", self._max_injection),
-            ("Vonali maximum", self._max_line),
-            ("Δp maximum", self._max_delta),
-            ("Min. köpenytöbblet", self._minimum_margin),
-            ("Max. céltúllövés", self._max_overshoot),
-        )
-        for index, (label, spinbox) in enumerate(calibration_fields):
-            row, column = divmod(index, 2)
-            measurement_form.addWidget(QLabel(label), row, column * 2)
-            measurement_form.addWidget(spinbox, row, column * 2 + 1)
-        apply_measurement = QPushButton("Kalibráció és határértékek alkalmazása")
-        apply_measurement.clicked.connect(self._apply_measurement_settings)
-        measurement_form.addWidget(apply_measurement, 10, 0, 1, 4)
-        self._measurement_settings.setVisible(False)
-        right_layout.addWidget(self._measurement_settings)
+        self._measurement_settings = CalibrationSettingsDialog(self)
+        self._line_voltage_min = self._measurement_settings.line_voltage_min
+        self._line_voltage_max = self._measurement_settings.line_voltage_max
+        self._line_value_min = self._measurement_settings.line_value_min
+        self._line_value_max = self._measurement_settings.line_value_max
+        self._delta_voltage_min = self._measurement_settings.delta_voltage_min
+        self._delta_voltage_max = self._measurement_settings.delta_voltage_max
+        self._delta_value_min = self._measurement_settings.delta_value_min
+        self._delta_value_max = self._measurement_settings.delta_value_max
+        self._max_jacket = self._measurement_settings.max_jacket
+        self._max_injection = self._measurement_settings.max_injection
+        self._max_delta = self._measurement_settings.max_delta
+        self._max_line = self._measurement_settings.max_line
+        self._minimum_margin = self._measurement_settings.minimum_margin
+        self._max_overshoot = self._measurement_settings.max_overshoot
         right_layout.addStretch(1)
-
-        self._alarm_label = QLabel("Nincs aktív riasztás")
-        self._alarm_label.setStyleSheet(
-            "padding:8px;background:#e8f5e9;color:#174d22;border-radius:6px"
-        )
-        layout.addWidget(self._alarm_label)
 
         self._plot = pg.PlotWidget(title="Elmúlt 10 perc nyomásai")
         self._plot.setObjectName("live_measurement_plot")
-        self._plot.setMinimumWidth(480)
+        self._plot.setMinimumWidth(0)
         self._plot.setLabel("left", "Nyomás", units="bar")
         self._plot.setLabel("bottom", "Mérés kezdete óta eltelt idő", units="s")
         self._plot.setLimits(xMin=0.0)
@@ -1956,7 +2960,7 @@ class DashboardWindow(QMainWindow):
         self._line_curve = self._plot.plot(pen="#2e7d32", name="Vonali")
         self._flow_plot = pg.PlotWidget(title="Elmúlt 10 perc besajtolási üteme")
         self._flow_plot.setObjectName("live_injection_flow_plot")
-        self._flow_plot.setMinimumWidth(480)
+        self._flow_plot.setMinimumWidth(0)
         self._flow_plot.setLabel("left", "Besajtolási sebesség", units="ml/h")
         self._flow_plot.setLabel(
             "bottom", "Mérés kezdete óta eltelt idő", units="s"
@@ -1975,22 +2979,61 @@ class DashboardWindow(QMainWindow):
         chart_splitter.setStretchFactor(0, 2)
         chart_splitter.setStretchFactor(1, 1)
         chart_splitter.setSizes([520, 260])
+        live_measurement_page = QWidget()
+        live_measurement_page.setMinimumWidth(0)
+        live_measurement_page.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
+        live_measurement_layout = QVBoxLayout(live_measurement_page)
+        live_measurement_layout.setContentsMargins(0, 0, 0, 0)
+        live_measurement_layout.addWidget(chart_splitter)
+        self._history_view = MeasurementHistoryView(parent=self)
+        self._measurement_tabs = QTabWidget()
+        self._measurement_tabs.setObjectName("dashboard_measurement_tabs")
+        self._measurement_tabs.setMinimumWidth(0)
+        self._measurement_tabs.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
+        self._measurement_tabs.addTab(live_measurement_page, "Élő mérés")
+        self._measurement_tabs.addTab(self._history_view, "Teljes mérés")
+        self._measurement_tabs.currentChanged.connect(self._measurement_tab_changed)
         left_scroll = QScrollArea()
         left_scroll.setObjectName("status_scroll_area")
+        left_scroll.setMinimumWidth(170)
+        left_scroll.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        left_scroll.setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+        )
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         left_scroll.setWidget(status_container)
         right_scroll = QScrollArea()
         right_scroll.setObjectName("control_scroll_area")
+        right_scroll.setMinimumWidth(260)
+        right_scroll.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
         right_scroll.setWidgetResizable(True)
         right_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        right_scroll.setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+        )
+        right_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         right_scroll.setWidget(right_container)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setObjectName("dashboard_splitter")
         splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(5)
+        splitter.setOpaqueResize(True)
         splitter.addWidget(left_scroll)
-        splitter.addWidget(chart_splitter)
+        splitter.addWidget(self._measurement_tabs)
         splitter.addWidget(right_scroll)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 5)
@@ -2001,8 +3044,11 @@ class DashboardWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         project_menu = self.menuBar().addMenu("Projekt")
+        select_project = QAction("Projekt kiválasztása…", self)
+        select_project.setShortcut("Ctrl+Shift+P")
+        select_project.triggered.connect(self._open_project_selector)
+        project_menu.addAction(select_project)
         open_project_settings = QAction("Projektkezelő…", self)
-        open_project_settings.setShortcut("Ctrl+Shift+P")
         open_project_settings.triggered.connect(self._open_project_settings)
         project_menu.addAction(open_project_settings)
         project_menu.addSeparator()
@@ -2012,7 +3058,11 @@ class DashboardWindow(QMainWindow):
         project_menu.addAction(data_management)
 
         display_menu = self.menuBar().addMenu("Megjelenítés")
-        full_history = QAction("Teljes rögzített mérés…", self)
+        overview = QAction("Mérési áttekintés…", self)
+        overview.setShortcut("Ctrl+Shift+O")
+        overview.triggered.connect(self._open_measurement_overview)
+        display_menu.addAction(overview)
+        full_history = QAction("Teljes mérés fül", self)
         full_history.setShortcut("Ctrl+Shift+G")
         full_history.triggered.connect(self._open_measurement_history)
         display_menu.addAction(full_history)
@@ -2030,10 +3080,10 @@ class DashboardWindow(QMainWindow):
         settings_menu.addAction(logging_settings)
         settings_menu.addSeparator()
         self._measurement_settings_action = QAction(
-            "Kalibráció és biztonsági határértékek", self, checkable=True
+            "Kalibráció és biztonsági határértékek…", self
         )
-        self._measurement_settings_action.toggled.connect(
-            self._measurement_settings.setVisible
+        self._measurement_settings_action.triggered.connect(
+            self._open_calibration_settings
         )
         settings_menu.addAction(self._measurement_settings_action)
         settings_menu.addSeparator()
@@ -2056,10 +3106,28 @@ class DashboardWindow(QMainWindow):
             self._theme_actions[key] = action
 
         developer_menu = self.menuBar().addMenu("Developer")
-        developer_view = QAction("Eszközkommunikáció…", self)
-        developer_view.setShortcut("Ctrl+Shift+L")
-        developer_view.triggered.connect(self._open_developer_view)
-        developer_menu.addAction(developer_view)
+        developer_mode = QAction("Developer mód", self, checkable=True)
+        developer_mode.setChecked(self._developer_mode)
+        developer_mode.toggled.connect(self._set_developer_mode)
+        developer_menu.addAction(developer_mode)
+        self._simulation_mode_action = QAction(
+            "Szimulációs mód", self, checkable=True
+        )
+        self._simulation_mode_action.setChecked(
+            self._run_mode is RunMode.SIMULATION
+        )
+        self._simulation_mode_action.setToolTip(
+            "Szimulációban nincs fizikai kimenet és nem készül mérési adatfájl. "
+            "Kikapcsoláskor az Eszközbeállítások ablakban aktiválható az éles mód."
+        )
+        self._simulation_mode_action.setVisible(self._developer_mode)
+        self._simulation_mode_action.toggled.connect(self._simulation_mode_toggled)
+        developer_menu.addAction(self._simulation_mode_action)
+        self._developer_view_action = QAction("Eszközkommunikáció…", self)
+        self._developer_view_action.setShortcut("Ctrl+Shift+L")
+        self._developer_view_action.setVisible(self._developer_mode)
+        self._developer_view_action.triggered.connect(self._open_developer_view)
+        developer_menu.addAction(self._developer_view_action)
 
     def _restore_logging_settings(self) -> None:
         enabled_value = str(
@@ -2097,7 +3165,8 @@ class DashboardWindow(QMainWindow):
 
     def _current_project_file(self) -> Path | None:
         project_id = self._project.currentData()
-        if not isinstance(project_id, int):
+        stage_name = self._stage.currentText().strip()
+        if not isinstance(project_id, int) or not stage_name:
             return None
         project = self._projects.get_project(project_id)
         return self._measurement_writer.select_project_with_metadata(
@@ -2108,6 +3177,7 @@ class DashboardWindow(QMainWindow):
             configuration=project.configuration,
             calibration_snapshot=project.calibration_snapshot,
             stages=stage_snapshots(project),
+            stage_name=stage_name,
         )
 
     def _open_data_management(self) -> None:
@@ -2115,9 +3185,16 @@ class DashboardWindow(QMainWindow):
         if source_path is None:
             self._show_error("Az adatkezeléshez előbb válassz projektet.")
             return
+        if not source_path.is_file():
+            self._show_error(
+                "Ehhez a fázishoz nincs mentett éles mérési adat. "
+                "A szimulációs mérések nem kerülnek fájlba."
+            )
+            return
         DataManagementDialog(
             source_path=source_path,
             project_name=self._project.currentText(),
+            phase_name=self._stage.currentText(),
             data_root=self._data_directory,
             synchronizer=self._nas_sync,
             settings=self._user_settings,
@@ -2125,13 +3202,103 @@ class DashboardWindow(QMainWindow):
         ).exec()
 
     def _open_measurement_history(self) -> None:
+        if not self._refresh_measurement_history():
+            return
+        self._measurement_tabs.setCurrentWidget(self._history_view)
+
+    def _refresh_measurement_history(self) -> bool:
         source_path = self._current_project_file()
         if source_path is None:
             self._show_error("A teljes grafikonhoz előbb válassz projektet.")
+            return False
+        phase_paths = self._measurement_writer.phase_paths or (source_path,)
+        self._history_view.set_sources(phase_paths, self._project.currentText())
+        return True
+
+    def _measurement_tab_changed(self, index: int) -> None:
+        if self._measurement_tabs.widget(index) is self._history_view:
+            self._refresh_measurement_history()
+
+    def _open_calibration_settings(self) -> None:
+        if self._devices.status.state is ApplicationState.RUNNING:
+            self._show_error("Futó mérés közben a kalibráció nem módosítható.")
             return
-        MeasurementHistoryDialog(
-            source_path, self._project.currentText(), parent=self
-        ).exec()
+        snapshot = self._measurement_settings.snapshot()
+        if self._measurement_settings.exec() != QDialog.DialogCode.Accepted:
+            self._measurement_settings.restore_snapshot(snapshot)
+            return
+        self._apply_measurement_settings()
+        self._save_user_settings()
+        if self._overview_dialog is not None:
+            self._overview_dialog.refresh()
+
+    def _open_measurement_overview(self) -> None:
+        if self._overview_dialog is None:
+            self._overview_dialog = MeasurementOverviewDialog(
+                self._overview_values, self
+            )
+            self._overview_dialog.calibration_requested.connect(
+                self._open_calibration_settings
+            )
+        self._overview_dialog.show()
+        self._overview_dialog.raise_()
+        self._overview_dialog.activateWindow()
+
+    def _overview_values(self) -> dict[str, str]:
+        line = self._line_calibration_values()
+        delta = self._delta_calibration_values()
+        latest = self._last_cycle_result
+        snapshot = latest.record.snapshot if latest is not None else None
+        return {
+            "state": self._state_label.text() or "—",
+            "mode": (
+                "ÉLES MÉRÉS (HARDVER, ADATMENTÉS AKTÍV)"
+                if self._run_mode is RunMode.HARDWARE
+                else "SZIMULÁCIÓ (NINCS ADATMENTÉS)"
+            ),
+            "project": self._active_project_label.text(),
+            "stage": self._active_stage_label.text(),
+            "control_mode": self._mode.currentText(),
+            "pressure_source": self._source.currentText(),
+            "setpoint": f"{self._setpoint.value():g} bar",
+            "recording_interval": f"{self._recording_interval.value()} s",
+            "last_update": (
+                snapshot.recorded_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                if snapshot is not None
+                else "Nincs mérési adat"
+            ),
+            "data_quality": (
+                snapshot.quality.value if snapshot is not None else "Nincs mérési adat"
+            ),
+            "alarm": self._active_alarm_text,
+            "jacket_connection": self._connection_labels["jacket"].text(),
+            "jacket_pressure": self._jacket_label.text(),
+            "jacket_remaining": self._jacket_remaining_label.text(),
+            "jacket_net_volume": self._jacket_net_volume_label.text(),
+            "injection_connection": self._connection_labels["injection"].text(),
+            "injection_pressure": self._injection_label.text(),
+            "injection_remaining": self._injection_remaining_label.text(),
+            "injection_flow": self._injection_flow_label.text(),
+            "injected_volume": self._injected_volume_label.text(),
+            "line_connection": self._connection_labels["line_daq"].text(),
+            "line_pressure": self._line_label.text(),
+            "delta_connection": self._connection_labels["delta_daq"].text(),
+            "delta_pressure": self._delta_label.text(),
+            "valve_connection": self._connection_labels["valve"].text(),
+            "valve_output": self._valve_label.text(),
+            "line_calibration": (
+                f"{line[0]:g}–{line[1]:g} V → {line[2]:g}–{line[3]:g} bar"
+            ),
+            "delta_calibration": (
+                f"{delta[0]:g}–{delta[1]:g} V → {delta[2]:g}–{delta[3]:g} bar"
+            ),
+            "max_jacket": f"{self._max_jacket.value():g} bar",
+            "max_injection": f"{self._max_injection.value():g} bar",
+            "max_line": f"{self._max_line.value():g} bar",
+            "max_delta": f"{self._max_delta.value():g} bar",
+            "minimum_margin": f"{self._minimum_margin.value():g} bar",
+            "max_overshoot": f"{self._max_overshoot.value():g} bar",
+        }
 
     def _open_logging_settings(self) -> None:
         LoggingSettingsDialog(
@@ -2140,6 +3307,30 @@ class DashboardWindow(QMainWindow):
 
     def _open_developer_view(self) -> None:
         DeveloperViewDialog(self._diagnostics, parent=self).exec()
+
+    def _set_developer_mode(self, enabled: bool) -> None:
+        self._developer_mode = enabled
+        self._simulation_mode_action.setVisible(enabled)
+        self._developer_view_action.setVisible(enabled)
+        self._user_settings.setValue("developer/enabled", enabled)
+        self._user_settings.sync()
+
+    def _simulation_mode_toggled(self, enabled: bool) -> None:
+        try:
+            if enabled:
+                self._activate_simulation()
+            elif self._run_mode is RunMode.SIMULATION:
+                self._open_device_settings()
+        except Exception as error:
+            self._show_error(f"A szimulációs mód aktiválása sikertelen: {error}")
+        self._sync_simulation_mode_action()
+
+    def _sync_simulation_mode_action(self) -> None:
+        blocked = self._simulation_mode_action.blockSignals(True)
+        self._simulation_mode_action.setChecked(
+            self._run_mode is RunMode.SIMULATION
+        )
+        self._simulation_mode_action.blockSignals(blocked)
 
     def _restore_theme(self) -> None:
         theme = str(self._user_settings.value("theme", "system"))
@@ -2152,22 +3343,31 @@ class DashboardWindow(QMainWindow):
         application = QApplication.instance()
         if not isinstance(application, QApplication):
             return
+        plots = (
+            self._plot,
+            self._flow_plot,
+            self._history_view._plot,
+            self._history_view._stage_plot,
+        )
         if theme == "dark":
-            application.setStyleSheet(DARK_STYLESHEET)
-            for plot in (self._plot, self._flow_plot):
+            application.setStyleSheet(resolved_theme_stylesheet(DARK_STYLESHEET, "dark"))
+            for plot in plots:
                 plot.setBackground("#15191f")
                 plot.getAxis("left").setTextPen("#e6edf3")
                 plot.getAxis("bottom").setTextPen("#e6edf3")
         elif theme == "light":
-            application.setStyleSheet(LIGHT_STYLESHEET)
-            for plot in (self._plot, self._flow_plot):
+            application.setStyleSheet(
+                resolved_theme_stylesheet(LIGHT_STYLESHEET, "light")
+            )
+            for plot in plots:
                 plot.setBackground("#ffffff")
                 plot.getAxis("left").setTextPen("#263238")
                 plot.getAxis("bottom").setTextPen("#263238")
         else:
-            application.setStyleSheet("")
             application.setPalette(application.style().standardPalette())
-            self._plot.setBackground(None)
+            application.setStyleSheet(SYSTEM_STYLESHEET)
+            for plot in plots:
+                plot.setBackground(None)
         self._user_settings.setValue("theme", theme)
         self._user_settings.sync()
         if self._user_settings.status() != QSettings.Status.NoError:
@@ -2177,20 +3377,71 @@ class DashboardWindow(QMainWindow):
 
     def _refresh_mode_label(self) -> None:
         if self._run_mode is RunMode.HARDWARE:
-            self._dashboard_mode_label.setText("HARDVER MÓD — FIZIKAI ESZKÖZÖK")
-            self._dashboard_mode_label.setStyleSheet(
-                "padding:10px;background:#b00020;color:white;font-weight:800;"
-                "font-size:15px;border-radius:6px"
+            self.setWindowTitle("AFKI EOR mérőrendszer — éles mérés")
+            message = (
+                "ÉLES MÉRÉS — FIZIKAI ESZKÖZÖK, ADATMENTÉS AKTÍV"
             )
+            title = "Éles mérési mód"
         else:
-            self._dashboard_mode_label.setText("SZIMULÁCIÓS MÓD — NINCS FIZIKAI KIMENET")
-            self._dashboard_mode_label.setStyleSheet(
-                "padding:10px;background:#0d6efd;color:white;font-weight:800;"
-                "font-size:15px;border-radius:6px"
+            self.setWindowTitle("AFKI EOR mérőrendszer — szimuláció")
+            message = (
+                "SZIMULÁCIÓ — NINCS ADATMENTÉS, NINCS FIZIKAI KIMENET"
             )
+            title = "Szimulációs mód"
+        self._current_mode_message = message
+        self._notify_user(
+            title,
+            message,
+            critical=self._run_mode is RunMode.HARDWARE,
+            notification_key=f"mode:{self._run_mode.value}",
+        )
+
+    def _notify_user(
+        self,
+        title: str,
+        message: str,
+        *,
+        critical: bool,
+        notification_key: str,
+    ) -> None:
+        if notification_key == self._last_notification_key:
+            return
+        self._last_notification_key = notification_key
+        self.statusBar().showMessage(message, 10_000)
+        if self._tray_available:
+            icon = (
+                QSystemTrayIcon.MessageIcon.Critical
+                if critical
+                else QSystemTrayIcon.MessageIcon.Information
+            )
+            self._tray_icon.showMessage(title, message, icon, 10_000)
+        if self.isMinimized() or not self.isActiveWindow():
+            self._request_taskbar_attention()
+
+    def _request_taskbar_attention(self) -> None:
+        QApplication.alert(self, 0)
+
+    def _set_active_alarm(self, message: str) -> None:
+        self._active_alarm_text = message
+        self._notify_user(
+            "EOR biztonsági riasztás",
+            message,
+            critical=True,
+            notification_key=f"alarm:{message}",
+        )
+
+    def _clear_active_alarm(self) -> None:
+        self._active_alarm_text = "Nincs aktív riasztás"
+        if self._last_notification_key is not None and self._last_notification_key.startswith(
+            "alarm:"
+        ):
+            self._last_notification_key = None
 
     def _open_device_settings(self) -> None:
-        if self._devices.status.state is not ApplicationState.IDLE:
+        if (
+            self._devices.status.state is not ApplicationState.IDLE
+            or self._runtime.running
+        ):
             self._show_error("Eszközmód csak leválasztott, IDLE állapotban módosítható.")
             return
         dialog = DeviceSettingsDialog(
@@ -2198,6 +3449,7 @@ class DashboardWindow(QMainWindow):
             settings=self._user_settings,
             current_mode=self._run_mode,
             diagnostics=self._diagnostics,
+            developer_mode=self._developer_mode,
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted or dialog.configuration is None:
@@ -2248,14 +3500,18 @@ class DashboardWindow(QMainWindow):
         project_id = self._project.currentData()
         if isinstance(project_id, int):
             project = self._projects.get_project(project_id)
+            configuration_snapshot = self._current_configuration()
+            configuration_snapshot["mode"] = "hardware"
+            configuration_snapshot["measurement_kind"] = "live"
             writer.select_project_with_metadata(
                 project.id,
                 project.name,
                 created_at=project.created_at,
                 notes=project.notes,
-                configuration=project.configuration,
+                configuration=configuration_snapshot,
                 calibration_snapshot=project.calibration_snapshot,
                 stages=stage_snapshots(project),
+                stage_name=self._stage.currentText() or "Mérés",
             )
         measurement = MeasurementService(
             jacket_pump=jacket,
@@ -2311,11 +3567,92 @@ class DashboardWindow(QMainWindow):
         self._pump_control = pump_control
         self._runtime = self._make_runtime(new_loop)
         self._run_mode = RunMode.HARDWARE
+        self._sync_simulation_mode_action()
         self._diagnostics.emit(
             DiagnosticCategory.SYSTEM, "MODE", "hardware mode activated"
         )
         self._user_settings.setValue("hardware/last_test_succeeded", True)
         self._refresh_mode_label()
+        self._refresh_state()
+
+    def _activate_simulation(self) -> None:
+        if self._run_mode is RunMode.SIMULATION:
+            return
+        if self._devices.status.state is not ApplicationState.IDLE:
+            self._show_error(
+                "Szimulációs módra csak leválasztott, IDLE állapotban lehet váltani."
+            )
+            return
+
+        jacket = SimulatedPump(pressure_bar=120.0)
+        injection = SimulatedPump(
+            pressure_bar=100.0,
+            flow_ml_per_hour=10.0,
+            remaining_volume_ml=260.0,
+        )
+        daq = SimulatedDataAcquisition()
+        daq.inputs.update(line_pressure=2.0, differential_pressure=1.5)
+        actuator = SimulatedValveActuator()
+        writer = ProjectMeasurementWriter(
+            self._data_directory, self._nas_sync, enabled=False
+        )
+        measurement = MeasurementService(
+            jacket_pump=jacket,
+            injection_pump=injection,
+            daq=daq,
+            line_calibration=LinearCalibration(*self._line_calibration_values()),
+            differential_calibration=LinearCalibration(
+                *self._delta_calibration_values()
+            ),
+            safety_monitor=SafetyMonitor(
+                SafetyLimits(
+                    self._max_jacket.value(),
+                    self._max_injection.value(),
+                    self._max_delta.value(),
+                    self._minimum_margin.value(),
+                    self._max_overshoot.value(),
+                    self._max_line.value(),
+                )
+            ),
+            writer=writer,
+            persistence_enabled=False,
+        )
+        controller = ValveController(
+            PidController(
+                PidParameters(
+                    self._kp.value(),
+                    self._ki.value(),
+                    self._kd.value(),
+                    output_min_percent=self._output_min.value(),
+                    output_max_percent=self._output_max.value(),
+                    direction=ControlDirection(self._direction.currentData()),
+                )
+            )
+        )
+        new_loop = ControlLoop(
+            measurement=measurement, controller=controller, actuator=actuator
+        )
+        try:
+            self._control_loop.close()
+        except Exception:
+            new_loop.close()
+            raise
+        if self._pump_control is not None:
+            self._pump_control.revoke()
+        self._control_loop = new_loop
+        self._measurement_writer = writer
+        self._devices = DeviceControlService(
+            jacket_pump=jacket, injection_pump=injection, daq=daq
+        )
+        self._pump_control = None
+        self._runtime = self._make_runtime(new_loop)
+        self._run_mode = RunMode.SIMULATION
+        self._sync_simulation_mode_action()
+        self._diagnostics.emit(
+            DiagnosticCategory.SYSTEM, "MODE", "simulation mode activated"
+        )
+        self._refresh_mode_label()
+        self._set_all_connections("LEVÁLASZTVA", ok=None)
         self._refresh_state()
 
     def _make_runtime(self, control_loop: ControlLoop) -> BackgroundControlRunner:
@@ -2376,16 +3713,24 @@ class DashboardWindow(QMainWindow):
                     widget.setValue(numeric_value)
             except (TypeError, ValueError):
                 continue
+        profile_id = self._stored_int("pid/last_profile_id")
+        if profile_id is not None:
+            profile_index = self._pid_profile.findData(profile_id)
+            if profile_index >= 0:
+                self._pid_profile.setCurrentIndex(profile_index)
 
-    def _restore_project_selection(self) -> None:
+    def _restore_project_selection(self) -> bool:
         project_id = self._stored_int("project/last_project_id")
         stage_id = self._stored_int("project/last_stage_id")
         self._reload_projects(project_id)
+        if not isinstance(project_id, int) or self._project.currentData() != project_id:
+            return False
         if stage_id is not None:
             index = self._stage.findData(stage_id)
             if index >= 0:
                 self._stage.setCurrentIndex(index)
                 self._active_stage_label.setText(self._stage.currentText())
+        return True
 
     def _stored_int(self, key: str) -> int | None:
         value = self._user_settings.value(key)
@@ -2424,10 +3769,23 @@ class DashboardWindow(QMainWindow):
         }
         project_id = self._project.currentData()
         stage_id = self._stage.currentData()
+        profile_id = self._pid_profile.currentData()
+        if isinstance(profile_id, int):
+            values["pid/last_profile_id"] = profile_id
+        else:
+            self._user_settings.remove("pid/last_profile_id")
         if isinstance(project_id, int):
             values["project/last_project_id"] = project_id
+        else:
+            self._user_settings.remove("project/last_project_id")
+            self._user_settings.remove("project/last_stage_id")
         if isinstance(stage_id, int):
             values["project/last_stage_id"] = stage_id
+            if isinstance(project_id, int):
+                values[f"project/last_stage_by_project/{project_id}"] = stage_id
+        elif isinstance(project_id, int):
+            self._user_settings.remove("project/last_stage_id")
+            self._user_settings.remove(f"project/last_stage_by_project/{project_id}")
         for key, value in values.items():
             self._user_settings.setValue(key, value)
         self._user_settings.sync()
@@ -2455,10 +3813,7 @@ class DashboardWindow(QMainWindow):
     def _acknowledge_fault(self) -> None:
         try:
             self._devices.acknowledge_fault()
-            self._alarm_label.setText("Nincs aktív riasztás")
-            self._alarm_label.setStyleSheet(
-                "padding:8px;background:#e8f5e9;color:#174d22;border-radius:6px"
-            )
+            self._clear_active_alarm()
         except RuntimeError as error:
             self._show_error(str(error))
         self._refresh_state()
@@ -2479,59 +3834,73 @@ class DashboardWindow(QMainWindow):
         spinbox.setSuffix(" %")
         return spinbox
 
-    @staticmethod
-    def _value_spinbox(
-        value: float, minimum: float, maximum: float, suffix: str
-    ) -> QDoubleSpinBox:
-        spinbox = QDoubleSpinBox()
-        spinbox.setRange(minimum, maximum)
-        spinbox.setDecimals(4)
-        spinbox.setValue(value)
-        spinbox.setSuffix(suffix)
-        return spinbox
-
     def _reload_projects(self, selected_project_id: int | None = None) -> None:
         self._project.blockSignals(True)
         self._project.clear()
         for project in self._projects.list_projects():
             self._project.addItem(project.name, project.id)
-        self._project.blockSignals(False)
+        selected_index = -1
         if selected_project_id is not None:
             index = self._project.findData(selected_project_id)
             if index >= 0:
-                self._project.setCurrentIndex(index)
+                selected_index = index
+        self._project.setCurrentIndex(selected_index)
+        self._project.blockSignals(False)
         self._reload_stages()
 
-    def _reload_stages(self, *_args: object) -> None:
+    def _reload_stages(
+        self, *_args: object, selected_stage_id: int | None = None
+    ) -> None:
+        current_stage_id = self._stage.currentData()
+        if selected_stage_id is None and isinstance(current_stage_id, int):
+            selected_stage_id = current_stage_id
+        self._stage.blockSignals(True)
         self._stage.clear()
         project_id = self._project.currentData()
         if project_id is None:
             self._active_project_label.setText("Nincs kiválasztva")
             self._active_stage_label.setText("Nincs kiválasztva")
+            self._stage.addItem("Nincs kiválasztott projekt", None)
+            self._stage.setEnabled(False)
+            self._stage.blockSignals(False)
+            self._stage_changed()
             return
         self._active_project_label.setText(self._project.currentText())
         project = self._projects.get_project(int(project_id))
-        self._measurement_writer.select_project_with_metadata(
-            project.id,
-            project.name,
-            created_at=project.created_at,
-            notes=project.notes,
-            configuration=project.configuration,
-            calibration_snapshot=project.calibration_snapshot,
-            stages=stage_snapshots(project),
-        )
-        for stage in self._projects.list_stages(project.id):
+        stages = self._projects.list_stages(project.id)
+        for stage in stages:
             self._stage.addItem(stage.name, stage.id)
-        self._active_stage_label.setText(
-            self._stage.currentText() or "Nincs kiválasztva"
-        )
+        if not stages:
+            self._stage.addItem("Nincs elérhető mérési szakasz", None)
+        if selected_stage_id is not None:
+            selected_index = self._stage.findData(selected_stage_id)
+            if selected_index >= 0:
+                self._stage.setCurrentIndex(selected_index)
+        if stages and not isinstance(self._stage.currentData(), int):
+            self._stage.setCurrentIndex(0)
+        self._stage.insertSeparator(self._stage.count())
+        self._stage.addItem("+ Új szakasz hozzáadása…", ADD_STAGE_ACTION_DATA)
+        self._stage.setEnabled(True)
+        self._stage.blockSignals(False)
+        self._stage_changed()
 
     def _stage_changed(self, *_args: object) -> None:
+        stage_id = self._stage.currentData()
+        if stage_id == ADD_STAGE_ACTION_DATA:
+            previous_index = self._stage.findData(self._last_selected_stage_id)
+            if previous_index < 0:
+                previous_index = 0
+            self._stage.blockSignals(True)
+            self._stage.setCurrentIndex(previous_index)
+            self._stage.blockSignals(False)
+            self._add_stage()
+            return
         self._active_stage_label.setText(
             self._stage.currentText() or "Nincs kiválasztva"
         )
-        stage_id = self._stage.currentData()
         if isinstance(stage_id, int):
+            self._last_selected_stage_id = stage_id
+            self._current_project_file()
             stage = self._projects.get_stage(stage_id)
             details: list[str] = []
             if stage.fluid:
@@ -2542,12 +3911,22 @@ class DashboardWindow(QMainWindow):
             if stage.target_flow_ml_per_hour is not None:
                 details.append(f"áram: {stage.target_flow_ml_per_hour:g} ml/h")
             self._active_stage_label.setToolTip("; ".join(details))
+            self._stage.setToolTip("; ".join(details))
+        else:
+            self._active_stage_label.setToolTip("")
+            self._stage.setToolTip("")
+        if self._measurement_tabs.currentWidget() is self._history_view:
+            if isinstance(stage_id, int):
+                self._refresh_measurement_history()
+            else:
+                self._history_view.set_sources(())
         self._update_runtime_settings()
 
     def _open_project_settings(self) -> None:
         if self._devices.status.state is ApplicationState.RUNNING:
             self._show_error("Futó mérés közben az aktív projekt nem módosítható.")
             return
+        self._save_user_settings()
         dialog = ProjectSettingsDialog(
             self._projects,
             selected_project_id=self._project.currentData(),
@@ -2559,12 +3938,51 @@ class DashboardWindow(QMainWindow):
             },
             parent=self,
         )
+        result = dialog.exec()
+        if result != QDialog.DialogCode.Accepted and not dialog.projects_changed:
+            return
+        self._reload_projects(dialog.selected_project_id)
+        if (
+            result == QDialog.DialogCode.Accepted
+            and dialog.selected_stage_id is not None
+        ):
+            self._stage.setCurrentIndex(self._stage.findData(dialog.selected_stage_id))
+            self._active_stage_label.setText(self._stage.currentText())
+        self._save_user_settings()
+
+    def _open_project_selector(self) -> None:
+        if self._devices.status.state is ApplicationState.RUNNING:
+            self._show_error("Futó mérés közben az aktív projekt nem módosítható.")
+            return
+        self._save_user_settings()
+        dialog = ProjectSelectionDialog(
+            self._projects,
+            settings=self._user_settings,
+            selected_project_id=(
+                self._project.currentData()
+                if isinstance(self._project.currentData(), int)
+                else None
+            ),
+            selected_stage_id=(
+                self._stage.currentData()
+                if isinstance(self._stage.currentData(), int)
+                else None
+            ),
+            configuration=self._current_configuration(),
+            calibration_snapshot={
+                "line_pressure": self._line_calibration_values(),
+                "differential_pressure": self._delta_calibration_values(),
+            },
+            parent=self,
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._reload_projects(dialog.selected_project_id)
         if dialog.selected_stage_id is not None:
-            self._stage.setCurrentIndex(self._stage.findData(dialog.selected_stage_id))
-            self._active_stage_label.setText(self._stage.currentText())
+            index = self._stage.findData(dialog.selected_stage_id)
+            if index >= 0:
+                self._stage.setCurrentIndex(index)
+        self._project_selector_required = False
         self._save_user_settings()
 
     def _create_project(self) -> None:
@@ -2596,14 +4014,30 @@ class DashboardWindow(QMainWindow):
         if project_id is None:
             self._show_error("Előbb hozz létre vagy válassz projektet.")
             return
-        name, accepted = QInputDialog.getText(self, "Új szakasz", "Szakasz neve")
-        if accepted:
-            try:
-                stage = self._projects.add_stage(project_id, name)
-                self._reload_stages()
-                self._stage.setCurrentIndex(self._stage.findData(stage.id))
-            except ValueError as error:
-                self._show_error(str(error))
+        if self._devices.status.state is ApplicationState.RUNNING:
+            self._show_error("Futó mérés közben új szakasz nem hozható létre.")
+            return
+        dialog = StageSettingsDialog(parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            values = dialog.values()
+            stage = self._projects.add_stage(
+                int(project_id),
+                str(values["name"]),
+                fluid=str(values["fluid"]),
+                target_pressure_bar=cast(
+                    float | None, values["target_pressure_bar"]
+                ),
+                target_flow_ml_per_hour=cast(
+                    float | None, values["target_flow_ml_per_hour"]
+                ),
+                notes=str(values["notes"]),
+            )
+            self._reload_stages(selected_stage_id=stage.id)
+            self._save_user_settings()
+        except ValueError as error:
+            self._show_error(str(error))
 
     def _rename_stage(self) -> None:
         stage_id = self._stage.currentData()
@@ -2620,6 +4054,125 @@ class DashboardWindow(QMainWindow):
                 self._stage.setCurrentIndex(self._stage.findData(stage_id))
             except ValueError as error:
                 self._show_error(str(error))
+
+    def _reload_pid_profiles(self, selected_profile_id: int | None = None) -> None:
+        self._pid_profile.blockSignals(True)
+        self._pid_profile.clear()
+        self._pid_profile.addItem("Egyéni beállítások", None)
+        for profile in self._projects.list_pid_profiles():
+            self._pid_profile.addItem(profile.name, profile.id)
+        selected_index = self._pid_profile.findData(selected_profile_id)
+        self._pid_profile.setCurrentIndex(max(0, selected_index))
+        self._pid_profile.blockSignals(False)
+        self._delete_pid_profile_button.setEnabled(selected_index > 0)
+
+    def _pid_profile_changed(self, *_args: object) -> None:
+        profile_id = self._pid_profile.currentData()
+        self._delete_pid_profile_button.setEnabled(isinstance(profile_id, int))
+        if not isinstance(profile_id, int):
+            return
+        try:
+            self._load_pid_profile(self._projects.get_pid_profile(profile_id))
+        except (KeyError, ValueError) as error:
+            self._show_error(str(error))
+            self._reload_pid_profiles()
+
+    def _load_pid_profile(self, profile: PidProfile) -> None:
+        self._loading_pid_profile = True
+        try:
+            self._kp.setValue(profile.kp)
+            self._ki.setValue(profile.ki)
+            self._kd.setValue(profile.kd)
+            self._output_min.setValue(profile.output_min_percent)
+            self._output_max.setValue(profile.output_max_percent)
+            direction_index = self._direction.findData(profile.direction)
+            source_index = self._source.findData(profile.pressure_source)
+            if direction_index < 0 or source_index < 0:
+                raise ValueError("A PID-profil ismeretlen vezérlési beállítást tartalmaz.")
+            self._direction.setCurrentIndex(direction_index)
+            self._source.setCurrentIndex(source_index)
+        finally:
+            self._loading_pid_profile = False
+        self._apply_pid()
+        self._update_runtime_settings()
+        self._save_user_settings()
+
+    def _pid_values_changed(self, *_args: object) -> None:
+        if self._loading_pid_profile or not isinstance(
+            self._pid_profile.currentData(), int
+        ):
+            return
+        self._pid_profile.blockSignals(True)
+        self._pid_profile.setCurrentIndex(0)
+        self._pid_profile.blockSignals(False)
+        self._delete_pid_profile_button.setEnabled(False)
+
+    def _save_pid_profile(
+        self, _checked: bool = False, *, profile_name: str | None = None
+    ) -> None:
+        del _checked
+        current_name = (
+            self._pid_profile.currentText()
+            if isinstance(self._pid_profile.currentData(), int)
+            else ""
+        )
+        if profile_name is None:
+            profile_name, accepted = QInputDialog.getText(
+                self,
+                "PID-profil mentése",
+                "Profil neve",
+                text=current_name,
+            )
+            if not accepted:
+                return
+        existing = self._projects.get_pid_profile_by_name(profile_name)
+        if existing is not None:
+            answer = QMessageBox.question(
+                self,
+                "PID-profil felülírása",
+                f"A(z) „{existing.name}” profil már létezik. Felülírod?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            profile = self._projects.save_pid_profile(
+                name=profile_name,
+                kp=self._kp.value(),
+                ki=self._ki.value(),
+                kd=self._kd.value(),
+                direction=ControlDirection(self._direction.currentData()).value,
+                output_min_percent=self._output_min.value(),
+                output_max_percent=self._output_max.value(),
+                pressure_source=PressureSource(self._source.currentData()).value,
+            )
+            self._reload_pid_profiles(profile.id)
+            self._save_user_settings()
+        except ValueError as error:
+            self._show_error(str(error))
+
+    def _delete_pid_profile(self) -> None:
+        profile_id = self._pid_profile.currentData()
+        if not isinstance(profile_id, int):
+            return
+        name = self._pid_profile.currentText()
+        answer = QMessageBox.question(
+            self,
+            "PID-profil törlése",
+            f"Biztosan törlöd ezt a PID-profilt: {name}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._projects.delete_pid_profile(profile_id)
+            self._reload_pid_profiles()
+            self._user_settings.remove("pid/last_profile_id")
+            self._user_settings.sync()
+        except KeyError as error:
+            self._show_error(str(error))
 
     def _apply_pid(self) -> None:
         try:
@@ -2676,14 +4229,28 @@ class DashboardWindow(QMainWindow):
 
     def _current_configuration(self) -> dict[str, object]:
         return {
-            "mode": "simulation",
+            "mode": self._run_mode.value,
+            "measurement_kind": (
+                "live" if self._run_mode is RunMode.HARDWARE else "simulation"
+            ),
             "pid": {
+                "profile_id": (
+                    self._pid_profile.currentData()
+                    if isinstance(self._pid_profile.currentData(), int)
+                    else None
+                ),
+                "profile_name": (
+                    self._pid_profile.currentText()
+                    if isinstance(self._pid_profile.currentData(), int)
+                    else ""
+                ),
                 "kp": self._kp.value(),
                 "ki": self._ki.value(),
                 "kd": self._kd.value(),
                 "direction": ControlDirection(self._direction.currentData()).value,
                 "output_min_percent": self._output_min.value(),
                 "output_max_percent": self._output_max.value(),
+                "pressure_source": PressureSource(self._source.currentData()).value,
             },
             "recording_interval_seconds": self._recording_interval.value(),
         }
@@ -2715,6 +4282,7 @@ class DashboardWindow(QMainWindow):
             self._devices.start()
             self._control_loop.reset_injected_volume_tracking()
             self._measurement_time_origin = None
+            self._last_cycle_result = None
             self._times.clear()
             self._jacket_pressures.clear()
             self._injection_pressures.clear()
@@ -2742,16 +4310,14 @@ class DashboardWindow(QMainWindow):
         if self._pump_control is not None:
             self._pump_control.revoke()
             self._pump_control = None
-        self._alarm_label.setText("RETESSZELT HIBA: kézi vészleállítás")
-        self._alarm_label.setStyleSheet(
-            "padding:8px;background:#ffcdd2;color:#7f0015;font-weight:700;border-radius:6px"
-        )
+        self._set_active_alarm("RETESSZELT HIBA: kézi vészleállítás")
         self._refresh_state()
 
     def _handle_cycle(self, result: object) -> None:
         if not isinstance(result, ControlCycleResult):
             self._handle_runtime_fault("invalid result from control thread")
             return
+        self._last_cycle_result = result
         snapshot = result.record.snapshot
         self._diagnostics.emit(
             DiagnosticCategory.RUNTIME,
@@ -2771,6 +4337,10 @@ class DashboardWindow(QMainWindow):
         self._jacket_remaining_label.setText(
             f"Maradék folyadék: {snapshot.jacket_pump.remaining_volume_ml:.1f} ml"
         )
+        self._jacket_net_volume_label.setText(
+            f"Indítás óta nettó köpenytérfogat: "
+            f"{result.record.jacket_net_volume_ml:.1f} ml"
+        )
         self._injection_remaining_label.setText(
             f"Maradék folyadék: {snapshot.injection_pump.remaining_volume_ml:.1f} ml"
         )
@@ -2778,7 +4348,8 @@ class DashboardWindow(QMainWindow):
             f"Besajtolási sebesség: {snapshot.injection_pump.flow_ml_per_hour:.1f} ml/h"
         )
         self._injected_volume_label.setText(
-            f"Mérés óta besajtolt: {result.record.injected_volume_ml:.1f} ml"
+            f"Indítás óta nettó besajtolt: "
+            f"{result.record.injection_net_volume_ml:.1f} ml"
         )
         self._line_label.setText(f"{snapshot.line_pressure_bar:.1f} bar")
         self._delta_label.setText(f"{snapshot.differential_pressure_bar:.1f} bar")
@@ -2807,11 +4378,7 @@ class DashboardWindow(QMainWindow):
         self._plot.setXRange(x_minimum, x_maximum, padding=0.0)
         self._flow_plot.setXRange(x_minimum, x_maximum, padding=0.0)
         if result.record.safety_reasons:
-            self._alarm_label.setText("; ".join(result.record.safety_reasons))
-            self._alarm_label.setStyleSheet(
-                "padding:8px;background:#ffcdd2;color:#7f0015;"
-                "font-weight:700;border-radius:6px"
-            )
+            self._set_active_alarm("; ".join(result.record.safety_reasons))
 
     def _handle_runtime_fault(self, message: str) -> None:
         self._diagnostics.emit(
@@ -2822,11 +4389,7 @@ class DashboardWindow(QMainWindow):
         if self._pump_control is not None:
             self._pump_control.revoke()
             self._pump_control = None
-        self._alarm_label.setText(f"RETESSZELT VEZÉRLÉSI HIBA: {message}")
-        self._alarm_label.setStyleSheet(
-            "padding:8px;background:#ffcdd2;color:#7f0015;"
-            "font-weight:700;border-radius:6px"
-        )
+        self._set_active_alarm(f"RETESSZELT VEZÉRLÉSI HIBA: {message}")
         self._set_all_connections("HIBA", ok=False)
         self._refresh_state()
 
@@ -2834,16 +4397,18 @@ class DashboardWindow(QMainWindow):
         label = self._connection_labels[key]
         label.setText("KAPCSOLÓDVA" if connected else "HIBA")
         label.setStyleSheet(
-            "color:#1b7f3a;font-size:11px;font-weight:700"
+            "background:transparent;color:#1b7f3a;font-size:11px;font-weight:700"
             if connected
-            else "color:#b00020;font-size:11px;font-weight:700"
+            else "background:transparent;color:#b00020;font-size:11px;font-weight:700"
         )
 
     def _set_all_connections(self, text: str, *, ok: bool | None) -> None:
         color = "#1b7f3a" if ok is True else "#b00020" if ok is False else "#66788a"
         for label in self._connection_labels.values():
             label.setText(text)
-            label.setStyleSheet(f"color:{color};font-size:11px;font-weight:700")
+            label.setStyleSheet(
+                f"background:transparent;color:{color};font-size:11px;font-weight:700"
+            )
 
     def _refresh_state(self) -> None:
         state = self._devices.status.state
@@ -2860,10 +4425,18 @@ class DashboardWindow(QMainWindow):
             and self._pump_control is not None
             and state is ApplicationState.READY
         )
-        self._measurement_settings.setEnabled(state is not ApplicationState.RUNNING)
+        self._measurement_settings_action.setEnabled(
+            state is not ApplicationState.RUNNING
+        )
 
     def _show_error(self, message: str) -> None:
         QMessageBox.critical(self, "EOR hiba", message)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if self._project_selector_required and not self._project_selector_prompted:
+            self._project_selector_prompted = True
+            QTimer.singleShot(0, self._open_project_selector)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._save_user_settings()
@@ -2893,7 +4466,7 @@ def build_simulated_dashboard(
     safety = SafetyMonitor(SafetyLimits(400.0, 350.0, 50.0))
     queue = NasSyncQueue(data_path.parent / "nas_sync_queue.sqlite3")
     nas_sync = BackgroundNasSynchronizer(queue)
-    writer = ProjectMeasurementWriter(data_path.parent, nas_sync)
+    writer = ProjectMeasurementWriter(data_path.parent, nas_sync, enabled=False)
     measurement = MeasurementService(
         jacket_pump=jacket,
         injection_pump=injection,
@@ -2902,6 +4475,7 @@ def build_simulated_dashboard(
         differential_calibration=LinearCalibration(1.0, 5.0, 0.0, 40.0),
         safety_monitor=safety,
         writer=writer,
+        persistence_enabled=False,
     )
     return DashboardWindow(
         devices=DeviceControlService(jacket_pump=jacket, injection_pump=injection, daq=daq),
@@ -2922,6 +4496,7 @@ def build_simulated_dashboard(
 def run_ui() -> int:
     root = application_root_path()
     settings = portable_user_settings(root)
+    configure_windows_application_identity()
     instance = QApplication.instance()
     application = instance if isinstance(instance, QApplication) else QApplication(sys.argv)
     application.setWindowIcon(application_icon())

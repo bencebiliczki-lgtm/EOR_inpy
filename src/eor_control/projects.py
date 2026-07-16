@@ -32,8 +32,23 @@ class MeasurementProject:
     stages: tuple[MeasurementStage, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class PidProfile:
+    id: int
+    name: str
+    kp: float
+    ki: float
+    kd: float
+    direction: str
+    output_min_percent: float
+    output_max_percent: float
+    pressure_source: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class ProjectRepository:
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,10 +90,24 @@ class ProjectRepository:
                     );
                     CREATE INDEX measurement_stages_project
                     ON measurement_stages(project_id, position);
-                    PRAGMA user_version = 3;
+                    CREATE TABLE pid_profiles (
+                        id INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL COLLATE NOCASE UNIQUE
+                            CHECK(length(trim(name)) > 0),
+                        kp REAL NOT NULL,
+                        ki REAL NOT NULL,
+                        kd REAL NOT NULL,
+                        direction TEXT NOT NULL,
+                        output_min_percent REAL NOT NULL,
+                        output_max_percent REAL NOT NULL,
+                        pressure_source TEXT NOT NULL,
+                        created_at_utc TEXT NOT NULL,
+                        updated_at_utc TEXT NOT NULL
+                    );
+                    PRAGMA user_version = 4;
                     """
                 )
-            version = 3
+            version = 4
         if version == 1:
             with self._connection:
                 self._connection.executescript(
@@ -103,6 +132,28 @@ class ProjectRepository:
                     """
                     UPDATE measurement_stages SET stage_type = name;
                     PRAGMA user_version = 3;
+                    """
+                )
+            version = 3
+        if version == 3:
+            with self._connection:
+                self._connection.executescript(
+                    """
+                    CREATE TABLE pid_profiles (
+                        id INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL COLLATE NOCASE UNIQUE
+                            CHECK(length(trim(name)) > 0),
+                        kp REAL NOT NULL,
+                        ki REAL NOT NULL,
+                        kd REAL NOT NULL,
+                        direction TEXT NOT NULL,
+                        output_min_percent REAL NOT NULL,
+                        output_max_percent REAL NOT NULL,
+                        pressure_source TEXT NOT NULL,
+                        created_at_utc TEXT NOT NULL,
+                        updated_at_utc TEXT NOT NULL
+                    );
+                    PRAGMA user_version = 4;
                     """
                 )
 
@@ -152,6 +203,100 @@ class ProjectRepository:
             "SELECT * FROM projects ORDER BY created_at_utc, id"
         ).fetchall()
         return tuple(self._project_from_row(row, ()) for row in rows)
+
+    def delete_project(self, project_id: int) -> None:
+        """Delete project metadata; raw measurement files are intentionally external."""
+
+        self._require_project(project_id)
+        with self._connection:
+            self._connection.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+
+    def save_pid_profile(
+        self,
+        *,
+        name: str,
+        kp: float,
+        ki: float,
+        kd: float,
+        direction: str,
+        output_min_percent: float,
+        output_max_percent: float,
+        pressure_source: str,
+    ) -> PidProfile:
+        cleaned_name = self._validate_name(name, "PID profile name")
+        self._validate_pid_profile(
+            kp,
+            ki,
+            kd,
+            direction,
+            output_min_percent,
+            output_max_percent,
+            pressure_source,
+        )
+        timestamp = datetime.now(UTC).isoformat()
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO pid_profiles (
+                    name, kp, ki, kd, direction, output_min_percent,
+                    output_max_percent, pressure_source, created_at_utc, updated_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    name = excluded.name,
+                    kp = excluded.kp,
+                    ki = excluded.ki,
+                    kd = excluded.kd,
+                    direction = excluded.direction,
+                    output_min_percent = excluded.output_min_percent,
+                    output_max_percent = excluded.output_max_percent,
+                    pressure_source = excluded.pressure_source,
+                    updated_at_utc = excluded.updated_at_utc
+                """,
+                (
+                    cleaned_name,
+                    kp,
+                    ki,
+                    kd,
+                    direction,
+                    output_min_percent,
+                    output_max_percent,
+                    pressure_source,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        profile = self.get_pid_profile_by_name(cleaned_name)
+        if profile is None:
+            raise RuntimeError("saved PID profile disappeared")
+        return profile
+
+    def list_pid_profiles(self) -> tuple[PidProfile, ...]:
+        rows = self._connection.execute(
+            "SELECT * FROM pid_profiles ORDER BY name COLLATE NOCASE, id"
+        ).fetchall()
+        return tuple(self._pid_profile_from_row(row) for row in rows)
+
+    def get_pid_profile(self, profile_id: int) -> PidProfile:
+        row = self._connection.execute(
+            "SELECT * FROM pid_profiles WHERE id = ?", (profile_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"PID profile {profile_id} does not exist")
+        return self._pid_profile_from_row(row)
+
+    def get_pid_profile_by_name(self, name: str) -> PidProfile | None:
+        row = self._connection.execute(
+            "SELECT * FROM pid_profiles WHERE name = ? COLLATE NOCASE", (name.strip(),)
+        ).fetchone()
+        return self._pid_profile_from_row(row) if row is not None else None
+
+    def delete_pid_profile(self, profile_id: int) -> None:
+        with self._connection:
+            cursor = self._connection.execute(
+                "DELETE FROM pid_profiles WHERE id = ?", (profile_id,)
+            )
+        if cursor.rowcount == 0:
+            raise KeyError(f"PID profile {profile_id} does not exist")
 
     def add_stage(
         self,
@@ -348,6 +493,22 @@ class ProjectRepository:
         )
 
     @staticmethod
+    def _pid_profile_from_row(row: sqlite3.Row) -> PidProfile:
+        return PidProfile(
+            id=cast(int, row["id"]),
+            name=cast(str, row["name"]),
+            kp=cast(float, row["kp"]),
+            ki=cast(float, row["ki"]),
+            kd=cast(float, row["kd"]),
+            direction=cast(str, row["direction"]),
+            output_min_percent=cast(float, row["output_min_percent"]),
+            output_max_percent=cast(float, row["output_max_percent"]),
+            pressure_source=cast(str, row["pressure_source"]),
+            created_at=datetime.fromisoformat(cast(str, row["created_at_utc"])),
+            updated_at=datetime.fromisoformat(cast(str, row["updated_at_utc"])),
+        )
+
+    @staticmethod
     def _validate_name(name: str, label: str) -> str:
         cleaned = name.strip()
         if not cleaned:
@@ -358,6 +519,29 @@ class ProjectRepository:
     def _validate_optional_target(value: float | None, label: str) -> None:
         if value is not None and (not isfinite(value) or value < 0.0):
             raise ValueError(f"{label} must be nonnegative and finite")
+
+    @staticmethod
+    def _validate_pid_profile(
+        kp: float,
+        ki: float,
+        kd: float,
+        direction: str,
+        output_min_percent: float,
+        output_max_percent: float,
+        pressure_source: str,
+    ) -> None:
+        if any(not isfinite(value) or value < 0.0 for value in (kp, ki, kd)):
+            raise ValueError("PID gains must be nonnegative and finite")
+        if direction not in {"direct", "reverse"}:
+            raise ValueError("invalid PID direction")
+        if pressure_source not in {"injection_pump", "line_sensor"}:
+            raise ValueError("invalid PID pressure source")
+        if (
+            not isfinite(output_min_percent)
+            or not isfinite(output_max_percent)
+            or not 0.0 <= output_min_percent < output_max_percent <= 100.0
+        ):
+            raise ValueError("PID output limits must satisfy 0 <= minimum < maximum <= 100")
 
     @staticmethod
     def _as_utc(timestamp: datetime) -> datetime:

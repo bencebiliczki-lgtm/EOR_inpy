@@ -37,6 +37,46 @@ class MeasurementTable:
         return tuple(row[index] for row in self.rows)
 
 
+def measurement_stages(table: MeasurementTable) -> tuple[str, ...]:
+    """Return non-empty stage names in first-occurrence order."""
+
+    if "active_stage" not in table.header:
+        return ()
+    return tuple(dict.fromkeys(value for value in table.column("active_stage") if value))
+
+
+def filter_measurement_table_by_stage(
+    table: MeasurementTable, stage: str | None
+) -> MeasurementTable:
+    if stage is None or "active_stage" not in table.header:
+        return table
+    stage_index = table.header.index("active_stage")
+    return MeasurementTable(
+        table.header,
+        tuple(row for row in table.rows if row[stage_index] == stage),
+    )
+
+
+def measurement_stage_segments(
+    table: MeasurementTable,
+) -> tuple[tuple[str, int, int], ...]:
+    """Return contiguous stage spans as (name, start, exclusive end)."""
+
+    if not table.rows or "active_stage" not in table.header:
+        return ()
+    values = table.column("active_stage")
+    segments: list[tuple[str, int, int]] = []
+    start = 0
+    current = values[0]
+    for index, stage in enumerate(values[1:], start=1):
+        if stage != current:
+            segments.append((current, start, index))
+            current = stage
+            start = index
+    segments.append((current, start, len(values)))
+    return tuple(segments)
+
+
 def read_measurement_table(path: Path) -> MeasurementTable:
     if not path.is_file():
         return MeasurementTable(CsvMeasurementWriter.HEADER, ())
@@ -52,7 +92,7 @@ def read_measurement_table(path: Path) -> MeasurementTable:
     if (
         legacy_inlet_column in header
         and tuple(item for item in header if item != legacy_inlet_column)
-        == CsvMeasurementWriter.HEADER
+        == CsvMeasurementWriter.LEGACY_HEADER
     ):
         inlet_index = header.index(legacy_inlet_column)
         rows = [
@@ -60,11 +100,46 @@ def read_measurement_table(path: Path) -> MeasurementTable:
             for row in rows
         ]
         header = tuple(rows[0])
+    if header == CsvMeasurementWriter.LEGACY_HEADER:
+        legacy_index = {name: index for index, name in enumerate(header)}
+        converted_rows: list[list[str]] = [list(CsvMeasurementWriter.HEADER)]
+        for row in rows[1:]:
+            converted_rows.append(
+                [
+                    (
+                        ""
+                        if name == "jacket_net_volume_ml"
+                        else row[legacy_index["injected_volume_ml"]]
+                        if name == "injection_net_volume_ml"
+                        else row[legacy_index[name]]
+                    )
+                    for name in CsvMeasurementWriter.HEADER
+                ]
+            )
+        rows = converted_rows
+        header = CsvMeasurementWriter.HEADER
     if header != CsvMeasurementWriter.HEADER:
         raise ValueError("a mérési CSV fejléce nem támogatott")
     width = len(header)
     valid_rows = tuple(tuple(row) for row in rows[1:] if len(row) == width)
     return MeasurementTable(header, valid_rows)
+
+
+def read_measurement_tables(paths: Iterable[Path]) -> MeasurementTable:
+    """Combine phase CSV files in memory without creating a merged data file."""
+
+    rows: list[tuple[str, ...]] = []
+    for path in dict.fromkeys(paths):
+        rows.extend(read_measurement_table(path).rows)
+
+    def recorded_at(row: tuple[str, ...]) -> datetime:
+        try:
+            return datetime.fromisoformat(row[0].replace("Z", "+00:00")).astimezone(UTC)
+        except (IndexError, ValueError):
+            return datetime.max.replace(tzinfo=UTC)
+
+    rows.sort(key=recorded_at)
+    return MeasurementTable(CsvMeasurementWriter.HEADER, tuple(rows))
 
 
 def export_measurement_csv(
@@ -126,7 +201,14 @@ def export_measurement_excel(source: Path, destination: Path) -> None:
         chart.y_axis.title = "bar"
         chart.x_axis.title = "Minta"
         categories = Reference(sheet, min_col=1, min_row=2, max_row=len(table.rows) + 1)
-        for column_index in (3, 6, 10, 11, 12):
+        for column_name in (
+            "jacket_pressure_bar",
+            "injection_pressure_bar",
+            "line_pressure_bar",
+            "differential_pressure_bar",
+            "valve_percent",
+        ):
+            column_index = table.header.index(column_name) + 1
             data = Reference(
                 sheet,
                 min_col=column_index,
@@ -343,27 +425,50 @@ class BackgroundNasSynchronizer:
 
 
 class ProjectMeasurementWriter:
-    """Routes raw records to one crash-safe file per selected project."""
+    """Routes raw records to one crash-safe file per project measurement phase."""
 
     def __init__(
         self,
         data_root: Path,
         nas_sync: BackgroundNasSynchronizer | None = None,
+        *,
+        enabled: bool = True,
     ) -> None:
         self._data_root = data_root
         self._nas_sync = nas_sync
+        self._enabled = enabled
         self._writer: CsvMeasurementWriter | None = None
         self._path: Path | None = None
         self._relative_path: Path | None = None
+        self._relative_folder: Path | None = None
+        self._project_file_prefix: str | None = None
+        self._stage_name: str | None = None
         self._lock = Lock()
 
     @property
     def current_path(self) -> Path | None:
         with self._lock:
-            return self._path
+            return self._path if self._enabled else None
 
-    def select_project(self, project_id: int, project_name: str) -> Path:
-        return self.select_project_with_metadata(project_id, project_name)
+    @property
+    def persistence_enabled(self) -> bool:
+        return self._enabled
+
+    @property
+    def phase_paths(self) -> tuple[Path, ...]:
+        with self._lock:
+            relative_folder = self._relative_folder
+        if relative_folder is None:
+            return ()
+        folder = self._data_root / relative_folder
+        return tuple(sorted(folder.glob("*_live_raw.csv")))
+
+    def select_project(
+        self, project_id: int, project_name: str, *, stage_name: str = "Mérés"
+    ) -> Path:
+        return self.select_project_with_metadata(
+            project_id, project_name, stage_name=stage_name
+        )
 
     def select_project_with_metadata(
         self,
@@ -375,22 +480,31 @@ class ProjectMeasurementWriter:
         configuration: dict[str, object] | None = None,
         calibration_snapshot: dict[str, object] | None = None,
         stages: list[dict[str, object]] | None = None,
+        stage_name: str = "Mérés",
     ) -> Path:
         if project_id <= 0:
             raise ValueError("érvénytelen projektazonosító")
         timestamp = created_at or datetime.now(UTC)
         folder = f"{timestamp:%Y-%m-%d}_{project_id:06d}_{safe_filename(project_name)}"
         relative_folder = Path("projects") / str(timestamp.year) / folder
-        relative_path = relative_folder / f"{safe_filename(project_name)}_raw.csv"
+        project_file_prefix = safe_filename(project_name)
+        relative_path = relative_folder / (
+            f"{project_file_prefix}_{safe_filename(stage_name)}_live_raw.csv"
+        )
         path = self._data_root / relative_path
         with self._lock:
-            if path == self._path:
+            if path == self._path and (self._writer is not None or not self._enabled):
                 return path
             if self._writer is not None:
                 self._writer.close()
-            self._writer = CsvMeasurementWriter(path)
+            self._writer = CsvMeasurementWriter(path) if self._enabled else None
             self._path = path
             self._relative_path = relative_path
+            self._relative_folder = relative_folder
+            self._project_file_prefix = project_file_prefix
+            self._stage_name = stage_name
+        if not self._enabled:
+            return path
         self._write_project_snapshots(
             relative_folder,
             project_id=project_id,
@@ -419,6 +533,7 @@ class ProjectMeasurementWriter:
             "project.json": {
                 "id": project_id,
                 "name": project_name,
+                "measurement_kind": "live",
                 "created_at_utc": created_at.astimezone(UTC).isoformat(),
                 "notes": notes,
                 "stages": stages,
@@ -442,14 +557,35 @@ class ProjectMeasurementWriter:
                 )
 
     def write(self, record: MeasurementRecord) -> None:
+        if not self._enabled:
+            return
         with self._lock:
             if self._writer is None or self._path is None or self._relative_path is None:
                 raise RuntimeError("a mérés előtt projektet kell kiválasztani")
+            if record.active_stage != self._stage_name:
+                self._open_phase_locked(record.active_stage)
+            assert self._writer is not None
+            assert self._path is not None
+            assert self._relative_path is not None
             self._writer.write(record)
             path = self._path
             relative_path = self._relative_path
         if self._nas_sync is not None:
             self._nas_sync.enqueue(path, Path(*relative_path.parts[1:]))
+
+    def _open_phase_locked(self, stage_name: str) -> None:
+        if self._relative_folder is None or self._project_file_prefix is None:
+            raise RuntimeError("a mérés előtt projektet kell kiválasztani")
+        relative_path = self._relative_folder / (
+            f"{self._project_file_prefix}_{safe_filename(stage_name)}_live_raw.csv"
+        )
+        path = self._data_root / relative_path
+        if self._writer is not None:
+            self._writer.close()
+        self._writer = CsvMeasurementWriter(path)
+        self._path = path
+        self._relative_path = relative_path
+        self._stage_name = stage_name
 
     def close(self) -> None:
         with self._lock:

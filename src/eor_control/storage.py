@@ -1,5 +1,6 @@
 import csv
 import os
+import shutil
 from pathlib import Path
 from typing import Protocol, TextIO
 
@@ -15,7 +16,7 @@ class MeasurementWriter(Protocol):
 class CsvMeasurementWriter:
     """Append-only raw writer that flushes every complete measurement row."""
 
-    HEADER = (
+    LEGACY_HEADER = (
         "recorded_at_utc",
         "monotonic_seconds",
         "jacket_pressure_bar",
@@ -32,15 +33,89 @@ class CsvMeasurementWriter:
         "quality",
         "safety_reasons",
     )
+    HEADER = (
+        "recorded_at_utc",
+        "monotonic_seconds",
+        "jacket_pressure_bar",
+        "jacket_flow_ml_per_hour",
+        "jacket_remaining_volume_ml",
+        "jacket_net_volume_ml",
+        "injection_pressure_bar",
+        "injection_flow_ml_per_hour",
+        "injection_remaining_volume_ml",
+        "injection_net_volume_ml",
+        "line_pressure_bar",
+        "differential_pressure_bar",
+        "valve_percent",
+        "active_stage",
+        "quality",
+        "safety_reasons",
+    )
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         is_empty = not path.exists() or path.stat().st_size == 0
+        if not is_empty:
+            self._upgrade_legacy_file(path)
         self._file: TextIO = path.open("a", encoding="utf-8", newline="")
         self._writer = csv.writer(self._file, delimiter=";", lineterminator="\n")
         if is_empty:
             self._writer.writerow(self.HEADER)
             self._sync()
+
+    @classmethod
+    def _upgrade_legacy_file(cls, path: Path) -> None:
+        with path.open(encoding="utf-8", newline="") as file:
+            first_line = file.readline()
+            file.seek(0)
+            delimiter = ";" if ";" in first_line else ","
+            rows = list(csv.reader(file, delimiter=delimiter))
+        if not rows:
+            return
+        header = tuple(rows[0])
+        if header == cls.HEADER:
+            return
+        legacy_inlet_column = "inlet_pressure_bar"
+        if (
+            legacy_inlet_column in header
+            and tuple(name for name in header if name != legacy_inlet_column)
+            == cls.LEGACY_HEADER
+        ):
+            inlet_index = header.index(legacy_inlet_column)
+            rows = [
+                [value for index, value in enumerate(row) if index != inlet_index]
+                for row in rows
+            ]
+            header = tuple(rows[0])
+        if header != cls.LEGACY_HEADER:
+            raise ValueError("a meglévő mérési CSV fejléce nem támogatott")
+        legacy_index = {name: index for index, name in enumerate(header)}
+        converted = [list(cls.HEADER)]
+        for row in rows[1:]:
+            if len(row) != len(header):
+                continue
+            converted.append(
+                [
+                    (
+                        ""
+                        if name == "jacket_net_volume_ml"
+                        else row[legacy_index["injected_volume_ml"]]
+                        if name == "injection_net_volume_ml"
+                        else row[legacy_index[name]]
+                    )
+                    for name in cls.HEADER
+                ]
+            )
+        backup = path.with_name(f"{path.stem}_v1_backup{path.suffix}")
+        if not backup.exists():
+            shutil.copy2(path, backup)
+        temporary = path.with_suffix(f"{path.suffix}.upgrade.tmp")
+        with temporary.open("w", encoding="utf-8", newline="") as file:
+            writer = csv.writer(file, delimiter=";", lineterminator="\n")
+            writer.writerows(converted)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
 
     def write(self, record: MeasurementRecord) -> None:
         snapshot = record.snapshot
@@ -51,10 +126,11 @@ class CsvMeasurementWriter:
                 self._hu(snapshot.jacket_pump.pressure_bar),
                 self._hu(snapshot.jacket_pump.flow_ml_per_hour),
                 self._hu(snapshot.jacket_pump.remaining_volume_ml),
+                self._hu(record.jacket_net_volume_ml),
                 self._hu(snapshot.injection_pump.pressure_bar),
                 self._hu(snapshot.injection_pump.flow_ml_per_hour),
                 self._hu(snapshot.injection_pump.remaining_volume_ml),
-                self._hu(record.injected_volume_ml),
+                self._hu(record.injection_net_volume_ml),
                 self._hu(snapshot.line_pressure_bar),
                 self._hu(snapshot.differential_pressure_bar),
                 self._hu(snapshot.valve_percent),
