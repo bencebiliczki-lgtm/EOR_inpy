@@ -1,6 +1,8 @@
 import importlib
+import json
 from dataclasses import asdict, dataclass
 from enum import StrEnum
+from hashlib import sha256
 from math import isfinite
 from typing import Protocol
 
@@ -261,6 +263,100 @@ class ConnectionTestResult:
 
     def for_device(self, device: HardwareTestDevice) -> DeviceConnectionResult | None:
         return next((result for result in self.devices if result.device is device), None)
+
+
+def connection_configuration_fingerprint(
+    configuration: HardwareConfiguration, device: HardwareTestDevice
+) -> str:
+    """Hash only settings that can affect one read-only connection test."""
+    fields: dict[HardwareTestDevice, tuple[object, ...]] = {
+        HardwareTestDevice.JACKET_PUMP: (
+            configuration.jacket_port,
+            configuration.jacket_unit_id,
+            configuration.jacket_channel,
+            configuration.baud_rate,
+        ),
+        HardwareTestDevice.INJECTION_PUMP: (
+            configuration.injection_port,
+            configuration.injection_unit_id,
+            configuration.injection_channel,
+            configuration.baud_rate,
+        ),
+        HardwareTestDevice.LINE_PRESSURE: (
+            configuration.line_pressure_channel,
+            configuration.ni_terminal_configuration,
+        ),
+        HardwareTestDevice.DIFFERENTIAL_PRESSURE: (
+            configuration.differential_pressure_channel,
+            configuration.ni_terminal_configuration,
+        ),
+    }
+    payload = json.dumps(fields[device], ensure_ascii=True, separators=(",", ":"))
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
+class ConnectionTestRegistry:
+    """Accumulate independent results without reusing stale configuration data."""
+
+    def __init__(self) -> None:
+        self._results: dict[
+            HardwareTestDevice, tuple[str, DeviceConnectionResult]
+        ] = {}
+
+    def record(
+        self,
+        configuration: HardwareConfiguration,
+        result: DeviceConnectionResult,
+    ) -> None:
+        fingerprint = connection_configuration_fingerprint(
+            configuration, result.device
+        )
+        self._results[result.device] = (fingerprint, result)
+
+    def record_all(
+        self,
+        configuration: HardwareConfiguration,
+        result: ConnectionTestResult,
+    ) -> None:
+        for device_result in result.devices:
+            self.record(configuration, device_result)
+
+    def result_for(
+        self,
+        configuration: HardwareConfiguration,
+        device: HardwareTestDevice,
+    ) -> DeviceConnectionResult | None:
+        stored = self._results.get(device)
+        if stored is None:
+            return None
+        fingerprint, result = stored
+        if fingerprint != connection_configuration_fingerprint(configuration, device):
+            self._results.pop(device, None)
+            return None
+        return result
+
+    def aggregate(self, configuration: HardwareConfiguration) -> ConnectionTestResult:
+        return ConnectionTestResult(
+            tuple(
+                result
+                for device in HardwareTestDevice
+                if (result := self.result_for(configuration, device)) is not None
+            )
+        )
+
+    def invalidate_changed(
+        self,
+        previous: HardwareConfiguration,
+        current: HardwareConfiguration,
+    ) -> tuple[HardwareTestDevice, ...]:
+        invalidated: list[HardwareTestDevice] = []
+        for device in HardwareTestDevice:
+            if connection_configuration_fingerprint(
+                previous, device
+            ) != connection_configuration_fingerprint(current, device):
+                self._results.pop(device, None)
+                invalidated.append(device)
+        return tuple(invalidated)
 
 
 class HardwareConnectionTester(Protocol):

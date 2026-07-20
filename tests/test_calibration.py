@@ -14,7 +14,7 @@ def test_one_to_five_volts_maps_to_zero_to_four_hundred_bar() -> None:
 def test_out_of_range_voltage_is_rejected() -> None:
     calibration = LinearCalibration(1.0, 5.0, 0.0, 400.0)
 
-    with pytest.raises(ValueError, match="outside"):
+    with pytest.raises(ValueError, match=r"0\.9 V.*1–5 V"):
         calibration.convert(0.9)
 
 

@@ -32,3 +32,16 @@
 - A PID-profilok implementáltan korlátlan számú, közös SQLite-adatok; minden kezelő
   kiválaszthatja, felülírhatja és törölheti őket. Ha később felhasználói jogosultsági
   modell készül, a profilok hozzáférését azzal együtt kell újraértékelni.
+# Vezetett funkcionális teszt helyszíni validációja
+
+- Az AO multiméteres alapértelmezett tolerancia 0,05 V; ezt hitelesített műszerrel
+  és az NI USB-6001 specifikációjával helyszínen jóvá kell hagyni.
+- A nyugalmi szenzorzaj alapértelmezett határa 0,05 V. A vonali referenciaeltérés
+  és a differenciálnyomás-nullpont végleges bar-határa a tényleges érzékelő-
+  kalibráció és referenciaeszköz alapján rögzítendő.
+- A szelepteszt 1 s várakozást és legfeljebb 10 százalékpont/s változást használ,
+  a vezetett tartomány pedig legfeljebb 20%. A HANBAY aktuátor tényleges mechanikai
+  sebességét, biztonságos feszültségét és nyitási irányát helyszínen kell igazolni.
+- Az opcionális pumpa-RUN próba nincs alapértelmezetten engedélyezve, mert a
+  veszélytelen próbanyomás/próbaáram és időtartam nincs gyártói vagy helyszíni
+  jegyzőkönyvvel meghatározva. Ennek engedélyezése előtt ezeket külön jóvá kell hagyni.

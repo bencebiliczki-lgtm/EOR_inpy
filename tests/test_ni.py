@@ -1,10 +1,17 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from eor_control import ni
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
-from eor_control.ni import AnalogValveActuator, NidaqConfig, NidaqmxDataAcquisition
+from eor_control.ni import (
+    AnalogValveActuator,
+    NidaqConfig,
+    NidaqmxBackend,
+    NidaqmxDataAcquisition,
+)
 
 
 @dataclass
@@ -105,3 +112,42 @@ def test_ni_operations_are_logged_by_physical_function(tmp_path: Path) -> None:
 
     categories = [event.category for event in logger.events_after(0)]
     assert categories == [DiagnosticCategory.NI_LINE, DiagnosticCategory.NI_VALVE]
+
+
+def test_physical_backend_reuses_one_persistent_ao_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tasks: list[object] = []
+
+    class FakeTask:
+        def __init__(self) -> None:
+            self.ao_channels = SimpleNamespace(
+                add_ao_voltage_chan=lambda channel: setattr(self, "channel", channel)
+            )
+            self.writes: list[float] = []
+            self.closed = False
+            tasks.append(self)
+
+        def write(self, voltage: float, *, auto_start: bool) -> None:
+            assert auto_start
+            self.writes.append(voltage)
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(
+        ni.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(Task=FakeTask),
+    )
+    backend = NidaqmxBackend()
+
+    backend.write_voltage("Dev1/ao0", 1.0)
+    backend.write_voltage("Dev1/ao0", 2.0)
+    backend.close_output()
+
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert isinstance(task, FakeTask)
+    assert task.writes == [1.0, 2.0]
+    assert task.closed

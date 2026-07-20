@@ -1,7 +1,8 @@
 import importlib
 from dataclasses import dataclass
 from math import isfinite
-from typing import Protocol
+from threading import Lock
+from typing import Any, Protocol, cast
 
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
 
@@ -28,6 +29,9 @@ class NidaqmxBackend:
         if normalized not in self.TERMINAL_CONFIGURATIONS:
             raise ValueError("unsupported NI terminal configuration")
         self._terminal_configuration = normalized
+        self._output_task: object | None = None
+        self._output_channel: str | None = None
+        self._output_lock = Lock()
 
     def read_voltage(self, physical_channel: str) -> float:
         nidaqmx = importlib.import_module("nidaqmx")
@@ -45,11 +49,28 @@ class NidaqmxBackend:
             return float(task.read())
 
     def write_voltage(self, physical_channel: str, voltage: float) -> None:
-        nidaqmx = importlib.import_module("nidaqmx")
+        with self._output_lock:
+            if self._output_task is None:
+                nidaqmx = importlib.import_module("nidaqmx")
+                task = nidaqmx.Task()
+                try:
+                    task.ao_channels.add_ao_voltage_chan(physical_channel)
+                except Exception:
+                    task.close()
+                    raise
+                self._output_task = task
+                self._output_channel = physical_channel
+            elif self._output_channel != physical_channel:
+                raise RuntimeError("persistent NI AO task is bound to another channel")
+            cast(Any, self._output_task).write(voltage, auto_start=True)
 
-        with nidaqmx.Task() as task:
-            task.ao_channels.add_ao_voltage_chan(physical_channel)
-            task.write(voltage, auto_start=True)
+    def close_output(self) -> None:
+        with self._output_lock:
+            task = self._output_task
+            self._output_task = None
+            self._output_channel = None
+            if task is not None:
+                cast(Any, task).close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,16 +158,24 @@ class NidaqmxDataAcquisition:
         )
 
     def set_safe_state(self) -> None:
-        if self._output_authorized:
-            self._backend.write_voltage(
-                self._config.valve_output_channel, self._config.safe_output_voltage
-            )
-            self._log(
-                DiagnosticCategory.NI_VALVE,
-                "SAFE",
-                f"{self._config.valve_output_channel}={self._config.safe_output_voltage:.6f} V",
-            )
-        self._output_authorized = False
+        try:
+            if self._output_authorized:
+                self._backend.write_voltage(
+                    self._config.valve_output_channel, self._config.safe_output_voltage
+                )
+                self._log(
+                    DiagnosticCategory.NI_VALVE,
+                    "SAFE",
+                    f"{self._config.valve_output_channel}={self._config.safe_output_voltage:.6f} V",
+                )
+        finally:
+            self._output_authorized = False
+            close_output = getattr(self._backend, "close_output", None)
+            if callable(close_output):
+                close_output()
+
+    def close(self) -> None:
+        self.set_safe_state()
 
     def _validate_output(self, voltage: float) -> None:
         if not isfinite(voltage):

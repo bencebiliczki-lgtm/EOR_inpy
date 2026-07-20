@@ -77,17 +77,28 @@ class MeasurementService:
         if self._initial_injection_volume_ml is None:
             self._initial_injection_volume_ml = injection.remaining_volume_ml
 
+        line_voltage = self._daq.read_voltage(self._channels.line_pressure)
+        differential_voltage = self._daq.read_voltage(
+            self._channels.differential_pressure
+        )
+        try:
+            line_pressure = self._line_calibration.convert(line_voltage)
+        except ValueError as error:
+            raise ValueError(f"line pressure input: {error}") from error
+        try:
+            differential_pressure = self._differential_calibration.convert(
+                differential_voltage
+            )
+        except ValueError as error:
+            raise ValueError(f"differential pressure input: {error}") from error
+
         snapshot = MeasurementSnapshot(
             recorded_at=self._clock.utc_now(),
             monotonic_seconds=self._clock.monotonic(),
             jacket_pump=jacket,
             injection_pump=injection,
-            line_pressure_bar=self._line_calibration.convert(
-                self._daq.read_voltage(self._channels.line_pressure)
-            ),
-            differential_pressure_bar=self._differential_calibration.convert(
-                self._daq.read_voltage(self._channels.differential_pressure)
-            ),
+            line_pressure_bar=line_pressure,
+            differential_pressure_bar=differential_pressure,
             valve_percent=valve_percent,
         )
         if use_line_pressure_for_control:
@@ -164,4 +175,9 @@ class MeasurementService:
         self._safety_monitor.configure(safety_limits)
 
     def close(self) -> None:
-        self._writer.close()
+        try:
+            close_daq = getattr(self._daq, "close", None)
+            if callable(close_daq):
+                close_daq()
+        finally:
+            self._writer.close()

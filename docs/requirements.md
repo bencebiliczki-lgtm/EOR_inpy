@@ -47,11 +47,10 @@ A mintavételi gyakoriság 1 másodperc és 1 óra között konfigurálható. A 
 
 ## Megjelenítés
 
-- Minden szöveges kijelző és szerkeszthető szövegmező háttere legyen átlátszó az
-  egész alkalmazásban, világos, sötét és rendszer-témában is. Riasztási banner vagy
-  színes riasztási widget ne jelenjen meg: minden kezelői riasztás Windows
-  rendszerértesítésként jelenjen meg, háttérben vagy minimalizálva pedig a
-  tálcagomb is kérjen figyelmet.
+- A szerkeszthető szövegmezők háttere legyen jól olvasható minden témában. A
+  dashboard tetején mindig látható, szöveggel is azonosítható üzemmód- és
+  riasztássáv legyen; a szín nem lehet az egyetlen állapothordozó. Háttérben vagy
+  minimalizálva a Windows-értesítés és a tálcagomb is kérjen figyelmet.
 - A bal és jobb oldalsáv splitterrel akkor is átméretezhető maradjon, amikor a
   tartalma miatt függőleges scrollbar jelenik meg.
 - A jobb oldali vezérlőpanel minden inputmezője azonos szélességű legyen az
@@ -59,6 +58,9 @@ A mintavételi gyakoriság 1 másodperc és 1 óra között konfigurálható. A 
   teljes szélességű külön sorba.
 - Kapcsolati állapot minden eszközhöz.
 - Aktuális értékek és aktív riasztások jól láthatóan.
+- A köpeny- és besajtolási nyomás aktuális különbsége külön kijelzőn jelenjen meg.
+- Az adatrögzítés állapota mutassa az aktív fájlt, méretet, utolsó rögzítési ciklust
+  és a NAS-szinkron várólistáját.
 - Az elmúlt 10 perc élő diagramja.
 - A besajtolási térfogatáram külön, `ml/h` egységű élő diagramja.
 - A teljes rögzített mérés a dashboard középső területének külön füle legyen; ne
@@ -98,6 +100,8 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 - A szelep automata és kézi módban működhet.
 - Automata módban a szabályozási forrás választható legyen: besajtoló pumpa nyomása vagy vonali nyomásmérő.
 - A PID paraméterei módosíthatók és névvel menthető profilokba rendezhetők.
+- A részletes PID-hangolás és a felügyelt manuális hardvervezérlés csak Developer
+  módban jelenhet meg; a normál kezelői nézet az üzemi műveletekre korlátozódjon.
 - Cél a beállított nyomás ±1 bar tartása, ennek igazolási módszerét még rögzíteni kell.
 
 ## Adatmentés
@@ -106,12 +110,18 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 - Nyers mérési adat kizárólag explicit, megerősített hardvermódban menthető. A
   szimuláció nem hozhat létre vagy módosíthat CSV-t, projekt-pillanatképet vagy
   NAS-szinkronfeladatot, még akkor sem, ha a runtime perzisztálást kérne.
-- A **SZIMULÁCIÓ — NINCS ADATMENTÉS** és az **ÉLES MÉRÉS — ADATMENTÉS AKTÍV**
-  üzemmódváltást eseményalapú értesítés jelezze; állandó dashboard-módsáv ne
-  foglaljon helyet.
-- A biztonsági hibák állandó dashboard-sáv helyett nem blokkoló rendszerértesítést
-  adjanak. Minimalizált vagy háttérben lévő alkalmazásnál Windows tálcaértesítés és
-  tálcagomb-figyelmeztetés szükséges; azonos aktív hiba ciklusonként ne ismétlődjön.
+- A **SZIMULÁCIÓ – nincs fizikai kimenet és nincs mérési adatmentés**, illetve a
+  **HARDVER – fizikai berendezés vezérlése és mérési adatmentés** állapot mindig
+  látható dashboard-sávban jelenjen meg.
+- A biztonsági hiba reteszelt, állandó dashboard-sávban maradjon meg nyugtázásig,
+  és tartalmazza az időpontot, okot, automatikus műveletet és következő lépést.
+  Minimalizált vagy háttérben lévő alkalmazásnál Windows tálcaértesítés és
+  tálcagomb-figyelmeztetés is szükséges; azonos aktív hiba ciklusonként ne
+  ismétlődjön.
+- Minden mérés előtt tételes előellenőrzés szükséges. A projekt/szakasz,
+  eszközkapcsolatok, szenzoradatok, kalibráció és határértékek, biztonsági reteszek,
+  legalább 20 bar köpenynyomás-többlet és helyi tárhely hibája tiltsa az indítást.
+  Figyelmeztetés csak külön kezelői jóváhagyással engedhető tovább.
 - Developer módban külön **Szimulációs mód** kapcsoló legyen. Az átváltás csak
   leválasztott, IDLE állapotban történhet; a szimulációs runtime fizikai kimenetet
   és mérési perzisztenciát nem használhat.

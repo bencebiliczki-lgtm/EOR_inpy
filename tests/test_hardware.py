@@ -4,6 +4,8 @@ import pytest
 
 from eor_control import hardware
 from eor_control.hardware import (
+    ConnectionTestRegistry,
+    DeviceConnectionResult,
     HardwareConfiguration,
     HardwareTestDevice,
     PhysicalHardwareConnectionTester,
@@ -167,3 +169,22 @@ def test_connection_test_reports_each_device_independently(
     assert line is not None and line.successful and line.value == 2.25
     assert differential is not None and not differential.successful
     assert all(pump.disconnected for pump in pumps)
+
+
+def test_individual_connection_results_accumulate_and_only_changed_device_expires() -> None:
+    original = configuration()
+    registry = ConnectionTestRegistry()
+    for device in HardwareTestDevice:
+        registry.record(original, DeviceConnectionResult(device, True, device.value))
+
+    assert registry.aggregate(original).all_successful
+    changed_values = original.to_settings()
+    changed_values["jacket_port"] = "COM2"
+    changed = HardwareConfiguration(**changed_values)  # type: ignore[arg-type]
+
+    invalidated = registry.invalidate_changed(original, changed)
+
+    assert invalidated == (HardwareTestDevice.JACKET_PUMP,)
+    remaining = registry.aggregate(changed)
+    assert remaining.for_device(HardwareTestDevice.JACKET_PUMP) is None
+    assert remaining.for_device(HardwareTestDevice.LINE_PRESSURE) is not None

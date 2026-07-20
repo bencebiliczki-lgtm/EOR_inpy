@@ -51,11 +51,11 @@ fázisonként elkülönítve a
 `data/projects/<év>/<dátum>_<projektazonosító>_<projektnév>/<projektnév>_<fázis>_live_raw.csv`
 fájlokba kerülnek.
 Szimulációs módban a mért értékek csak élőben jelennek meg: nyers CSV, projekt-
-pillanatkép és NAS-feladat nem készül. Az üzemmódváltást és a biztonsági hibákat
-eseményalapú rendszerértesítés jelzi; a dashboardon nincs állandó mód- vagy
-riasztási sáv. Minimalizált vagy háttérben lévő ablaknál a Windows tálcagomb is
-figyelmeztet. A részletes áttekintés továbbra is mutatja az aktuális üzemmódot és
-riasztási állapotot.
+pillanatkép és NAS-feladat nem készül. A dashboard felső, állandó szöveges sávja
+mindig megkülönbözteti a szimulációt a hardvermódtól; alatta az aktív, reteszelt
+riasztás a kiváltó okkal, automatikus művelettel és következő kezelői lépéssel
+megmarad a nyugtázásig. Minimalizált vagy háttérben lévő ablaknál a Windows
+tálcagomb is figyelmeztet.
 A Developer mód bekapcsolása után a `Developer` → `Szimulációs mód` kapcsolóval
 lehet visszatérni a mentés nélküli szimulációhoz. A váltás csak leválasztott,
 `IDLE` állapotban engedélyezett. A kapcsoló kikapcsolása az eszközbeállítási
@@ -63,9 +63,15 @@ ablakot nyitja meg; az éles mód továbbra is felderítést és külön megerő
 
 Első indításkor nyisd meg a `Projekt` → `Projektkezelő…` ablakot, hozz létre egy
 projektet és legalább egy mérési szakaszt, majd kattints a `Csatlakozás` és a
-`Mérés indítása` gombra. A projekt és szakaszok a
+`Mérés indítása` gombra. Indítás előtt kötelező, tételes ellenőrzőablak jelenik
+meg a projekt, eszközkapcsolatok, szenzoradatok, kalibráció, biztonsági reteszek,
+legalább 20 bar köpenynyomás-többlet és tárhely állapotával. Hiba tiltja az
+indítást; figyelmeztetés külön kezelői jóváhagyást igényel. A projekt és szakaszok a
 `data/projects.sqlite3` adatbázisban maradnak meg. A PID erősítések, hatásirány és
-kimeneti korlátok a dashboardon módosíthatók. Vészleállítás után a reteszelt állapot
+a `Hiba nyugtázása` gombbal oldható; ezt követően újra csatlakozni kell.
+kimeneti korlátok Developer módban módosíthatók. Normál kezelői nézetben csak az
+üzemi vezérlési mezők láthatók. Vészleállítás után a reteszelt állapot a `Hiba
+nyugtázása` gombbal oldható; ezt követően újra csatlakozni kell.
 a `Hiba nyugtázása` gombbal oldható; ezt követően újra csatlakozni kell.
 Projekt létrehozásakor nem szükséges felhasználót vagy tulajdonost megadni; minden
 mérés minden kezelő számára elérhető.
@@ -129,6 +135,10 @@ kábelkihúzási, vészleállítási és felügyelt kommunikációs próba telje
 időtartama. A differenciálnyomás tényleges tartományát a felhasználó a kalibrációs
 ablakban adja meg.
 Az alkalmazás minden új indításkor biztonsági okból szimulációs módból indul.
+A Windows tálca rejtett ikonjának helyi menüjéből az ablak újra megnyitható, vagy
+a `Program bezárása` művelettel az alkalmazás biztonságosan leállítható. A tálcás
+kilépés ugyanazt a runtime-leállítási, safe-state, eszközleválasztási és
+adattároló-lezárási útvonalat használja, mint a főablak bezárása.
 
 A `Beállítások` → `Naplózás…` ablakban a diagnosztikai napló teljesen ki- vagy
 bekapcsolható, és külön választható a két pumpa, a négy NI funkció, a runtime és a

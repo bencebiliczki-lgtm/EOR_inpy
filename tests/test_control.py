@@ -9,6 +9,7 @@ from eor_control.control import (
     PidParameters,
     PressureSource,
     ValveController,
+    ValveOscillationError,
 )
 from eor_control.domain import MeasurementSnapshot, PumpStatus
 from eor_control.safety import SafetyDecision
@@ -142,3 +143,69 @@ def test_pid_can_be_reconfigured_with_bumpless_current_output() -> None:
     pid.configure(PidParameters(0.0, 0.0, 0.0), current_output_percent=42.0)
 
     assert pid.calculate(setpoint=100.0, measurement=100.0, dt_seconds=1.0) == 42.0
+
+
+def test_pid_deadband_holds_output_and_integrator() -> None:
+    pid = PidController(PidParameters(1.0, 2.0, 0.0, deadband_bar=1.0))
+    pid.reset(output_percent=35.0)
+
+    assert pid.calculate(setpoint=100.0, measurement=99.5, dt_seconds=1.0) == 35.0
+    assert pid.calculate(setpoint=100.0, measurement=99.5, dt_seconds=1.0) == 35.0
+
+
+def test_pid_output_rate_limit_is_time_based() -> None:
+    pid = PidController(
+        PidParameters(10.0, 0.0, 0.0, maximum_output_rate_percent_per_second=5.0)
+    )
+
+    assert pid.calculate(setpoint=100.0, measurement=0.0, dt_seconds=0.2) == 1.0
+    assert pid.calculate(setpoint=100.0, measurement=0.0, dt_seconds=0.2) == 2.0
+
+
+def test_pid_filters_control_measurement() -> None:
+    pid = PidController(PidParameters(1.0, 0.0, 0.0, measurement_filter_alpha=0.5))
+
+    assert pid.calculate(setpoint=100.0, measurement=100.0, dt_seconds=1.0) == 0.0
+    assert pid.calculate(setpoint=100.0, measurement=80.0, dt_seconds=1.0) == 10.0
+
+
+def test_pid_raises_latched_style_oscillation_fault_after_repeated_reversals() -> None:
+    pid = PidController(
+        PidParameters(
+            1.0,
+            0.0,
+            0.0,
+            minimum_reversal_interval_seconds=0.0,
+            reversal_deadband_percent=0.0,
+            maximum_reversals=2,
+            reversal_window_seconds=10.0,
+        )
+    )
+    pid.calculate(setpoint=50.0, measurement=40.0, dt_seconds=1.0)
+    pid.calculate(setpoint=50.0, measurement=60.0, dt_seconds=1.0)
+    pid.calculate(setpoint=50.0, measurement=40.0, dt_seconds=1.0)
+
+    with pytest.raises(ValveOscillationError, match="VALVE_OSCILLATION"):
+        pid.calculate(setpoint=50.0, measurement=60.0, dt_seconds=1.0)
+
+
+def test_manual_to_automatic_transfer_starts_from_manual_output() -> None:
+    valve = controller(PidParameters(1.0, 0.0, 0.0))
+    valve.command(
+        snapshot=snapshot(),
+        safety=SafetyDecision(True, ()),
+        mode=ControlMode.MANUAL,
+        manual_output_percent=42.0,
+    )
+
+    command = valve.command(
+        snapshot=snapshot(injection_pressure=100.0),
+        safety=SafetyDecision(True, ()),
+        mode=ControlMode.AUTOMATIC,
+        source=PressureSource.INJECTION_PUMP,
+        setpoint_bar=110.0,
+        dt_seconds=0.1,
+    )
+
+    assert command.output_percent == pytest.approx(42.0)
+    assert command.reason == "bumpless manual-to-automatic transfer"

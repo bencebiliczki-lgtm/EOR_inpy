@@ -11,21 +11,30 @@ from PySide6.QtWidgets import (  # noqa: E402
     QAbstractItemView,
     QAbstractScrollArea,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QSplitter,
     QTabWidget,
+    QWidget,
 )
 
-from eor_control.application import RunMode  # noqa: E402
+from eor_control.application import ApplicationState, RunMode  # noqa: E402
+from eor_control.device_testing import (  # noqa: E402
+    DeviceTestReport,
+    FunctionalDeviceTestSession,
+)
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger  # noqa: E402
 from eor_control.hardware import (  # noqa: E402
     ConnectionTestResult,
@@ -44,10 +53,12 @@ from eor_control.ui import (  # noqa: E402
     WINDOWS_APP_USER_MODEL_ID,
     DeveloperViewDialog,
     DeviceSettingsDialog,
+    DeviceTestWizard,
     LoggingSettingsDialog,
     MeasurementHistoryView,
     ProjectSelectionDialog,
     ProjectSettingsDialog,
+    PumpControlDialog,
     StageSettingsDialog,
     application_icon,
     application_icon_path,
@@ -60,6 +71,111 @@ from eor_control.ui import (  # noqa: E402
 def application() -> QApplication:
     instance = QApplication.instance()
     return instance if isinstance(instance, QApplication) else QApplication([])
+
+
+def assert_input_fields_are_labelled(root: QWidget) -> None:
+    labels = root.findChildren(QLabel)
+    fields = [
+        *root.findChildren(QComboBox),
+        *root.findChildren(QDoubleSpinBox),
+        *root.findChildren(QSpinBox),
+        *root.findChildren(QLineEdit),
+        *root.findChildren(QCheckBox),
+    ]
+    unlabelled: list[str] = []
+    for field in fields:
+        if isinstance(field, QLineEdit) and isinstance(
+            field.parent(), (QComboBox, QDoubleSpinBox, QSpinBox)
+        ):
+            continue
+        if field.accessibleName().strip():
+            continue
+        if isinstance(field, QCheckBox) and field.text().strip():
+            continue
+        if any(label.buddy() is field and label.text().strip() for label in labels):
+            continue
+        unlabelled.append(field.objectName() or type(field).__name__)
+    assert unlabelled == []
+
+
+def test_stage_settings_input_fields_are_labelled() -> None:
+    application()
+    dialog = StageSettingsDialog()
+    assert_input_fields_are_labelled(dialog)
+    dialog.close()
+
+
+def test_manual_control_queues_command_during_telemetry_and_shows_success() -> None:
+    app = application()
+    dialog = PumpControlDialog(  # type: ignore[arg-type]
+        object(),
+        object(),
+        lambda: "Teszt szakasz",
+    )
+    dialog._telemetry_timer.stop()
+    executed: list[str] = []
+    dialog._telemetry_active = True
+
+    dialog._execute(lambda: executed.append("RUN"), "tesztparancs")
+
+    assert executed == []
+    assert dialog._pending_command is not None
+    assert "várakozik" in dialog._operation_status.text()
+    dialog._telemetry_failed("teszt telemetriahiba")
+    for _ in range(20):
+        app.processEvents()
+        if executed:
+            break
+        sleep(0.01)
+    for _ in range(20):
+        app.processEvents()
+        if "SIKERES" in dialog._operation_status.text():
+            break
+        sleep(0.01)
+
+    assert executed == ["RUN"]
+    assert dialog._operation_status.text() == "SIKERES — tesztparancs"
+    assert all(button.isEnabled() for button in dialog._buttons)
+    dialog.close()
+
+
+def test_guided_device_test_window_close_uses_central_safe_shutdown(
+    tmp_path: Path,
+) -> None:
+    application()
+    safe_actions: list[str] = []
+    connections = ConnectionTestResult(
+        tuple(
+            DeviceConnectionResult(device, True, device.value)
+            for device in HardwareTestDevice
+        )
+    )
+    session = FunctionalDeviceTestSession(
+        run_mode=RunMode.HARDWARE,
+        application_state=lambda: ApplicationState.READY,
+        runtime_running=lambda: False,
+        pumps_running=lambda: False,
+        active_fault=lambda: False,
+        connection_result=connections,
+        stop_pumps=lambda: safe_actions.append("STOP ALL") or (),
+        set_safe_output=lambda: safe_actions.append("SAFE OUTPUT"),
+        write_voltage=lambda _value: None,
+        write_valve_percent=lambda _value: None,
+        report=DeviceTestReport.create(
+            application_version="test", configuration_hash="abc"
+        ),
+    )
+    dialog = DeviceTestWizard(
+        session, report_path=tmp_path / "guided-test.json"
+    )
+    for checkbox in dialog._checklist:
+        checkbox.setChecked(True)
+    dialog._begin()
+
+    dialog.close()
+
+    assert safe_actions == ["STOP ALL", "SAFE OUTPUT"]
+    assert (tmp_path / "guided-test.json").is_file()
 
 
 def test_text_labels_have_no_theme_background_fill() -> None:
@@ -162,6 +278,7 @@ def test_device_settings_discovers_dropdown_choices(tmp_path: Path) -> None:
     )
 
     assert isinstance(dialog.jacket_port, QComboBox)
+    assert_input_fields_are_labelled(dialog)
     assert dialog.device_tabs.count() == 2
     assert dialog.device_tabs.tabText(0) == "Pumpák"
     assert dialog.device_tabs.tabText(1) == "NI mérés és szelep"
@@ -259,6 +376,53 @@ def test_device_settings_shows_when_no_device_is_available(tmp_path: Path) -> No
     assert dialog.line_channel.currentText() == "Előbb válassz NI eszközt"
     assert not dialog.line_channel.isEnabled()
     assert dialog._discovery_status.isHidden()
+    dialog.close()
+
+
+def test_device_settings_rejects_successful_ni_read_outside_calibration(
+    tmp_path: Path,
+) -> None:
+    application()
+    dialog = DeviceSettingsDialog(
+        UnusedTester(),  # type: ignore[arg-type]
+        settings=QSettings(str(tmp_path / "range.ini"), QSettings.Format.IniFormat),
+        current_mode=RunMode.SIMULATION,
+        discoverer=HardwareDiscovery,
+    )
+
+    dialog._test_passed(
+        ConnectionTestResult(
+            (
+                DeviceConnectionResult(
+                    HardwareTestDevice.JACKET_PUMP, True, "260D jacket"
+                ),
+                DeviceConnectionResult(
+                    HardwareTestDevice.INJECTION_PUMP, True, "260D injection"
+                ),
+                DeviceConnectionResult(
+                    HardwareTestDevice.LINE_PRESSURE,
+                    True,
+                    "Dev1/ai0: -1.188 V",
+                    -1.188,
+                ),
+                DeviceConnectionResult(
+                    HardwareTestDevice.DIFFERENTIAL_PRESSURE,
+                    True,
+                    "Dev1/ai1: -0.806 V",
+                    -0.806,
+                ),
+            )
+        )
+    )
+
+    assert not dialog._activate_button.isEnabled()
+    assert "Sikeres kapcsolatok: 2/4" in dialog._result_label.text()
+    assert "1–5 V" in dialog._connection_result_labels[
+        HardwareTestDevice.LINE_PRESSURE
+    ].text()
+    assert "kapocsmódot" in dialog._connection_result_labels[
+        HardwareTestDevice.DIFFERENTIAL_PRESSURE
+    ].text()
     dialog.close()
 
 
@@ -557,7 +721,7 @@ def test_developer_can_switch_back_to_non_persistent_simulation(tmp_path: Path) 
     assert window._devices.status.mode is RunMode.SIMULATION
     assert not window._measurement_writer.persistence_enabled
     assert window._measurement_writer.current_path is None
-    assert "NINCS ADATMENTÉS" in window._current_mode_message
+    assert "nincs mérési adatmentés" in window._current_mode_message
     assert "szimuláció" in window.windowTitle().lower()
     assert not (tmp_path / "projects").exists()
     window.close()
@@ -594,7 +758,96 @@ def test_background_alert_flashes_taskbar_once_per_event(
     window.close()
 
 
-def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None:
+def test_system_tray_menu_offers_safe_application_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+    )
+
+    assert window._tray_icon.contextMenu() is window._tray_menu
+    assert [
+        action.text() for action in window._tray_menu.actions() if not action.isSeparator()
+    ] == ["Ablak megnyitása", "Program bezárása"]
+    assert window._tray_quit_action.objectName() == "system_tray_quit_action"
+    close_requests: list[bool] = []
+    monkeypatch.setattr(window, "close", lambda: close_requests.append(True) or False)
+
+    window._quit_from_tray()
+
+    assert close_requests == [True]
+    window._control_loop.close()
+    window._projects.close()
+    window._nas_sync.close()
+    window._tray_icon.hide()
+
+
+def test_window_shutdown_requests_safe_state_from_ready_devices(tmp_path: Path) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+    )
+    jacket = window._devices._jacket_pump
+    injection = window._devices._injection_pump
+    daq = window._devices._daq
+    window._devices.connect()
+
+    window.close()
+
+    assert window._devices.status.state is ApplicationState.IDLE
+    assert jacket.stop_requested
+    assert injection.stop_requested
+    assert daq.safe_state_requested
+    assert window._valve.safe_state_requested
+
+
+def test_measurement_start_preflight_rejects_invalid_sensor_voltage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    project_path = tmp_path / "projects.sqlite3"
+    with ProjectRepository(project_path) as repository:
+        project = repository.create_project(
+            name="Preflight project",
+            configuration={},
+            calibration_snapshot={},
+        )
+        stage = repository.add_stage(project.id, "Preflight stage")
+    settings = QSettings(
+        str(tmp_path / "preflight.ini"), QSettings.Format.IniFormat
+    )
+    settings.setValue("project/last_project_id", project.id)
+    settings.setValue("project/last_stage_id", stage.id)
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", project_path, settings=settings
+    )
+    window._devices.connect()
+    window._devices._daq.inputs["line_pressure"] = -1.188189
+    errors: list[str] = []
+    monkeypatch.setattr(window, "_show_error", errors.append)
+
+    window._start()
+
+    for _ in range(100):
+        application().processEvents()
+        if errors:
+            break
+        sleep(0.01)
+
+    assert window._devices.status.state is ApplicationState.READY
+    assert not window._runtime.running
+    assert window._devices._jacket_pump.stop_requested
+    assert window._devices._injection_pump.stop_requested
+    assert window._devices._daq.safe_state_requested
+    assert errors and "line pressure input" in errors[0]
+    assert "-1.18819 V" in errors[0]
+    window.close()
+
+
+def test_dashboard_loads_projects_and_stages_from_sqlite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     QSettings.setDefaultFormat(QSettings.Format.IniFormat)
     QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
     application()
@@ -642,14 +895,36 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     assert window._active_stage_label.text() == "Water stage"
     assert not window._project_selector_required
     assert "SZIMULÁCIÓ" in window._current_mode_message
-    assert "NINCS ADATMENTÉS" in window._current_mode_message
-    assert window.findChild(QLabel, "dashboard_mode_label") is None
-    assert not hasattr(window, "_alarm_label")
+    assert "nincs mérési adatmentés" in window._current_mode_message
+    mode_banner = window.findChild(QLabel, "dashboard_mode_label")
+    alarm_banner = window.findChild(QLabel, "dashboard_alarm_label")
+    assert mode_banner is not None
+    assert mode_banner.text() == window._current_mode_message
+    assert alarm_banner is not None
+    assert alarm_banner.text() == "✓ Nincs aktív riasztás"
     assert window._active_alarm_text == "Nincs aktív riasztás"
+    window._set_active_alarm("teszt biztonsági ok")
+    retained_alarm = alarm_banner.text()
+    application().processEvents()
+    window._set_active_alarm("teszt biztonsági ok")
+    assert alarm_banner.text() == retained_alarm
+    assert "Automatikus művelet" in retained_alarm
+    assert "Következő lépés" in retained_alarm
+    window._clear_active_alarm()
+    assert alarm_banner.text() == "✓ Nincs aktív riasztás"
     assert not window._developer_mode
+    assert window._kp.isHidden()
     window._set_developer_mode(True)
+    assert not window._kp.isHidden()
     assert window._developer_view_action.isVisible()
     assert window._manual_control_action.isVisible()
+    assert window._manual_control_action.isEnabled()
+    manual_control_errors: list[str] = []
+    monkeypatch.setattr(window, "_show_error", manual_control_errors.append)
+    window._manual_control_action.trigger()
+    assert manual_control_errors == [
+        "A manuális hardvervezérlés csak sikeresen aktivált hardvermódban érhető el."
+    ]
     assert window._simulation_mode_action.isVisible()
     assert window._simulation_mode_action.isChecked()
     assert not any(
@@ -705,7 +980,10 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
         *window._connection_labels.values(),
     ):
         assert "background:transparent" in label.styleSheet()
+    banner_labels = {mode_banner, alarm_banner}
     for label in window.findChildren(QLabel):
+        if label in banner_labels:
+            continue
         assert "background:#" not in label.styleSheet().replace(" ", "").lower()
     assert splitter.widget(1).objectName() == "dashboard_measurement_tabs"
     assert splitter.widget(2).objectName() == "control_scroll_area"
@@ -732,6 +1010,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     window.resize(1200, 420)
     window.show()
     application().processEvents()
+    assert_input_fields_are_labelled(window)
     control_fields = (
         window._mode,
         window._source,
@@ -823,6 +1102,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     )
     assert dialog.project_selector.currentText() == "UI project"
     assert dialog.stage_selector.currentText() == "Water stage"
+    assert_input_fields_are_labelled(dialog)
     dialog.close()
 
     assert not window._measurement_settings_action.isCheckable()
@@ -958,6 +1238,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     logging_dialog = LoggingSettingsDialog(
         restored._diagnostics, restored._user_settings, parent=restored
     )
+    assert_input_fields_are_labelled(logging_dialog)
     logging_dialog.enabled.setChecked(True)
     for category, checkbox in logging_dialog.category_checks.items():
         checkbox.setChecked(category is DiagnosticCategory.JACKET_PUMP)
@@ -966,6 +1247,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     restored._diagnostics.emit(DiagnosticCategory.JACKET_PUMP, "TX", "visible")
     restored._diagnostics.emit(DiagnosticCategory.JACKET_PUMP, "RX", "READY")
     developer = DeveloperViewDialog(restored._diagnostics, parent=restored)
+    assert_input_fields_are_labelled(developer)
     developer.resize(700, 420)
     developer.show()
     application().processEvents()

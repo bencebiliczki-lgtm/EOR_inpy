@@ -149,6 +149,17 @@ def test_connection_error_requests_safe_state() -> None:
     assert daq.safe_state_requested
 
 
+def test_out_of_range_sensor_error_identifies_input_and_voltage() -> None:
+    measurement_service, _, _, daq, _ = service()
+    daq.inputs["line_pressure"] = -1.188189
+
+    with pytest.raises(
+        ValueError,
+        match=r"line pressure input: voltage -1\.18819 V.*1–5 V",
+    ):
+        measurement_service.sample_once(active_stage="water", valve_percent=0.0)
+
+
 @pytest.mark.parametrize("interval", [0.9, 3600.1])
 def test_measurement_interval_is_limited(interval: float) -> None:
     measurement_service, *_ = service()

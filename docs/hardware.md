@@ -63,7 +63,10 @@ A konfiguráció két analóg nyomásbemenetet kezel: vonali és differenciálny
 A vonali nyomás egyben a berendezés belépő nyomása, ezért nem tartozik hozzá külön
 harmadik NI-csatorna. A fizikai csatornaneveket a felhasználó adja meg az
 Eszközbeállításokban; a program megőrzi és a csak olvasási kapcsolatpróbán
-ellenőrzi őket. Mindkét csatorna külön kalibrálható; ismert kiinduló
+ellenőrzi őket. A kapcsolatpróba csak akkor tekinti használhatónak a bemenetet,
+ha a véges nyers feszültség az aktuálisan beállított kalibrációs tartományba is
+beleesik. A tartományon kívüli jel külön csatornahibaként jelenik meg, és blokkolja
+a hardvermód aktiválását. Mindkét csatorna külön kalibrálható; ismert kiinduló
 jeltartományuk 1–5 V, a vonali érzékelő alapértelmezett leképezése 0–400 bar.
 
 - USB-kapcsolat a Windows géppel.
@@ -74,7 +77,8 @@ jeltartományuk 1–5 V, a vonali érzékelő alapértelmezett leképezése 0–
   bemeneti módot és mintavételi korlátokat a hardverdokumentációban kell rögzíteni.
   A felhasználó `DEFAULT`, `RSE`, `NRSE`, differenciális vagy
   pszeudodifferenciális bemeneti módot választhat, és külön bekötési/földelési
-  megjegyzést menthet.
+  megjegyzést menthet. A projekt alapértéke `DEFAULT`; ettől csak az ellenőrzött
+  fizikai bekötésnek megfelelően szabad eltérni.
 
 ### Implementált adapter
 
@@ -104,3 +108,9 @@ safe-state feszültséget. Ugyanitt megadható a felügyelt kommunikációs pró
 időtartama, valamint megjelölhető a kábelkihúzási, vészleállítási és felügyelt próba
 sikeres teljesítése. A jelölések dokumentációs adatok; önmagukban nem helyettesítik
 a fizikai tesztet és nem kapcsolnak kimenetet.
+
+Az NI analóg kimenet hardveres módban lusta inicializálású, tartós DAQmx taskot
+használ. SAFE állapot vagy lezárás után a task bezáródik és a kimenetengedély
+visszavonódik; a kapcsolatpróba továbbra sem hoz létre AO taskot. A vezetett AO
+lépéssor SAFE, 1 V, 2 V, 3 V, 4 V, 5 V, SAFE, külön kezelői indítással és
+multiméteres összehasonlítással.

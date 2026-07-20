@@ -41,6 +41,18 @@ Fizikai pumpaindítás csak HARDVER + READY állapotban, korábbi kapcsolatprób
 hardverengedély után lehetséges. A köpenypumpa indításához `RUN JACKET PUMP`, a
 besajtolópumpához `RUN INJECTION PUMP` pontos kezelői megerősítés szükséges. A
 besajtolás 20 bar alatti pillanatnyi köpenytöbbletnél szoftveresen blokkolt.
+A mérés indítása előtt egy nem mentett, teljes biztonsági kiértékelésű minta készül.
+Kalibrációs tartományhiba vagy aktív interlock esetén a futtatószál nem indul el,
+az alkalmazás biztonságos kimeneti állapotot kér, és a konkrét okot megjeleníti.
+
+A vezetett funkcionális teszt csak HARDVER + READY állapotban, leállított normál
+runtime, álló pumpák, aktuális sikeres kapcsolatpróba, aktív/reteszelt hiba nélküli
+állapot és teljes kezelői ellenőrzőlista mellett indulhat. Megszakítás, ablakbezárás
+és kivétel letiltja az új parancsokat, minden pumpán STOP-ot és SAFE AO-jelet kér.
+
+A PID nyomásszűrése csak a szabályozási ágra hat; minden interlock a szűretlen
+mérési pillanatképet értékeli. A túl gyakori irányváltás `VALVE_OSCILLATION`
+runtime hibát és reteszelt safe-state útvonalat vált ki.
 
 ## Kötelező tesztek
 

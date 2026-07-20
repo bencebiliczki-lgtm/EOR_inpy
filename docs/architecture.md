@@ -273,15 +273,24 @@ a hardveradaptereket szimulátorokra. Az új `MeasurementService` és
 kapcsoló kikapcsolása a meglévő, felderítést és kezelői megerősítést végző
 eszközbeállítási folyamatot nyitja meg; közvetlenül nem aktivál fizikai kimenetet.
 
-Az állandó dashboard mód- és riasztási bannerek helyett a `DashboardWindow`
-eseményalapú, nem blokkoló értesítést küld. A `QSystemTrayIcon` az alkalmazás
-ikonjával Windows rendszerértesítést jelenít meg; minimalizált vagy inaktív
-ablaknál a `QApplication.alert()` a tálcagombot is figyelemkérésre állítja. Az
-értesítési kulcs megakadályozza, hogy ugyanaz a biztonsági ok minden mérési
-ciklusban újra megjelenjen. Az aktuális riasztásszöveg UI widget nélkül,
-alkalmazásállapotként marad elérhető a részletes mérési áttekintés számára.
-Színes riasztási bannerre vagy riasztási widgetre nincs visszaesés; a kezelői
-riasztások minden esetben a Windows-értesítési útvonalat használják.
+A `DashboardWindow` állandó, szöveges mód- és riasztássávot tart fenn. A reteszelt
+riasztás időpontot, okot, automatikus safe-state műveletet és kezelői következő
+lépést tartalmaz, és csak sikeres hibanyugtázáskor törlődik. A `QSystemTrayIcon`
+ezzel párhuzamosan Windows rendszerértesítést jelenít meg; minimalizált vagy
+inaktív ablaknál a `QApplication.alert()` a tálcagombot is figyelemkérésre állítja.
+Az értesítési kulcs megakadályozza, hogy ugyanaz a biztonsági ok minden mérési
+ciklusban újra megjelenjen.
+A tálcaikon helyi menüje ablak-visszaállítási és `Program bezárása` műveletet ad.
+Az utóbbi a `DashboardWindow.closeEvent()` útvonalán állítja le a runtime-ot,
+leválasztja az eszközöket, safe-state-et kér, majd lezárja a vezérlési ciklust,
+NAS-szinkront és projekt-adatbázist; ezután eltávolítja a tálcaikont és kilépteti
+a Qt alkalmazást.
+
+A mérésindítás első, háttérszálas `observe_once` ciklusából a főszál
+`PreflightReport` modellt készít. A `PreflightDialog` minden tételt állapottal,
+részlettel és javítási teendővel mutat; `FAILED` tételnél nincs indítógomb, a
+`WARNING` tételekhez pedig külön jelölőnégyzetes kezelői jóváhagyás szükséges.
+Csak elfogadott jelentés után indul el az állapotgép és a háttér-runtime.
 
 ## Terminálos vezérlés
 
@@ -325,5 +334,21 @@ SafetyMonitor-lánc fut le; a kézi szelepjel pedig a `ControlLoop` útvonalán 
 aktuátorra. Aktív vagy reteszelt biztonsági ok minden kézi kimenetet letilt és
 safe-state-et kér.
 
+A Developer menüpont Developer módban mindig kattintható. Ha a hardvermód vagy a
+`READY` eszközállapot hiányzik, a dashboard konkrét hibaüzenetben jelzi a szükséges
+előfeltételt. A vezérlőablak a telemetria-lekérdezést és a kezelői parancsot külön
+foglalt állapottal kezeli: a lekérdezés közben érkező parancs sorba áll, majd a
+lekérdezés befejezése után lefut. A felület minden parancsnál folyamatban, sikeres
+vagy sikertelen állapotot jelenít meg.
+
 Az A/B/C/D csatorna az írási parancsokban is érvényesül: A csatornán utótag
 nélküli, B/C/D csatornán `FLOWx`, `PRESSx`, `RUNx`, `STOPx` alak készül.
+
+## Vezetett eszközteszt
+
+A `ConnectionTestRegistry` eszközönként, az érintett konfiguráció ujjlenyomatával
+tárolja a csak olvasásos kapcsolatpróbát. A `device_testing.py` hardverfüggetlen
+állapotgépe kezeli a funkcionális tesztet, a központi megszakítást és a JSON-jelentést.
+A Qt `DeviceTestWizard` signalokon veszi át a háttérműveletek eredményét; hosszú
+szenzorteszt nem fut a UI-szálon. Funkcionális teszt és normál runtime nem futhat
+egyszerre, bezárás és kivétel ugyanazt a STOP/SAFE útvonalat használja.
