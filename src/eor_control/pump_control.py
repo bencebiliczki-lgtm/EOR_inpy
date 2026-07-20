@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
@@ -56,6 +57,7 @@ class PumpControlService:
         injection_pump: ControllablePump,
         minimum_jacket_margin_bar: float = 20.0,
         diagnostics: DiagnosticLogger | None = None,
+        safety_check: Callable[[], tuple[str, ...]] | None = None,
     ) -> None:
         if not isfinite(minimum_jacket_margin_bar) or minimum_jacket_margin_bar <= 0.0:
             raise ValueError("minimum jacket margin must be positive and finite")
@@ -69,6 +71,7 @@ class PumpControlService:
         }
         self._minimum_margin = minimum_jacket_margin_bar
         self._diagnostics = diagnostics
+        self._safety_check = safety_check
         self._authorized = False
 
     def authorize(self, confirmation: str) -> None:
@@ -116,6 +119,12 @@ class PumpControlService:
         )
         if confirmation != expected:
             raise PermissionError("pump RUN confirmation did not match")
+        if self._safety_check is not None:
+            reasons = self._safety_check()
+            if reasons:
+                raise PermissionError(
+                    "safety interlock active: " + "; ".join(reasons)
+                )
         state = self._states[role]
         if not state.remote or not state.configured or state.running:
             raise RuntimeError("pump must be configured and stopped in REMOTE mode")

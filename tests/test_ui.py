@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QInputDialog,
     QLabel,
     QMessageBox,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QSplitter,
@@ -28,7 +29,9 @@ from eor_control.application import RunMode  # noqa: E402
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger  # noqa: E402
 from eor_control.hardware import (  # noqa: E402
     ConnectionTestResult,
+    DeviceConnectionResult,
     HardwareDiscovery,
+    HardwareTestDevice,
     NiPhysicalChannelInfo,
     SerialPortInfo,
 )
@@ -84,7 +87,9 @@ def test_windows_application_identity_is_set_for_taskbar_icon(
 
     monkeypatch.setattr("eor_control.ui.sys.platform", "win32")
     monkeypatch.setattr(
-        "eor_control.ui.ctypes.WinDLL", lambda *_args, **_kwargs: FakeShell()
+        "eor_control.ui.ctypes.WinDLL",
+        lambda *_args, **_kwargs: FakeShell(),
+        raising=False,
     )
 
     configure_windows_application_identity()
@@ -132,7 +137,7 @@ class UnusedTester:
 def test_device_settings_discovers_dropdown_choices(tmp_path: Path) -> None:
     application()
     settings = QSettings(str(tmp_path / "hardware.ini"), QSettings.Format.IniFormat)
-    log_path = tmp_path / "communication.log"
+    log_path = tmp_path / "communication.html"
     diagnostics = DiagnosticLogger(log_path)
     diagnostics.configure(enabled=True, categories=[DiagnosticCategory.SYSTEM])
     dialog = DeviceSettingsDialog(
@@ -201,7 +206,39 @@ def test_device_settings_discovers_dropdown_choices(tmp_path: Path) -> None:
     assert dialog._read_configuration().line_pressure_channel == "Dev2/ai0"
     assert "2 soros csatlakozó" in dialog._discovery_status.text()
     assert not dialog._discovery_status.isHidden()
-    assert "system\tDISCOVERY\t2 COM-port" in log_path.read_text(encoding="utf-8")
+    discovery_log = log_path.read_text(encoding="utf-8")
+    assert 'data-category="system"' in discovery_log
+    assert "2 COM-port" in discovery_log
+    assert set(dialog._device_test_buttons) == set(HardwareTestDevice)
+    dialog._test_passed(
+        ConnectionTestResult(
+            (
+                DeviceConnectionResult(
+                    HardwareTestDevice.JACKET_PUMP, False, "pump unavailable"
+                ),
+                DeviceConnectionResult(
+                    HardwareTestDevice.INJECTION_PUMP, True, "260D injection"
+                ),
+                DeviceConnectionResult(
+                    HardwareTestDevice.LINE_PRESSURE, True, "Dev2/ai0: 2.0 V", 2.0
+                ),
+                DeviceConnectionResult(
+                    HardwareTestDevice.DIFFERENTIAL_PRESSURE,
+                    True,
+                    "Dev2/ai1: 1.5 V",
+                    1.5,
+                ),
+            )
+        )
+    )
+    assert not dialog._activate_button.isEnabled()
+    assert "SIKERTELEN" in dialog._connection_result_labels[
+        HardwareTestDevice.JACKET_PUMP
+    ].text()
+    assert "SIKERES" in dialog._connection_result_labels[
+        HardwareTestDevice.INJECTION_PUMP
+    ].text()
+    assert "Sikeres kapcsolatok: 3/4" in dialog._result_label.text()
     dialog.close()
 
 
@@ -612,8 +649,20 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     assert not window._developer_mode
     window._set_developer_mode(True)
     assert window._developer_view_action.isVisible()
+    assert window._manual_control_action.isVisible()
     assert window._simulation_mode_action.isVisible()
     assert window._simulation_mode_action.isChecked()
+    assert not any(
+        button.text() == "Pumpavezérlés…"
+        for button in window.findChildren(QPushButton)
+    )
+    settings_action = next(
+        action for action in window.menuBar().actions() if action.text() == "Beállítások"
+    )
+    assert settings_action.menu() is not None
+    assert "Felügyelt pumpavezérlés…" not in (
+        action.text() for action in settings_action.menu().actions()
+    )
     assert user_settings.value("developer/enabled") is True
     assert window._setpoint.value() == 88.0
     assert "water" in window._active_stage_label.toolTip()
@@ -882,7 +931,25 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(tmp_path: Path) -> None
     reopened_devices.close()
     device_dialog._configuration = device_dialog._read_configuration()
     device_dialog._test_passed(
-        ConnectionTestResult("260D jacket", "260D injection", 2.0, 1.5)
+        ConnectionTestResult(
+            (
+                DeviceConnectionResult(
+                    HardwareTestDevice.JACKET_PUMP, True, "260D jacket"
+                ),
+                DeviceConnectionResult(
+                    HardwareTestDevice.INJECTION_PUMP, True, "260D injection"
+                ),
+                DeviceConnectionResult(
+                    HardwareTestDevice.LINE_PRESSURE, True, "Dev7/ai3: 2.0 V", 2.0
+                ),
+                DeviceConnectionResult(
+                    HardwareTestDevice.DIFFERENTIAL_PRESSURE,
+                    True,
+                    "Dev7/ai4: 1.5 V",
+                    1.5,
+                ),
+            )
+        )
     )
     assert device_dialog._activate_button.isEnabled()
     device_dialog._activate()

@@ -116,7 +116,11 @@ A beállítások explicit INI-fájlja a hordozható alkalmazásmappa
 Az eszközök a `Beállítások` → `Eszközök…` ablakban konfigurálhatók. A dashboard és
 az ablak is jól látható `SZIMULÁCIÓ` vagy `HARDVER` módszalagot mutat. Hardvermód
 csak mindkét ISCO pumpa és mindkét NI analóg bemenet sikeres, csak olvasási tesztje
-után, a `HARDVER mód aktiválása` gombbal kapcsolható be.
+után, a `HARDVER mód aktiválása` gombbal kapcsolható be. Az eszközbeállításokban
+a két pumpa és a két NI bemenet külön-külön is tesztelhető; az összesített próba
+részleges hiba esetén is megmutatja, mely kapcsolatok voltak sikeresek. A szelep
+AO kapcsolatát a program nem jelöli olvasással igazoltnak, mert annak próbája
+fizikai kimeneti írást igényelne.
 Mindkét NI bemenet és a szelep NI kimenete felhasználó által megadható és külön
 menthető; egyik fizikai csatorna sincs kötelezően a forráskódba rögzítve.
 Ugyanitt választható az NI bemeneti bekötési mód, megadható a pumpa- és NI-kábelezés
@@ -129,8 +133,10 @@ Az alkalmazás minden új indításkor biztonsági okból szimulációs módból
 A `Beállítások` → `Naplózás…` ablakban a diagnosztikai napló teljesen ki- vagy
 bekapcsolható, és külön választható a két pumpa, a négy NI funkció, a runtime és a
 rendszer. Engedélyezve a rendszer- és runtime események a
-`data/logs/application.log`, a pumpa- és NI-kommunikáció pedig a külön
-`data/logs/hardware_communication.log` fájlba kerül. A
+`data/logs/application.html`, a pumpa- és NI-kommunikáció pedig a külön
+`data/logs/hardware_communication.html` fájlba kerül. Mindkét önálló HTML-riport
+kereshető és szint szerint szűrhető, rögzített táblázatfejlécet, eseményszámlálót,
+valamint INFO/WARNING/ERROR színezést használ. A
 `Developer` → `Eszközkommunikáció…` nézet élő TX/RX/timeout/hiba táblát és
 kategóriaszűrőt biztosít.
 A `Rendszer és módváltás` kategória a port- és NI-csatornafelderítés összesítését,
@@ -138,7 +144,11 @@ valamint a teljes import- vagy driverhibát `DISCOVERY` iránnyal rögzíti. A
 Naplózás ablak a tényleges abszolút logfájlnevet mutatja.
 
 Sikeresen aktivált hardvermódban és csatlakoztatott (`READY`) állapotban a
-`Beállítások` → `Felügyelt pumpavezérlés…` ablakból kezelhető mindkét ISCO pumpa.
+Developer módban a `Developer` → `Felügyelt manuális hardvervezérlés…` ablakból
+kezelhető mindkét ISCO pumpa és a szelep. Az ablak élőben mutatja a pumpák
+áramlását és nyomását, valamint a vonali és differenciálnyomást. Pumpaindítás és
+szelepírás előtt a teljes biztonsági felügyelet friss mérési pillanatképet értékel;
+aktív vagy reteszelt biztonsági ok esetén a kimenet nem engedélyezett.
 A sorrend: `REMOTE`, üzemmód/célérték beállítása, először köpenypumpa `RUN`, majd
 csak legalább 20 bar igazolt köpenytöbbletnél a besajtolópumpa `RUN`. Mindkét RUN
 külön pontos megerősítő szöveget kér. Elérhető külön STOP, STOP ALL, CLEAR és LOCAL.

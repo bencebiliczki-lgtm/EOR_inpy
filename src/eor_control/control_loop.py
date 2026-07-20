@@ -84,6 +84,14 @@ class ControlLoop:
             parameters, current_output_percent=self._last_output_percent
         )
 
+    def observe_once(self, *, active_stage: str) -> MeasurementRecord:
+        """Acquire a non-persistent, safety-supervised telemetry snapshot."""
+        return self._measurement.sample_once(
+            active_stage=active_stage,
+            valve_percent=self._last_output_percent,
+            persist=False,
+        )
+
     def configure_measurement(
         self,
         *,
@@ -106,4 +114,5 @@ class ControlLoop:
 
     def request_safe_state(self) -> None:
         self._actuator.set_safe_state()
+        self._last_output_percent = 0.0
         self._measurement.request_safe_state()

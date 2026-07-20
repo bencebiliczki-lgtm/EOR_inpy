@@ -100,3 +100,20 @@ def test_global_safe_stop_observation_clears_running_state_without_new_command()
 
     assert not control.state(PumpRole.JACKET).running
     assert len(jacket.commands) == command_count
+
+
+def test_full_safety_interlock_blocks_every_pump_run() -> None:
+    jacket = FakePump(120.0, [])
+    injection = FakePump(100.0, [])
+    control = PumpControlService(
+        jacket_pump=jacket,
+        injection_pump=injection,
+        safety_check=lambda: ("line pressure limit exceeded",),
+    )
+    control.authorize(PumpControlService.AUTHORIZATION)
+    prepare(control, PumpRole.JACKET)
+
+    with pytest.raises(PermissionError, match="safety interlock active"):
+        control.run(PumpRole.JACKET, PumpControlService.RUN_JACKET_CONFIRMATION)
+
+    assert "RUN" not in jacket.commands

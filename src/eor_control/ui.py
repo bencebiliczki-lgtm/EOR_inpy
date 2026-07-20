@@ -68,18 +68,20 @@ from eor_control.data_management import (
     safe_filename,
 )
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticEvent, DiagnosticLogger
-from eor_control.domain import PumpStatus
+from eor_control.domain import MeasurementRecord, PumpStatus
 from eor_control.hardware import (
     ConnectionTestResult,
+    DeviceConnectionResult,
     HardwareConfiguration,
     HardwareConnectionTester,
     HardwareDiscovery,
+    HardwareTestDevice,
     NiPhysicalChannelInfo,
     PhysicalHardwareConnectionTester,
     SerialPortInfo,
     discover_hardware,
 )
-from eor_control.isco import open_isco_pump
+from eor_control.isco import IscoSerialConfig, open_isco_pump
 from eor_control.measurement import MeasurementService
 from eor_control.ni import AnalogValveActuator, NidaqmxBackend, NidaqmxDataAcquisition
 from eor_control.projects import (
@@ -1189,6 +1191,42 @@ class DeviceSettingsDialog(QDialog):
         discovery_row.addWidget(refresh_button)
         discovery_row.addWidget(self._discovery_status)
         layout.addLayout(discovery_row)
+        connection_box = QGroupBox("Eszközönkénti kapcsolatpróba")
+        connection_grid = QGridLayout(connection_box)
+        self._connection_result_labels: dict[HardwareTestDevice, QLabel] = {}
+        self._device_test_buttons: dict[HardwareTestDevice, QPushButton] = {}
+        for row, (device, label) in enumerate(
+            (
+                (HardwareTestDevice.JACKET_PUMP, "Köpenypumpa"),
+                (HardwareTestDevice.INJECTION_PUMP, "Besajtolópumpa"),
+                (HardwareTestDevice.LINE_PRESSURE, "Vonali nyomás NI bemenet"),
+                (
+                    HardwareTestDevice.DIFFERENTIAL_PRESSURE,
+                    "Differenciálnyomás NI bemenet",
+                ),
+            )
+        ):
+            status = QLabel("NINCS TESZTELVE")
+            status.setWordWrap(True)
+            button = QPushButton("Kapcsolat tesztelése")
+            button.clicked.connect(
+                lambda _checked=False, selected=device: self._start_device_test(
+                    selected
+                )
+            )
+            connection_grid.addWidget(QLabel(label), row, 0)
+            connection_grid.addWidget(status, row, 1)
+            connection_grid.addWidget(button, row, 2)
+            self._connection_result_labels[device] = status
+            self._device_test_buttons[device] = button
+        valve_status = QLabel(
+            "NEM TESZTELT — az AO kapcsolat fizikai írás nélkül nem igazolható"
+        )
+        valve_status.setWordWrap(True)
+        connection_grid.addWidget(QLabel("Szelep NI analóg kimenet"), 4, 0)
+        connection_grid.addWidget(valve_status, 4, 1, 1, 2)
+        connection_grid.setColumnStretch(1, 1)
+        layout.addWidget(connection_box)
         validation = QGroupBox("Helyszíni validáció felhasználói adatai")
         validation_form = QFormLayout(validation)
         validation_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
@@ -1590,6 +1628,7 @@ class DeviceSettingsDialog(QDialog):
         self._test_succeeded = False
         self._activate_button.setEnabled(False)
         self._test_button.setEnabled(False)
+        self._set_device_test_buttons_enabled(False)
         self._result_label.setText("Kapcsolatpróba folyamatban…")
 
         def execute() -> None:
@@ -1602,28 +1641,132 @@ class DeviceSettingsDialog(QDialog):
 
         Thread(target=execute, name="eor-device-test", daemon=True).start()
 
+    def _start_device_test(self, device: HardwareTestDevice) -> None:
+        try:
+            operation = self._device_test_operation(device)
+        except ValueError as error:
+            self._show_device_connection_result(
+                DeviceConnectionResult(device, False, str(error))
+            )
+            return
+        self._test_succeeded = False
+        self._activate_button.setEnabled(False)
+        self._test_button.setEnabled(False)
+        self._set_device_test_buttons_enabled(False)
+        self._connection_result_labels[device].setText("TESZT FOLYAMATBAN…")
+
+        def execute() -> None:
+            try:
+                result = operation()
+            except Exception as error:
+                self._bridge.failed.emit(str(error))
+            else:
+                self._bridge.succeeded.emit(result)
+
+        Thread(target=execute, name=f"eor-{device.value}-test", daemon=True).start()
+
+    def _device_test_operation(
+        self, device: HardwareTestDevice
+    ) -> Callable[[], DeviceConnectionResult]:
+        if device in (
+            HardwareTestDevice.JACKET_PUMP,
+            HardwareTestDevice.INJECTION_PUMP,
+        ):
+            port_field = (
+                self.jacket_port
+                if device is HardwareTestDevice.JACKET_PUMP
+                else self.injection_port
+            )
+            port = port_field.currentData()
+            if not isinstance(port, str) or not port:
+                raise ValueError("ehhez a pumpához előbb válassz soros csatlakozót")
+            unit_id = (
+                self.jacket_id.value()
+                if device is HardwareTestDevice.JACKET_PUMP
+                else self.injection_id.value()
+            )
+            channel = (
+                self.jacket_channel.currentText()
+                if device is HardwareTestDevice.JACKET_PUMP
+                else self.injection_channel.currentText()
+            )
+            configuration = IscoSerialConfig(
+                port, unit_id, channel, int(self.baud_rate.currentData())
+            )
+            return lambda: self._tester.test_pump(configuration, device)
+
+        channel_field = (
+            self.line_channel
+            if device is HardwareTestDevice.LINE_PRESSURE
+            else self.delta_channel
+        )
+        channel = channel_field.currentData()
+        if not isinstance(channel, str) or not channel:
+            raise ValueError("ehhez a méréshez előbb válassz NI bemeneti csatornát")
+        terminal = str(self.terminal_configuration.currentData())
+        return lambda: self._tester.test_ni_input(channel, terminal, device)
+
     def _test_passed(self, result: object) -> None:
+        self._test_button.setEnabled(True)
+        self._set_device_test_buttons_enabled(True)
+        if isinstance(result, DeviceConnectionResult):
+            self._show_device_connection_result(result)
+            state = "SIKERES" if result.successful else "SIKERTELEN"
+            self._result_label.setText(
+                f"{state} EGYEDI KAPCSOLATPRÓBA — {result.detail}"
+            )
+            self._result_label.setStyleSheet(
+                "color:#1b7f3a;font-weight:700"
+                if result.successful
+                else "color:#b00020;font-weight:700"
+            )
+            return
         if not isinstance(result, ConnectionTestResult):
             self._test_failed("érvénytelen kapcsolatpróba-eredmény")
             return
-        self._test_succeeded = True
-        self._test_button.setEnabled(True)
-        self._activate_button.setEnabled(True)
-        self._result_label.setText(
-            "SIKERES KAPCSOLATPRÓBA\n"
-            f"Köpenypumpa: {result.jacket_pump}\n"
-            f"Besajtolópumpa: {result.injection_pump}\n"
-            f"Vonali AI: {result.line_voltage:.4f} V\n"
-            f"Differenciál AI: {result.differential_voltage:.4f} V"
+        for device_result in result.devices:
+            self._show_device_connection_result(device_result)
+        self._test_succeeded = result.all_successful
+        self._activate_button.setEnabled(result.all_successful)
+        successful = [item.detail for item in result.devices if item.successful]
+        failed = [item.detail for item in result.devices if not item.successful]
+        summary = [
+            f"Sikeres kapcsolatok: {len(successful)}/{len(result.devices)}",
+            *(f"✓ {detail}" for detail in successful),
+            *(f"✗ {detail}" for detail in failed),
+        ]
+        self._result_label.setText("\n".join(summary))
+        self._result_label.setStyleSheet(
+            "color:#1b7f3a;font-weight:700"
+            if result.all_successful
+            else "color:#9a6700;font-weight:700"
         )
-        self._result_label.setStyleSheet("color:#1b7f3a;font-weight:700")
 
     def _test_failed(self, message: str) -> None:
         self._test_succeeded = False
         self._test_button.setEnabled(True)
+        self._set_device_test_buttons_enabled(True)
         self._activate_button.setEnabled(False)
         self._result_label.setText(f"SIKERTELEN KAPCSOLATPRÓBA: {message}")
         self._result_label.setStyleSheet("color:#b00020;font-weight:700")
+
+    def _show_device_connection_result(
+        self, result: DeviceConnectionResult
+    ) -> None:
+        label = self._connection_result_labels[result.device]
+        label.setText(
+            ("SIKERES — " if result.successful else "SIKERTELEN — ")
+            + result.detail
+        )
+        label.setStyleSheet(
+            "color:#1b7f3a;font-weight:700"
+            if result.successful
+            else "color:#b00020;font-weight:700"
+        )
+
+    def _set_device_test_buttons_enabled(self, enabled: bool) -> None:
+        for button in self._device_test_buttons.values():
+            button.setEnabled(enabled)
 
     def _activate(self) -> None:
         if not self._test_succeeded or self._configuration is None:
@@ -1654,9 +1797,20 @@ class DeviceSettingsDialog(QDialog):
 
 
 class PumpControlDialog(QDialog):
-    def __init__(self, service: PumpControlService, parent: QWidget | None = None) -> None:
+    VALVE_CONFIRMATION = "SET VALVE OUTPUT"
+
+    def __init__(
+        self,
+        service: PumpControlService,
+        control_loop: ControlLoop,
+        active_stage_provider: Callable[[], str],
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._service = service
+        self._control_loop = control_loop
+        self._active_stage_provider = active_stage_provider
+        self._command_active = False
         self._buttons: list[QPushButton] = []
         self._status_labels: dict[PumpRole, QLabel] = {}
         self._modes: dict[PumpRole, QComboBox] = {}
@@ -1664,11 +1818,13 @@ class PumpControlDialog(QDialog):
         self._command_bridge = DeviceTestBridge(self)
         self._command_bridge.succeeded.connect(self._command_succeeded)
         self._command_bridge.failed.connect(self._command_failed)
-        self.setWindowTitle("Felügyelt ISCO pumpavezérlés")
-        self.resize(760, 520)
+        self.setObjectName("developer_manual_hardware_control")
+        self.setWindowTitle("Developer – felügyelt manuális hardvervezérlés")
+        self.resize(820, 700)
         layout = QVBoxLayout(self)
         warning = QLabel(
-            "HARDVER MÓD — A RUN/STOP/REMOTE parancsok fizikai pumpákra kerülnek."
+            "DEVELOPER / HARDVER MÓD — A pumpa- és szelepparancsok fizikai "
+            "eszközökre kerülnek. Minden kimenetet a biztonsági reteszelések felügyelnek."
         )
         warning.setWordWrap(True)
         warning.setStyleSheet(
@@ -1680,6 +1836,21 @@ class PumpControlDialog(QDialog):
         for column, role in enumerate(PumpRole):
             pumps.addWidget(self._pump_panel(role), 0, column)
         layout.addLayout(pumps)
+        layout.addWidget(self._valve_panel())
+        telemetry = QGroupBox("Élő mérési értékek")
+        telemetry_form = QFormLayout(telemetry)
+        self._line_pressure_status = QLabel("— bar")
+        self._differential_pressure_status = QLabel("— bar")
+        self._valve_status = QLabel("— %")
+        self._safety_status = QLabel("Nincs lekérdezve")
+        self._safety_status.setWordWrap(True)
+        telemetry_form.addRow("Vonali nyomás", self._line_pressure_status)
+        telemetry_form.addRow(
+            "Differenciálnyomás", self._differential_pressure_status
+        )
+        telemetry_form.addRow("Szelep kimenete", self._valve_status)
+        telemetry_form.addRow("Biztonsági állapot", self._safety_status)
+        layout.addWidget(telemetry)
         refresh = self._button("Állapotok frissítése", self._refresh_statuses)
         stop_all = self._button("MINDKÉT PUMPA STOP", self._stop_all)
         stop_all.setStyleSheet(
@@ -1690,6 +1861,11 @@ class PumpControlDialog(QDialog):
         close = QPushButton("Bezárás")
         close.clicked.connect(self.accept)
         layout.addWidget(close)
+        self._telemetry_timer = QTimer(self)
+        self._telemetry_timer.setInterval(1000)
+        self._telemetry_timer.timeout.connect(self._refresh_statuses)
+        self._telemetry_timer.start()
+        self._refresh_statuses()
 
     def _pump_panel(self, role: PumpRole) -> QGroupBox:
         title = "Köpenypumpa" if role is PumpRole.JACKET else "Besajtolópumpa"
@@ -1718,6 +1894,24 @@ class PumpControlDialog(QDialog):
         form.addRow(self._button("LOCAL", lambda: self._local(role)))
         return box
 
+    def _valve_panel(self) -> QGroupBox:
+        box = QGroupBox("Szelep kézi vezérlése")
+        form = QFormLayout(box)
+        self._valve_target = QDoubleSpinBox()
+        self._valve_target.setObjectName("developer_valve_target")
+        self._valve_target.setRange(0.0, 100.0)
+        self._valve_target.setDecimals(1)
+        self._valve_target.setSuffix(" %")
+        apply_output = self._button("Szelep kimenet alkalmazása", self._set_valve)
+        safe_state = self._button("MINDEN KIMENET BIZTONSÁGOS ÁLLAPOTBA", self._safe_state)
+        safe_state.setStyleSheet(
+            "background:#b00020;color:white;font-weight:800;padding:10px"
+        )
+        form.addRow("Kézi kimenet", self._valve_target)
+        form.addRow(apply_output)
+        form.addRow(safe_state)
+        return box
+
     def _button(self, text: str, callback: Callable[[], None]) -> QPushButton:
         button = QPushButton(text)
         button.clicked.connect(callback)
@@ -1725,6 +1919,9 @@ class PumpControlDialog(QDialog):
         return button
 
     def _execute(self, operation: Callable[[], object], success_message: str) -> None:
+        if self._command_active:
+            return
+        self._command_active = True
         for button in self._buttons:
             button.setEnabled(False)
 
@@ -1739,6 +1936,7 @@ class PumpControlDialog(QDialog):
         Thread(target=execute, name="eor-pump-command", daemon=True).start()
 
     def _command_succeeded(self, payload: object) -> None:
+        self._command_active = False
         for button in self._buttons:
             button.setEnabled(True)
         if not isinstance(payload, tuple) or len(payload) != 2:
@@ -1752,11 +1950,16 @@ class PumpControlDialog(QDialog):
                         f"{status.flow_ml_per_hour:.3f} ml/h | "
                         f"{status.remaining_volume_ml:.3f} ml"
                     )
+        elif isinstance(result, ControlCycleResult):
+            self._update_live_values(result.record)
+        elif isinstance(result, MeasurementRecord):
+            self._update_live_values(result)
 
     def _command_failed(self, message: str) -> None:
+        self._command_active = False
         for button in self._buttons:
             button.setEnabled(True)
-        QMessageBox.critical(self, "Pumpavezérlési hiba", message)
+        QMessageBox.critical(self, "Manuális vezérlési hiba", message)
 
     def _remote(self, role: PumpRole) -> None:
         self._execute(lambda: self._service.enter_remote(role), f"{role.value} REMOTE")
@@ -1801,7 +2004,71 @@ class PumpControlDialog(QDialog):
         self._execute(operation, "STOP ALL")
 
     def _refresh_statuses(self) -> None:
-        self._execute(self._service.statuses, "statuses refreshed")
+        self._execute(
+            lambda: self._control_loop.observe_once(
+                active_stage=self._active_stage_provider() or "Developer manuális vezérlés"
+            ),
+            "telemetry refreshed",
+        )
+
+    def _set_valve(self) -> None:
+        confirmation, accepted = QInputDialog.getText(
+            self,
+            "Fizikai szelep kimenetének módosítása",
+            f"Írd be pontosan: {self.VALVE_CONFIRMATION}",
+        )
+        if not accepted:
+            return
+        target = self._valve_target.value()
+
+        def operation() -> ControlCycleResult:
+            if confirmation != self.VALVE_CONFIRMATION:
+                raise PermissionError("valve output confirmation did not match")
+            result = self._control_loop.execute_once(
+                active_stage=self._active_stage_provider()
+                or "Developer manuális vezérlés",
+                mode=ControlMode.MANUAL,
+                dt_seconds=0.1,
+                manual_output_percent=target,
+                persist=False,
+            )
+            if not result.command.enabled:
+                raise PermissionError(
+                    "safety interlock active: "
+                    + "; ".join(result.record.safety_reasons)
+                )
+            return result
+
+        self._execute(operation, "valve output applied")
+
+    def _safe_state(self) -> None:
+        self._execute(self._control_loop.request_safe_state, "safe state requested")
+
+    def _update_live_values(self, record: MeasurementRecord) -> None:
+        snapshot = record.snapshot
+        self._status_labels[PumpRole.JACKET].setText(
+            f"{snapshot.jacket_pump.pressure_bar:.2f} bar | "
+            f"{snapshot.jacket_pump.flow_ml_per_hour:.3f} ml/h | "
+            f"{snapshot.jacket_pump.remaining_volume_ml:.3f} ml"
+        )
+        self._status_labels[PumpRole.INJECTION].setText(
+            f"{snapshot.injection_pump.pressure_bar:.2f} bar | "
+            f"{snapshot.injection_pump.flow_ml_per_hour:.3f} ml/h | "
+            f"{snapshot.injection_pump.remaining_volume_ml:.3f} ml"
+        )
+        self._line_pressure_status.setText(f"{snapshot.line_pressure_bar:.2f} bar")
+        self._differential_pressure_status.setText(
+            f"{snapshot.differential_pressure_bar:.2f} bar"
+        )
+        self._valve_status.setText(f"{snapshot.valve_percent:.1f} %")
+        if record.safety_reasons:
+            self._safety_status.setText(
+                "RETESZELVE — " + "; ".join(record.safety_reasons)
+            )
+            self._safety_status.setStyleSheet("color:#b00020;font-weight:700")
+        else:
+            self._safety_status.setText("RENDBEN — kimenet engedélyezhető")
+            self._safety_status.setStyleSheet("color:#1b7f3a;font-weight:700")
 
 
 class LoggingSettingsDialog(QDialog):
@@ -2793,8 +3060,8 @@ class DashboardWindow(QMainWindow):
         if self._tray_available:
             self._tray_icon.show()
         self._diagnostics = DiagnosticLogger(
-            data_directory / "logs" / "application.log",
-            hardware_path=data_directory / "logs" / "hardware_communication.log",
+            data_directory / "logs" / "application.html",
+            hardware_path=data_directory / "logs" / "hardware_communication.html",
         )
         self._restore_logging_settings()
         self._restore_nas_settings()
@@ -2938,7 +3205,6 @@ class DashboardWindow(QMainWindow):
         self._stop_button = QPushButton("Leállítás")
         self._acknowledge_button = QPushButton("Hiba nyugtázása")
         self._emergency_button = QPushButton("VÉSZLEÁLLÍTÁS")
-        self._pump_control_button = QPushButton("Pumpavezérlés…")
         self._emergency_button.setStyleSheet(
             "background:#b00020;color:white;font-weight:700;padding:10px"
         )
@@ -2948,7 +3214,6 @@ class DashboardWindow(QMainWindow):
         self._stop_button.clicked.connect(self._stop)
         self._acknowledge_button.clicked.connect(self._acknowledge_fault)
         self._emergency_button.clicked.connect(self._emergency_stop)
-        self._pump_control_button.clicked.connect(self._open_pump_control)
         for index, button in enumerate((
             self._connect_button,
             self._disconnect_button,
@@ -2956,7 +3221,6 @@ class DashboardWindow(QMainWindow):
             self._stop_button,
             self._acknowledge_button,
             self._emergency_button,
-            self._pump_control_button,
         )):
             row, column = divmod(index, 2)
             controls.addWidget(button, row, column)
@@ -3258,9 +3522,6 @@ class DashboardWindow(QMainWindow):
         device_settings.setShortcut("Ctrl+Shift+D")
         device_settings.triggered.connect(self._open_device_settings)
         settings_menu.addAction(device_settings)
-        pump_control = QAction("Felügyelt pumpavezérlés…", self)
-        pump_control.triggered.connect(self._open_pump_control)
-        settings_menu.addAction(pump_control)
         logging_settings = QAction("Naplózás…", self)
         logging_settings.triggered.connect(self._open_logging_settings)
         settings_menu.addAction(logging_settings)
@@ -3309,6 +3570,12 @@ class DashboardWindow(QMainWindow):
         self._simulation_mode_action.setVisible(self._developer_mode)
         self._simulation_mode_action.toggled.connect(self._simulation_mode_toggled)
         developer_menu.addAction(self._simulation_mode_action)
+        self._manual_control_action = QAction(
+            "Felügyelt manuális hardvervezérlés…", self
+        )
+        self._manual_control_action.setVisible(self._developer_mode)
+        self._manual_control_action.triggered.connect(self._open_pump_control)
+        developer_menu.addAction(self._manual_control_action)
         self._developer_view_action = QAction("Eszközkommunikáció…", self)
         self._developer_view_action.setShortcut("Ctrl+Shift+L")
         self._developer_view_action.setVisible(self._developer_mode)
@@ -3497,6 +3764,7 @@ class DashboardWindow(QMainWindow):
     def _set_developer_mode(self, enabled: bool) -> None:
         self._developer_mode = enabled
         self._simulation_mode_action.setVisible(enabled)
+        self._manual_control_action.setVisible(enabled)
         self._developer_view_action.setVisible(enabled)
         self._user_settings.setValue("developer/enabled", enabled)
         self._user_settings.sync()
@@ -3646,15 +3914,25 @@ class DashboardWindow(QMainWindow):
             self._show_error(f"A hardvermód aktiválása sikertelen: {error}")
 
     def _open_pump_control(self) -> None:
+        if not self._developer_mode:
+            self._show_error("A manuális hardvervezérléshez Developer mód szükséges.")
+            return
         if self._run_mode is not RunMode.HARDWARE or self._pump_control is None:
-            self._show_error("A pumpavezérlés csak sikeresen aktivált hardvermódban érhető el.")
+            self._show_error(
+                "A manuális hardvervezérlés csak sikeresen aktivált hardvermódban érhető el."
+            )
             return
         if self._devices.status.state is not ApplicationState.READY:
             self._show_error(
                 "A pumpavezérléshez előbb csatlakozz az eszközökhöz; a mérés legyen leállítva."
             )
             return
-        PumpControlDialog(self._pump_control, parent=self).exec()
+        PumpControlDialog(
+            self._pump_control,
+            self._control_loop,
+            lambda: self._stage.currentText(),
+            parent=self,
+        ).exec()
 
     def _activate_hardware(self, configuration: HardwareConfiguration) -> None:
         jacket = open_isco_pump(
@@ -3744,6 +4022,10 @@ class DashboardWindow(QMainWindow):
             injection_pump=injection,
             minimum_jacket_margin_bar=self._minimum_margin.value(),
             diagnostics=self._diagnostics,
+            safety_check=lambda: new_loop.observe_once(
+                active_stage=self._stage.currentText()
+                or "Developer manuális vezérlés"
+            ).safety_reasons,
         )
         pump_control.authorize(PumpControlService.AUTHORIZATION)
         self._control_loop.close()
@@ -4606,7 +4888,7 @@ class DashboardWindow(QMainWindow):
         self._start_button.setEnabled(state is ApplicationState.READY)
         self._stop_button.setEnabled(state in (ApplicationState.READY, ApplicationState.RUNNING))
         self._acknowledge_button.setEnabled(state is ApplicationState.FAULT)
-        self._pump_control_button.setEnabled(
+        self._manual_control_action.setEnabled(
             self._run_mode is RunMode.HARDWARE
             and self._pump_control is not None
             and state is ApplicationState.READY

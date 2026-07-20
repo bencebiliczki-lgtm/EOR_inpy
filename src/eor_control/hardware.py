@@ -1,5 +1,6 @@
 import importlib
 from dataclasses import asdict, dataclass
+from enum import StrEnum
 from math import isfinite
 from typing import Protocol
 
@@ -232,16 +233,51 @@ class HardwareConfiguration:
         return asdict(self)
 
 
+class HardwareTestDevice(StrEnum):
+    JACKET_PUMP = "jacket_pump"
+    INJECTION_PUMP = "injection_pump"
+    LINE_PRESSURE = "line_pressure"
+    DIFFERENTIAL_PRESSURE = "differential_pressure"
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceConnectionResult:
+    device: HardwareTestDevice
+    successful: bool
+    detail: str
+    value: float | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class ConnectionTestResult:
-    jacket_pump: str
-    injection_pump: str
-    line_voltage: float
-    differential_voltage: float
+    devices: tuple[DeviceConnectionResult, ...]
+
+    @property
+    def all_successful(self) -> bool:
+        tested = {result.device for result in self.devices}
+        return tested == set(HardwareTestDevice) and all(
+            result.successful for result in self.devices
+        )
+
+    def for_device(self, device: HardwareTestDevice) -> DeviceConnectionResult | None:
+        return next((result for result in self.devices if result.device is device), None)
 
 
 class HardwareConnectionTester(Protocol):
     def test(self, configuration: HardwareConfiguration) -> ConnectionTestResult: ...
+
+    def test_pump(
+        self,
+        configuration: IscoSerialConfig,
+        device: HardwareTestDevice,
+    ) -> DeviceConnectionResult: ...
+
+    def test_ni_input(
+        self,
+        channel: str,
+        terminal_configuration: str,
+        device: HardwareTestDevice,
+    ) -> DeviceConnectionResult: ...
 
 
 class PhysicalHardwareConnectionTester:
@@ -256,54 +292,106 @@ class PhysicalHardwareConnectionTester:
         self._diagnostics = diagnostics
 
     def test(self, configuration: HardwareConfiguration) -> ConnectionTestResult:
-        ni_backend = self._ni_backend or NidaqmxBackend(
-            configuration.ni_terminal_configuration
+        return ConnectionTestResult(
+            (
+                self.test_pump(
+                    configuration.jacket_config(), HardwareTestDevice.JACKET_PUMP
+                ),
+                self.test_pump(
+                    configuration.injection_config(),
+                    HardwareTestDevice.INJECTION_PUMP,
+                ),
+                self.test_ni_input(
+                    configuration.line_pressure_channel,
+                    configuration.ni_terminal_configuration,
+                    HardwareTestDevice.LINE_PRESSURE,
+                ),
+                self.test_ni_input(
+                    configuration.differential_pressure_channel,
+                    configuration.ni_terminal_configuration,
+                    HardwareTestDevice.DIFFERENTIAL_PRESSURE,
+                ),
+            )
         )
-        jacket = open_isco_pump(
-            configuration.jacket_config(),
-            diagnostics=self._diagnostics,
-            diagnostic_category=DiagnosticCategory.JACKET_PUMP,
+
+    def test_pump(
+        self,
+        configuration: IscoSerialConfig,
+        device: HardwareTestDevice,
+    ) -> DeviceConnectionResult:
+        if device not in (
+            HardwareTestDevice.JACKET_PUMP,
+            HardwareTestDevice.INJECTION_PUMP,
+        ):
+            raise ValueError("pump test requires a pump device")
+        category = (
+            DiagnosticCategory.JACKET_PUMP
+            if device is HardwareTestDevice.JACKET_PUMP
+            else DiagnosticCategory.INJECTION_PUMP
         )
-        injection = open_isco_pump(
-            configuration.injection_config(),
-            diagnostics=self._diagnostics,
-            diagnostic_category=DiagnosticCategory.INJECTION_PUMP,
-        )
+        pump = None
+        result: DeviceConnectionResult
         try:
-            jacket.connect()
-            injection.connect()
-            jacket_status = jacket.read_status()
-            injection_status = injection.read_status()
-            line_voltage = ni_backend.read_voltage(
-                configuration.line_pressure_channel
+            pump = open_isco_pump(
+                configuration,
+                diagnostics=self._diagnostics,
+                diagnostic_category=category,
             )
-            differential_voltage = ni_backend.read_voltage(
-                configuration.differential_pressure_channel
+            pump.connect()
+            status = pump.read_status()
+            result = DeviceConnectionResult(
+                device,
+                True,
+                f"{pump.identified_model}; {status.pressure_bar:.2f} bar; "
+                f"{status.flow_ml_per_hour:.3f} ml/h",
             )
-            if self._diagnostics is not None:
-                self._diagnostics.emit(
-                    DiagnosticCategory.NI_LINE,
-                    "TEST-RX",
-                    f"{configuration.line_pressure_channel}={line_voltage:.6f} V",
-                )
-                self._diagnostics.emit(
-                    DiagnosticCategory.NI_DIFFERENTIAL,
-                    "TEST-RX",
-                    f"{configuration.differential_pressure_channel}="
-                    f"{differential_voltage:.6f} V",
-                )
-            if not all(isfinite(value) for value in (line_voltage, differential_voltage)):
-                raise ConnectionError("NI connection test returned a non-finite voltage")
-            return ConnectionTestResult(
-                jacket_pump=(
-                    f"{jacket.identified_model}; {jacket_status.pressure_bar:.2f} bar"
-                ),
-                injection_pump=(
-                    f"{injection.identified_model}; {injection_status.pressure_bar:.2f} bar"
-                ),
-                line_voltage=line_voltage,
-                differential_voltage=differential_voltage,
+        except Exception as error:
+            result = DeviceConnectionResult(
+                device, False, f"{type(error).__name__}: {error}"
             )
         finally:
-            jacket.disconnect()
-            injection.disconnect()
+            if pump is not None:
+                try:
+                    pump.disconnect()
+                except Exception as error:
+                    result = DeviceConnectionResult(
+                        device,
+                        False,
+                        f"leválasztási hiba: {type(error).__name__}: {error}",
+                    )
+        return result
+
+    def test_ni_input(
+        self,
+        channel: str,
+        terminal_configuration: str,
+        device: HardwareTestDevice,
+    ) -> DeviceConnectionResult:
+        if device not in (
+            HardwareTestDevice.LINE_PRESSURE,
+            HardwareTestDevice.DIFFERENTIAL_PRESSURE,
+        ):
+            raise ValueError("NI input test requires a pressure input device")
+        category = (
+            DiagnosticCategory.NI_LINE
+            if device is HardwareTestDevice.LINE_PRESSURE
+            else DiagnosticCategory.NI_DIFFERENTIAL
+        )
+        try:
+            backend = self._ni_backend or NidaqmxBackend(terminal_configuration)
+            voltage = backend.read_voltage(channel)
+            if not isfinite(voltage):
+                raise ConnectionError("NI connection test returned a non-finite voltage")
+            if self._diagnostics is not None:
+                self._diagnostics.emit(
+                    category,
+                    "TEST-RX",
+                    f"{channel}={voltage:.6f} V",
+                )
+            return DeviceConnectionResult(
+                device, True, f"{channel}: {voltage:.4f} V", voltage
+            )
+        except Exception as error:
+            return DeviceConnectionResult(
+                device, False, f"{type(error).__name__}: {error}"
+            )

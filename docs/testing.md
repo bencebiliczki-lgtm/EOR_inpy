@@ -101,15 +101,17 @@ elutasítását, valamint egy stdin/stdout alapon szkriptelt teljes munkamenetet
 Minden terminálteszt kizárólag szimulátorokat és letiltott adatwritert használ.
 
 A hardverkonfigurációs tesztek ellenőrzik az eltérő COM-portokat, DASNET- és
-NI-konfigurációk előállítását, valamint a szelep 1–5 V végpontjait. A fej nélküli
-Qt-teszt igazolja, hogy az aktiválógomb csak sikeres kapcsolatpróba után válik
-elérhetővé, sikertelen próba után pedig tiltva marad. A dashboard tesztje ellenőrzi
+NI-konfigurációk előállítását, a szelep 1–5 V végpontjait, valamint azt, hogy egy
+részpróba hibája mellett a többi eszköz eredménye megmarad. A fej nélküli Qt-teszt
+igazolja az eszközönkénti státuszkijelzést, és hogy az aktiválógomb csak mind a
+négy szükséges kapcsolat sikere után válik elérhetővé. A dashboard tesztje ellenőrzi
 a bal oldali állapotpanel reszponzív szélességét, sortörését és automatikus
 függőleges görgetési beállítását, valamint a jobb panel reszponzív tördelését és
 vízszintes görgetősávjának tiltását is.
 
 A diagnosztikai tesztek lefedik a kikapcsolt napló fájlmentességét, a
-kategóriaszűrést, append-only fájlírást, inkrementális memóriaolvasást, DASNET
+kategóriaszűrést, az append-only HTML-fájlírást és HTML-escape-elést, az
+inkrementális memóriaolvasást, DASNET
 TX/RX eseményeket és az NI funkció szerinti kategorizálást. A Qt-teszt egyetlen
 pumpakategóriát engedélyez, majd ellenőrzi, hogy a Developer táblában az NI esemény
 nem, a pumpaesemény viszont megjelenik. A felderítési összegzés láthatóságát külön

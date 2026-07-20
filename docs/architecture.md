@@ -223,12 +223,17 @@ műveletet végez, és az írási hibát az állapotsorban jelzi.
 ## Eszközmód és kapcsolatpróba
 
 A `DeviceSettingsDialog` tartósan tárolja a két ISCO soros konfigurációját, az NI
-AI/AO csatornákat és a szelep feszültségkalibrációját. A kapcsolatpróba külön
-háttérszálon fut: mindkét pumpán `RSVP`, `IDENTIFY` és státuszlekérdezést végez,
-majd beolvassa a két NI analóg bemenetet. Nem küld `REMOTE`, `RUN` vagy más
-motorparancsot, és nem hoz létre NI analóg kimeneti taskot.
+AI/AO csatornákat és a szelep feszültségkalibrációját. A két pumpa és a két NI
+bemenet külön-külön, háttérszálon tesztelhető. Az összesített kapcsolatpróba is
+négy független részpróbát futtat, ezért egy eszköz hibája nem takarja el a többi
+eszköz sikeres kapcsolatát. A pumpapróba `RSVP`, `IDENTIFY` és státuszlekérdezést
+végez, az NI-próba csak a kiválasztott analóg bemenetet olvassa. A szelep AO
+kapcsolatát a felület nem jelöli teszteltnek, mert az fizikai írás nélkül nem
+igazolható. A kapcsolatpróba nem küld `REMOTE`, `RUN` vagy más motorparancsot, és
+nem hoz létre NI analóg kimeneti taskot.
 
-Sikeres teszt után a külön `HARDVER mód aktiválása` gombbal a dashboard a
+Mind a négy szükséges részpróba sikere után a külön `HARDVER mód aktiválása`
+gombbal a dashboard a
 szimulátoros eszközstacket ISCO-, NI-DAQmx- és `AnalogValveActuator` példányokra
 cseréli, új háttér-runtime-mal és ugyanahhoz az aktív projekthez tartozó CSV-naplóval. A módváltás csak
 leválasztott `IDLE` állapotban engedélyezett. Új programindítás soha nem aktivál
@@ -239,8 +244,11 @@ automatikusan fizikai hardvert.
 A `DiagnosticLogger` szálbiztos, kategóriaszűrt eseménynapló. Kikapcsolt állapotban
 nem hoz létre fájlt. Bekapcsolva legfeljebb 5000 eseményt tart memóriában, és
 append-only UTF-8 sorokat ír. A rendszer- és runtime események a
-`data/logs/application.log`, a pumpa DASNET TX/RX és NI hardveresemények a külön
-`data/logs/hardware_communication.log` fájlba kerülnek. Külön
+`data/logs/application.html`, a pumpa DASNET TX/RX és NI hardveresemények a külön
+`data/logs/hardware_communication.html` fájlba kerülnek. A naplók append-only,
+önálló HTML-riportok: keresőt, szintszűrőt, eseményszámlálót, rögzített fejlécű
+táblázatot és szintenkénti színezést tartalmaznak. Minden dinamikus mező HTML-
+escape-elten kerül a fájlba. Külön
 kategória tartozik a két pumpához, a két NI bemenethez, a szelep AO-hoz, a
 runtime-hoz és a rendszerhez.
 
@@ -308,6 +316,14 @@ A besajtolópumpa `RUN` előtt a szolgáltatás friss státuszt olvas mindkét p
 mindkét STOP-ot egymástól függetlenül megkísérli. `CLEAR` és `LOCAL` futó
 pumpánál tiltott. A dashboard globális STOP-ja szinkronizálja, a vészállapot pedig
 visszavonja a pumpavezérlési jogosultságot.
+
+A manuális pumpa- és szelepvezérlés csak Developer módban, egy közös ablakból
+érhető el. Az ablak másodpercenként nem perzisztált, biztonságilag kiértékelt
+mérési pillanatképet kér, és megjeleníti mindkét pumpa nyomását és áramlását,
+valamint a vonali és differenciálnyomást. Minden pumpa-RUN előtt ugyanez a teljes
+SafetyMonitor-lánc fut le; a kézi szelepjel pedig a `ControlLoop` útvonalán jut az
+aktuátorra. Aktív vagy reteszelt biztonsági ok minden kézi kimenetet letilt és
+safe-state-et kér.
 
 Az A/B/C/D csatorna az írási parancsokban is érvényesül: A csatornán utótag
 nélküli, B/C/D csatornán `FLOWx`, `PRESSx`, `RUNx`, `STOPx` alak készül.

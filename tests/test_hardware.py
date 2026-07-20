@@ -3,7 +3,12 @@ from types import SimpleNamespace
 import pytest
 
 from eor_control import hardware
-from eor_control.hardware import HardwareConfiguration
+from eor_control.hardware import (
+    HardwareConfiguration,
+    HardwareTestDevice,
+    PhysicalHardwareConnectionTester,
+)
+from eor_control.isco import IscoSerialConfig
 
 
 def configuration() -> HardwareConfiguration:
@@ -109,3 +114,56 @@ def test_hardware_discovery_lists_serial_and_ni_channels(monkeypatch: pytest.Mon
     assert discovery.ni_input_channels[0].serial_number == "12345678"
     assert [channel.channel for channel in discovery.ni_output_channels] == ["Dev1/ao0"]
     assert discovery.warnings == ()
+
+
+def test_connection_test_reports_each_device_independently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePump:
+        identified_model = "260D"
+
+        def __init__(self, *, fails: bool) -> None:
+            self._fails = fails
+            self.disconnected = False
+
+        def connect(self) -> None:
+            if self._fails:
+                raise ConnectionError("pump unavailable")
+
+        def read_status(self) -> object:
+            return SimpleNamespace(
+                pressure_bar=123.0,
+                flow_ml_per_hour=4.5,
+            )
+
+        def disconnect(self) -> None:
+            self.disconnected = True
+
+    pumps: list[FakePump] = []
+
+    def open_pump(config: IscoSerialConfig, **_kwargs: object) -> FakePump:
+        pump = FakePump(fails=config.port == "COM3")
+        pumps.append(pump)
+        return pump
+
+    class FakeNiBackend:
+        def read_voltage(self, channel: str) -> float:
+            if channel.endswith("ai1"):
+                raise ConnectionError("NI channel unavailable")
+            return 2.25
+
+    monkeypatch.setattr(hardware, "open_isco_pump", open_pump)
+    tester = PhysicalHardwareConnectionTester(ni_backend=FakeNiBackend())  # type: ignore[arg-type]
+
+    result = tester.test(configuration())
+
+    assert not result.all_successful
+    jacket = result.for_device(HardwareTestDevice.JACKET_PUMP)
+    injection = result.for_device(HardwareTestDevice.INJECTION_PUMP)
+    line = result.for_device(HardwareTestDevice.LINE_PRESSURE)
+    differential = result.for_device(HardwareTestDevice.DIFFERENTIAL_PRESSURE)
+    assert jacket is not None and not jacket.successful
+    assert injection is not None and injection.successful
+    assert line is not None and line.successful and line.value == 2.25
+    assert differential is not None and not differential.successful
+    assert all(pump.disconnected for pump in pumps)
