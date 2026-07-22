@@ -139,7 +139,8 @@ elérhető pumpán külön STOP és leválasztás történik. A Qt-teszt emellet
 hogy a Developer manuális ablak részleges hardveres `IDLE` állapotból megnyitható,
 a telemetria közben kiadott parancs sorba áll, majd végrehajtás után látható
 sikerállapotot kap. Hiányos telemetria mellett a működő szenzor értéke látható,
-miközben a biztonságkritikus RUN tiltása egyértelmű marad.
+miközben a kapcsolatfrissítés nem indít közös biztonsági mérési ciklust, a
+biztonságkritikus RUN külön ellenőrzése pedig változatlan marad.
 
 ## Hardveres smoke test
 

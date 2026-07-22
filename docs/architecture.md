@@ -334,6 +334,10 @@ rejti el a működő eszközök adatait. Minden pumpa-RUN előtt továbbra is a 
 `SafetyMonitor`-lánc fut le; a kézi szelepjel pedig a `ControlLoop` útvonalán jut
 az aktuátorra. Hiányos biztonsági telemetria a RUN és nem-SAFE szelepírást tiltja,
 de a STOP, safe-state és leválasztás mindig külön-külön megkísérelhető.
+A manuális ablak időzített kapcsolatfrissítése nem hív közös `observe_once`
+mérési ciklust: a pumpák és az NI-bemenetek külön olvasása csak kapcsolat- és
+telemetriateszt. A teljes biztonsági mintavétel kizárólag tényleges RUN vagy
+nem-SAFE szelepírás kezdeményezésekor fut le.
 
 A Developer menüpont Developer módban mindig kattintható. Futó mérés vagy
 reteszelt hiba esetén a dashboard konkrét hibaüzenetben jelzi a szükséges

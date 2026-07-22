@@ -143,6 +143,7 @@ def test_manual_control_queues_command_during_telemetry_and_shows_success() -> N
 
 def test_manual_control_retains_partial_pump_status_when_sensor_is_missing() -> None:
     app = application()
+    full_safety_checks: list[str] = []
 
     class PartialService:
         @staticmethod
@@ -166,6 +167,7 @@ def test_manual_control_retains_partial_pump_status_when_sensor_is_missing() -> 
 
         @staticmethod
         def observe_once(*, active_stage: str) -> object:
+            full_safety_checks.append(active_stage)
             raise ConnectionError(
                 f"{active_stage}: differential pressure sensor is not connected"
             )
@@ -187,10 +189,11 @@ def test_manual_control_retains_partial_pump_status_when_sensor_is_missing() -> 
     assert "KAPCSOLÓDVA" in dialog._status_labels[PumpRole.JACKET].text()
     assert "120.00 bar" in dialog._status_labels[PumpRole.JACKET].text()
     assert "NINCS KAPCSOLAT" in dialog._status_labels[PumpRole.INJECTION].text()
-    assert dialog._line_pressure_status.text() == "12.50 bar"
+    assert dialog._line_pressure_status.text() == "KAPCSOLÓDVA | 12.50 bar"
     assert "sensor is not connected" in dialog._differential_pressure_status.text()
-    assert "RÉSZLEGES TELEMETRIA" in dialog._safety_status.text()
+    assert "RÉSZLEGES KAPCSOLAT" in dialog._safety_status.text()
     assert "RUN" in dialog._safety_status.text()
+    assert full_safety_checks == []
     dialog.close()
 
 

@@ -2446,8 +2446,6 @@ class ManualTelemetryResult:
     pump_errors: dict[PumpRole, str]
     pressure_values: dict[str, float]
     pressure_errors: dict[str, str]
-    measurement: MeasurementRecord | None
-    measurement_error: str | None
 
 
 class PumpControlDialog(QDialog):
@@ -2501,7 +2499,7 @@ class PumpControlDialog(QDialog):
             pumps.addWidget(self._pump_panel(role), 0, column)
         layout.addLayout(pumps)
         layout.addWidget(self._valve_panel())
-        telemetry = QGroupBox("Élő mérési értékek")
+        telemetry = QGroupBox("Eszközönkénti kapcsolat és élő adatok")
         telemetry_form = QFormLayout(telemetry)
         self._line_pressure_status = QLabel("— bar")
         self._differential_pressure_status = QLabel("— bar")
@@ -2515,7 +2513,9 @@ class PumpControlDialog(QDialog):
         telemetry_form.addRow("Szelep kimenete", self._valve_status)
         telemetry_form.addRow("Biztonsági állapot", self._safety_status)
         layout.addWidget(telemetry)
-        refresh = self._button("Állapotok frissítése", self._refresh_statuses)
+        refresh = self._button(
+            "Kapcsolatok frissítése (független tesztek)", self._refresh_statuses
+        )
         stop_all = self._button("MINDKÉT PUMPA STOP", self._stop_all)
         stop_all.setStyleSheet(
             "background:#b00020;color:white;font-weight:800;padding:10px"
@@ -2713,26 +2713,12 @@ class PumpControlDialog(QDialog):
             pressure_values, pressure_errors = (
                 self._control_loop.read_pressure_inputs_individually()
             )
-            measurement: MeasurementRecord | None
-            measurement_error: str | None
-            try:
-                measurement = self._control_loop.observe_once(
-                    active_stage=self._active_stage_provider()
-                    or "Developer manuális vezérlés"
-                )
-            except Exception as error:
-                measurement = None
-                measurement_error = str(error)
-            else:
-                measurement_error = None
             self._telemetry_bridge.succeeded.emit(
                 ManualTelemetryResult(
                     statuses,
                     pump_errors,
                     pressure_values,
                     pressure_errors,
-                    measurement,
-                    measurement_error,
                 )
             )
 
@@ -2754,32 +2740,44 @@ class PumpControlDialog(QDialog):
                         "NINCS KAPCSOLAT — "
                         + result.pump_errors.get(role, "ismeretlen hiba")
                     )
-            if result.measurement is not None:
-                self._update_live_values(result.measurement)
-            else:
-                line_pressure = result.pressure_values.get("line_pressure")
-                differential_pressure = result.pressure_values.get(
-                    "differential_pressure"
+            line_pressure = result.pressure_values.get("line_pressure")
+            differential_pressure = result.pressure_values.get(
+                "differential_pressure"
+            )
+            self._line_pressure_status.setText(
+                f"KAPCSOLÓDVA | {line_pressure:.2f} bar"
+                if line_pressure is not None
+                else "NINCS KAPCSOLAT — "
+                + result.pressure_errors.get("line_pressure", "ismeretlen hiba")
+            )
+            self._differential_pressure_status.setText(
+                f"KAPCSOLÓDVA | {differential_pressure:.2f} bar"
+                if differential_pressure is not None
+                else "NINCS KAPCSOLAT — "
+                + result.pressure_errors.get(
+                    "differential_pressure", "ismeretlen hiba"
                 )
-                self._line_pressure_status.setText(
-                    f"{line_pressure:.2f} bar"
-                    if line_pressure is not None
-                    else "NINCS ÉRVÉNYES ADAT — "
-                    + result.pressure_errors.get("line_pressure", "ismeretlen hiba")
-                )
-                self._differential_pressure_status.setText(
-                    f"{differential_pressure:.2f} bar"
-                    if differential_pressure is not None
-                    else "NINCS ÉRVÉNYES ADAT — "
-                    + result.pressure_errors.get(
-                        "differential_pressure", "ismeretlen hiba"
-                    )
-                )
+            )
+            connection_errors = [
+                *(f"{role.value}: {message}" for role, message in result.pump_errors.items()),
+                *(
+                    f"{key}: {message}"
+                    for key, message in result.pressure_errors.items()
+                ),
+            ]
+            if connection_errors:
                 self._safety_status.setText(
-                    "RÉSZLEGES TELEMETRIA — nem biztonságos RUN vagy szelepírás "
-                    "tiltva: " + (result.measurement_error or "ismeretlen mérési hiba")
+                    "RÉSZLEGES KAPCSOLAT — a sikeres eszközök ettől függetlenül "
+                    "kezelhetők. RUN és szelepírás külön teljes biztonsági "
+                    "ellenőrzést kér. Hibák: " + "; ".join(connection_errors)
                 )
                 self._safety_status.setStyleSheet("color:#b00020;font-weight:700")
+            else:
+                self._safety_status.setText(
+                    "MINDEN KAPCSOLATI TESZT SIKERES — RUN és szelepírás előtt "
+                    "külön teljes biztonsági ellenőrzés történik."
+                )
+                self._safety_status.setStyleSheet("color:#1b7f3a;font-weight:700")
         elif isinstance(result, MeasurementRecord):
             self._update_live_values(result)
         self._run_pending_command()
