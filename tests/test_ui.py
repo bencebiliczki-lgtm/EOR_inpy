@@ -54,6 +54,7 @@ from eor_control.ui import (  # noqa: E402
     SYSTEM_STYLESHEET,
     WINDOWS_APP_USER_MODEL_ID,
     CalibrationSettingsDialog,
+    ControlCycleSettingsDialog,
     DataManagementDialog,
     DeveloperViewDialog,
     DeviceSettingsDialog,
@@ -121,6 +122,7 @@ def test_application_dialogs_are_resizable() -> None:
         DeviceTestWizard,
         PumpControlDialog,
         LoggingSettingsDialog,
+        ControlCycleSettingsDialog,
         DeveloperViewDialog,
         DataManagementDialog,
         CalibrationSettingsDialog,
@@ -129,6 +131,35 @@ def test_application_dialogs_are_resizable() -> None:
     ):
         assert issubclass(dialog_type, ResizableDialog)
     dialog.close()
+
+
+def test_developer_control_cycle_settings_are_persisted(tmp_path: Path) -> None:
+    application()
+    settings = QSettings(str(tmp_path / "cycle.ini"), QSettings.Format.IniFormat)
+    dialog = ControlCycleSettingsDialog(settings)
+    dialog.control_interval.setValue(1.0)
+    dialog.watchdog_tolerance.setValue(0.2)
+
+    dialog._save()
+
+    assert float(settings.value("developer/control_interval_seconds")) == 1.0
+    assert float(settings.value("developer/watchdog_tolerance_seconds")) == 0.2
+    assert "1.200 s" in dialog.deadline.text()
+
+
+def test_dashboard_runtime_uses_developer_cycle_settings(tmp_path: Path) -> None:
+    application()
+    settings = QSettings(str(tmp_path / "runtime.ini"), QSettings.Format.IniFormat)
+    settings.setValue("developer/control_interval_seconds", 1.0)
+    settings.setValue("developer/watchdog_tolerance_seconds", 0.2)
+
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3", settings=settings
+    )
+
+    assert window._runtime._interval == pytest.approx(1.0)
+    assert window._runtime._watchdog_tolerance == pytest.approx(0.2)
+    window.close()
 
 
 def test_stage_settings_input_fields_are_labelled() -> None:

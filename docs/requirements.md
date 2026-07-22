@@ -121,6 +121,9 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 - A PID paraméterei módosíthatók és névvel menthető profilokba rendezhetők.
 - A részletes PID-hangolás és a felügyelt manuális hardvervezérlés csak Developer
   módban jelenhet meg; a normál kezelői nézet az üzemi műveletekre korlátozódjon.
+- Developer módban a háttér-vezérlési ciklus időköze és watchdog-tűrése külön
+  beállítható és tartósan mentett legyen. Módosításuk futó mérés közben tilos;
+  a watchdog és a ciklushiba miatti safe-state nem kapcsolható ki.
 - Cél a beállított nyomás ±1 bar tartása, ennek igazolási módszerét még rögzíteni kell.
 
 ## Adatmentés

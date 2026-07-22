@@ -157,6 +157,9 @@ A csak szelepet tartalmazó projektprofil UI-tesztje igazolja, hogy sikeres
 olvasási kapcsolatpróba nélkül is beléphet részleges manuális tesztmódba, miközben
 a többi eszköz nincs hozzáadva.
 
+A Developer vezérlésiciklus-beállítás tesztje ellenőrzi a ciklusidő és a
+watchdog-tűrés tartós mentését, valamint a számított végrehajtási határidőt.
+
 ## Hardveres smoke test
 
 Felügyelt környezetben, nyomásfelépítés nélkül vagy meghatározott biztonságos tesztállapotban:

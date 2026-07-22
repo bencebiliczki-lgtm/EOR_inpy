@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from math import isfinite
 from pathlib import Path
 from threading import Thread
 from typing import cast
@@ -3257,6 +3258,113 @@ class LoggingSettingsDialog(ResizableDialog):
         self.accept()
 
 
+class ControlCycleSettingsDialog(ResizableDialog):
+    DEFAULT_INTERVAL_SECONDS = 0.1
+    DEFAULT_WATCHDOG_TOLERANCE_SECONDS = 0.05
+
+    def __init__(self, settings: QSettings, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._settings = settings
+        self.setWindowTitle("Developer – vezérlési ciklus")
+        self.resize(560, 300)
+        layout = QVBoxLayout(self)
+
+        help_text = QLabel(
+            "A ciklusidő határozza meg a vezérlés tervezett gyakoriságát. A watchdog "
+            "akkor jelez hibát, ha a ciklus futása hosszabb a ciklusidő és a tűrés "
+            "összegénél. A nagyobb érték lassítja a PID-et és a biztonsági felügyeletet."
+        )
+        help_text.setWordWrap(True)
+        layout.addWidget(help_text)
+
+        form = QFormLayout()
+        self.control_interval = self._seconds_field(0.05, 10.0, 0.05)
+        self.control_interval.setObjectName("developer_control_interval_seconds")
+        self.control_interval.setValue(
+            self.setting_value(
+                settings,
+                "developer/control_interval_seconds",
+                self.DEFAULT_INTERVAL_SECONDS,
+            )
+        )
+        self.watchdog_tolerance = self._seconds_field(0.0, 10.0, 0.05)
+        self.watchdog_tolerance.setObjectName(
+            "developer_watchdog_tolerance_seconds"
+        )
+        self.watchdog_tolerance.setValue(
+            self.setting_value(
+                settings,
+                "developer/watchdog_tolerance_seconds",
+                self.DEFAULT_WATCHDOG_TOLERANCE_SECONDS,
+            )
+        )
+        form.addRow(
+            input_field_label("Vezérlési ciklusidő", self.control_interval),
+            self.control_interval,
+        )
+        form.addRow(
+            input_field_label("Watchdog-tűrés", self.watchdog_tolerance),
+            self.watchdog_tolerance,
+        )
+        layout.addLayout(form)
+
+        self.deadline = QLabel()
+        self.deadline.setObjectName("developer_control_deadline_summary")
+        self.deadline.setWordWrap(True)
+        layout.addWidget(self.deadline)
+        self.control_interval.valueChanged.connect(self._refresh_deadline)
+        self.watchdog_tolerance.valueChanged.connect(self._refresh_deadline)
+        self._refresh_deadline()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @staticmethod
+    def _seconds_field(minimum: float, maximum: float, step: float) -> QDoubleSpinBox:
+        field = QDoubleSpinBox()
+        field.setRange(minimum, maximum)
+        field.setDecimals(3)
+        field.setSingleStep(step)
+        field.setSuffix(" s")
+        return field
+
+    @staticmethod
+    def setting_value(settings: QSettings, key: str, default: float) -> float:
+        try:
+            value = float(str(settings.value(key, default)))
+        except (TypeError, ValueError):
+            return default
+        if not isfinite(value):
+            return default
+        if key.endswith("control_interval_seconds"):
+            return min(10.0, max(0.05, value))
+        if key.endswith("watchdog_tolerance_seconds"):
+            return min(10.0, max(0.0, value))
+        return value
+
+    def _refresh_deadline(self, *_args: object) -> None:
+        maximum_duration = self.control_interval.value() + self.watchdog_tolerance.value()
+        self.deadline.setText(
+            f"Jelenlegi végrehajtási határidő: {maximum_duration:.3f} s. "
+            "A 0,859 s-os ciklushoz például 1,000 s ciklusidő használható."
+        )
+
+    def _save(self) -> None:
+        self._settings.setValue(
+            "developer/control_interval_seconds", self.control_interval.value()
+        )
+        self._settings.setValue(
+            "developer/watchdog_tolerance_seconds", self.watchdog_tolerance.value()
+        )
+        self._settings.sync()
+        self.accept()
+
+
 class DeveloperViewDialog(ResizableDialog):
     APPLICATION_ENDPOINT = "EOR vezérlőalkalmazás"
     ENDPOINT_LABELS = {
@@ -4315,13 +4423,7 @@ class DashboardWindow(QMainWindow):
         self._runtime_bridge.preflight_failed.connect(
             self._measurement_preflight_failed
         )
-        self._runtime = BackgroundControlRunner(
-            control_loop,
-            control_interval_seconds=0.1,
-            watchdog_tolerance_seconds=0.05,
-            on_cycle=self._runtime_bridge.cycle_completed.emit,
-            on_fault=self._runtime_bridge.fault_raised.emit,
-        )
+        self._runtime = self._make_runtime(control_loop)
         self._build_ui()
         self._build_menu()
         self._build_tray_menu()
@@ -4922,6 +5024,14 @@ class DashboardWindow(QMainWindow):
         self._manual_control_action.setVisible(self._developer_mode)
         self._manual_control_action.triggered.connect(self._open_pump_control)
         developer_menu.addAction(self._manual_control_action)
+        self._control_cycle_settings_action = QAction(
+            "Vezérlési ciklus és watchdog…", self
+        )
+        self._control_cycle_settings_action.setVisible(self._developer_mode)
+        self._control_cycle_settings_action.triggered.connect(
+            self._open_control_cycle_settings
+        )
+        developer_menu.addAction(self._control_cycle_settings_action)
         self._developer_view_action = QAction("Eszközkommunikáció…", self)
         self._developer_view_action.setShortcut("Ctrl+Shift+L")
         self._developer_view_action.setVisible(self._developer_mode)
@@ -5107,12 +5217,35 @@ class DashboardWindow(QMainWindow):
     def _open_developer_view(self) -> None:
         DeveloperViewDialog(self._diagnostics, parent=self).exec()
 
+    def _open_control_cycle_settings(self) -> None:
+        if not self._developer_mode:
+            self._show_error("A vezérlési ciklus beállításához Developer mód szükséges.")
+            return
+        if self._runtime.running:
+            self._show_error(
+                "A vezérlési ciklus futó mérés közben nem módosítható. "
+                "Előbb állítsd le a mérést."
+            )
+            return
+        dialog = ControlCycleSettingsDialog(self._user_settings, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._runtime = self._make_runtime(self._control_loop)
+        self._diagnostics.emit(
+            DiagnosticCategory.RUNTIME,
+            "CONFIG",
+            "control interval and watchdog tolerance updated: "
+            f"interval={dialog.control_interval.value():.3f}s, "
+            f"tolerance={dialog.watchdog_tolerance.value():.3f}s",
+        )
+
     def _set_developer_mode(self, enabled: bool) -> None:
         self._developer_mode = enabled
         self._set_service_controls_visible(enabled)
         self._simulation_mode_action.setVisible(enabled)
         self._manual_control_action.setVisible(enabled)
         self._manual_control_action.setEnabled(enabled)
+        self._control_cycle_settings_action.setVisible(enabled)
         self._developer_view_action.setVisible(enabled)
         self._user_settings.setValue("developer/enabled", enabled)
         self._user_settings.sync()
@@ -5816,10 +5949,20 @@ class DashboardWindow(QMainWindow):
             self._source.setCurrentIndex(max(0, injection_index))
 
     def _make_runtime(self, control_loop: ControlLoop) -> BackgroundControlRunner:
+        control_interval = ControlCycleSettingsDialog.setting_value(
+            self._user_settings,
+            "developer/control_interval_seconds",
+            ControlCycleSettingsDialog.DEFAULT_INTERVAL_SECONDS,
+        )
+        watchdog_tolerance = ControlCycleSettingsDialog.setting_value(
+            self._user_settings,
+            "developer/watchdog_tolerance_seconds",
+            ControlCycleSettingsDialog.DEFAULT_WATCHDOG_TOLERANCE_SECONDS,
+        )
         return BackgroundControlRunner(
             control_loop,
-            control_interval_seconds=0.1,
-            watchdog_tolerance_seconds=0.05,
+            control_interval_seconds=control_interval,
+            watchdog_tolerance_seconds=watchdog_tolerance,
             on_cycle=self._runtime_bridge.cycle_completed.emit,
             on_fault=self._runtime_bridge.fault_raised.emit,
         )
