@@ -1,4 +1,5 @@
 import re
+from contextlib import suppress
 from dataclasses import dataclass
 from math import isfinite
 from typing import Protocol, cast
@@ -11,6 +12,8 @@ from eor_control.domain import PumpStatus
 
 
 class DasnetCommandClient(Protocol):
+    def open(self) -> None: ...
+
     def command(self, message: str) -> DasnetResponse: ...
 
     def close(self) -> None: ...
@@ -58,37 +61,62 @@ class IscoPump:
         return self._identified_model
 
     def connect(self) -> None:
-        ready = self._client.command(self._channel_command("RSVP")).message.strip()
-        if ready != "READY":
-            raise ConnectionError(f"unexpected ISCO RSVP response: {ready!r}")
-        identity = self._client.command("IDENTIFY").message.strip()
-        if "MODEL 260D PUMP" not in identity.upper():
-            raise ConnectionError(f"connected ISCO device is not a 260D pump: {identity!r}")
+        try:
+            self._client.open()
+            ready = self._client.command(self._channel_command("RSVP")).message.strip()
+            if ready != "READY":
+                raise ConnectionError(f"unexpected ISCO RSVP response: {ready!r}")
+            identity = self._client.command("IDENTIFY").message.strip()
+            if "MODEL 260D PUMP" not in identity.upper():
+                raise ConnectionError(
+                    f"connected ISCO device is not a 260D pump: {identity!r}"
+                )
+        except Exception:
+            self._connected = False
+            with suppress(Exception):
+                self._client.close()
+            raise
         self._identified_model = identity
         self._connected = True
 
     def read_status(self) -> PumpStatus:
         self._require_connected()
-        pressure = self._read_measurement(
-            self._channel_command("PRESS"), expected_unit=self._config.pressure_unit
-        )
-        flow = self._read_measurement(
-            self._channel_command("FLOW"), expected_unit=self._config.flow_unit
-        )
-        if self._config.flow_unit == "ML/MIN":
-            flow *= 60.0
-        volume = self._read_measurement(
-            self._channel_command("VOL"), expected_unit="ML"
-        )
-        status_message = self._client.command(self._channel_command("STATUS")).message
-        if "PROBLEM=" in status_message.upper():
-            raise ConnectionError(f"ISCO pump reported {status_message.strip()}")
+        pressure = self.read_pressure_bar()
+        flow = self.read_flow_ml_per_hour()
+        volume = self.read_remaining_volume_ml()
+        self.read_operating_status()
         return PumpStatus(
             pressure_bar=pressure,
             flow_ml_per_hour=flow,
             remaining_volume_ml=volume,
             connected=True,
         )
+
+    def read_pressure_bar(self) -> float:
+        self._require_connected()
+        return self._read_measurement(
+            self._channel_command("PRESS"), expected_unit=self._config.pressure_unit
+        )
+
+    def read_flow_ml_per_hour(self) -> float:
+        self._require_connected()
+        flow = self._read_measurement(
+            self._channel_command("FLOW"), expected_unit=self._config.flow_unit
+        )
+        return flow * 60.0 if self._config.flow_unit == "ML/MIN" else flow
+
+    def read_remaining_volume_ml(self) -> float:
+        self._require_connected()
+        return self._read_measurement(
+            self._channel_command("VOL"), expected_unit="ML"
+        )
+
+    def read_operating_status(self) -> str:
+        self._require_connected()
+        status_message = self._client.command(self._channel_command("STATUS")).message
+        if "PROBLEM=" in status_message.upper():
+            raise ConnectionError(f"ISCO pump reported {status_message.strip()}")
+        return status_message.strip()
 
     def enter_remote(self) -> None:
         self._require_connected()

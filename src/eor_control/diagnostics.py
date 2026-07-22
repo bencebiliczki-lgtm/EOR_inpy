@@ -8,6 +8,8 @@ from pathlib import Path
 from threading import Lock
 from time import monotonic
 
+from eor_control.timezone import as_hungarian_time
+
 
 class DiagnosticCategory(StrEnum):
     SYSTEM = "system"
@@ -245,7 +247,8 @@ class DiagnosticLogger:
   <body>
     <header>
       <h1>{safe_title}</h1>
-      <p>AFKI EOR mérőrendszer — UTC időbélyeggel és monotonic időreferenciával</p>
+      <p>AFKI EOR mérőrendszer — Europe/Budapest megjelenítés,<br>
+        UTC tárolás és monotonic időreferencia</p>
     </header>
     <main>
       <div class="toolbar">
@@ -264,7 +267,7 @@ class DiagnosticLogger:
       <div class="table-wrap">
         <table>
           <thead><tr>
-            <th>UTC idő</th><th>Monotonic</th><th>Szint</th>
+            <th>Magyar idő</th><th>Monotonic</th><th>Szint</th>
             <th>Kategória</th><th>Irány</th><th>Üzenet</th>
           </tr></thead>
           <tbody>
@@ -274,8 +277,9 @@ class DiagnosticLogger:
     def _html_row(event: DiagnosticEvent) -> str:
         level = event.level.strip().upper() or "INFO"
         css_level = "".join(character for character in level.lower() if character.isalnum())
+        utc_timestamp = event.recorded_at.isoformat()
         values = (
-            event.recorded_at.isoformat(),
+            as_hungarian_time(event.recorded_at).isoformat(),
             f"{event.monotonic_seconds:.6f}",
             level,
             event.category.value,
@@ -286,7 +290,7 @@ class DiagnosticLogger:
         return (
             f'<tr class="log-event level-{css_level}" data-level="{escaped[2]}" '
             f'data-category="{escaped[3]}">'
-            f'<td><time datetime="{escaped[0]}">{escaped[0]}</time></td>'
+            f'<td><time datetime="{escape(utc_timestamp)}">{escaped[0]}</time></td>'
             f'<td>{escaped[1]}</td><td><span class="badge">{escaped[2]}</span></td>'
             f'<td>{escaped[3]}</td><td>{escaped[4]}</td>'
             f'<td class="message">{escaped[5]}</td></tr>\n'

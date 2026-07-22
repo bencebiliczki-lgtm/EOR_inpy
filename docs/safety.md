@@ -25,6 +25,13 @@ A pontos fizikai reakció még helyszíni kockázatelemzést igényel. Addig a k
 - Újraindítás csak megszűnt ok, kezelői nyugtázás és előfeltétel-ellenőrzés után lehetséges.
 - A konfiguráció változtatása ne törölje automatikusan az aktív hibát.
 
+A fizikai pumpaadapter a safe-state `STOP` kérést élvezérelten reteszeli. Egy
+hibaeseményben pumpánként legfeljebb egy `STOP` kerül a soros vonalra akkor is, ha
+a pumpa `PROBLEM=LOCAL MODE` választ ad vagy több felügyeleti réteg ugyanazt a
+safe-state-et kéri. Új STOP csak kezelői hibanyugtázás, sikeres REMOTE módba lépés
+vagy új pumpafutás után engedélyezett. Ez a parancsismétlést korlátozza, a fizikai
+vészleállítás és a pumpa saját védelmei továbbra is elsődlegesek.
+
 A prototípus `SafetyMonitor` komponense reteszeli az észlelt hibákat. A retesz csak
 kezelői nyugtázással és egy aktuálisan biztonságos mérési pillanatkép ismételt
 kiértékelése után oldható. A nem véges (`NaN`, pozitív vagy negatív végtelen)
@@ -52,8 +59,11 @@ runtime, álló pumpák, aktuális sikeres kapcsolatpróba, aktív/reteszelt hib
 állapot és teljes kezelői ellenőrzőlista mellett indulhat. Megszakítás, ablakbezárás
 és kivétel letiltja az új parancsokat, minden pumpán STOP-ot és SAFE AO-jelet kér.
 
-A PID nyomásszűrése csak a szabályozási ágra hat; minden interlock a szűretlen
-mérési pillanatképet értékeli. A túl gyakori irányváltás `VALVE_OSCILLATION`
+A PID nyomásszűrése csak a szabályozási ágra hat. Az NI vonali és
+differenciálnyomás kemény maximum-interlockja az EMA előtti, mediánból kalibrált
+nyers nyomást értékeli, ezért a szűrés késleltetése nem takarhat el veszélyes
+túllépést. A szűrt érték a PID, kijelzés, grafikon és céltúllövési felügyelet
+bemenete. A túl gyakori irányváltás `VALVE_OSCILLATION`
 runtime hibát és reteszelt safe-state útvonalat vált ki.
 
 ## Kötelező tesztek

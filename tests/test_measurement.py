@@ -187,6 +187,28 @@ def test_measurement_runs_without_optional_line_pressure_sensor() -> None:
     assert "line_pressure" not in errors
 
 
+def test_snapshot_keeps_raw_pressure_while_pid_value_is_filtered() -> None:
+    measurement_service, _, _, _, _ = service()
+
+    class BurstDaq(SimulatedDataAcquisition):
+        line_bursts = iter(([2.0] * 20, [3.0] * 20))
+
+        def read_voltages(self, channel: str, number_of_samples: int) -> list[float]:
+            assert number_of_samples == 20
+            if channel == "line_pressure":
+                return list(next(self.line_bursts))
+            return [1.5] * number_of_samples
+
+    measurement_service._daq = BurstDaq()
+    first = measurement_service.sample_once(active_stage="water", valve_percent=0.0)
+    second = measurement_service.sample_once(active_stage="water", valve_percent=0.0)
+
+    assert first.snapshot.raw_line_pressure_bar == pytest.approx(100.0)
+    assert first.snapshot.line_pressure_bar == pytest.approx(100.0)
+    assert second.snapshot.raw_line_pressure_bar == pytest.approx(200.0)
+    assert second.snapshot.line_pressure_bar == pytest.approx(100.0)
+
+
 @pytest.mark.parametrize("interval", [0.9, 3600.1])
 def test_measurement_interval_is_limited(interval: float) -> None:
     measurement_service, *_ = service()

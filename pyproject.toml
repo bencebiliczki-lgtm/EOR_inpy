@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "AFKI EOR measurement control and data acquisition application"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["tzdata>=2024.1"]
 
 [project.optional-dependencies]
 ui = ["numpy>=1.26,<2", "PySide6>=6.7", "pyqtgraph>=0.13.7"]

@@ -82,6 +82,26 @@ def test_line_pressure_limit_is_supervised() -> None:
     assert "line pressure limit exceeded" in decision.reasons
 
 
+def test_raw_line_pressure_trips_hard_limit_before_filtered_value() -> None:
+    base = snapshot(120.0, 100.0)
+    unsafe = MeasurementSnapshot(
+        recorded_at=base.recorded_at,
+        monotonic_seconds=base.monotonic_seconds,
+        jacket_pump=base.jacket_pump,
+        injection_pump=base.injection_pump,
+        line_pressure_bar=100.0,
+        differential_pressure_bar=base.differential_pressure_bar,
+        valve_percent=base.valve_percent,
+        raw_line_pressure_bar=401.0,
+        raw_differential_pressure_bar=base.differential_pressure_bar,
+    )
+
+    decision = monitor().evaluate(unsafe)
+
+    assert not decision.safe
+    assert "line pressure limit exceeded" in decision.reasons
+
+
 def test_missing_optional_pressure_inputs_do_not_create_safety_fault() -> None:
     optional = snapshot(120.0, 100.0)
     optional = MeasurementSnapshot(

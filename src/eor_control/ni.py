@@ -10,6 +10,10 @@ from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
 class NidaqBackend(Protocol):
     def read_voltage(self, physical_channel: str) -> float: ...
 
+    def read_voltages(
+        self, physical_channel: str, number_of_samples: int
+    ) -> list[float]: ...
+
     def write_voltage(self, physical_channel: str, voltage: float) -> None: ...
 
 
@@ -47,6 +51,33 @@ class NidaqmxBackend:
                 terminal_config=terminal_configuration,
             )
             return float(task.read())
+
+    def read_voltages(
+        self, physical_channel: str, number_of_samples: int
+    ) -> list[float]:
+        if number_of_samples < 1:
+            raise ValueError("NI sample count must be positive")
+        nidaqmx = importlib.import_module("nidaqmx")
+        constants = importlib.import_module("nidaqmx.constants")
+        terminal_configuration = getattr(
+            constants.TerminalConfiguration,
+            self._terminal_configuration,
+        )
+        with nidaqmx.Task() as task:
+            task.ai_channels.add_ai_voltage_chan(
+                physical_channel,
+                terminal_config=terminal_configuration,
+            )
+            task.timing.cfg_samp_clk_timing(
+                1000.0,
+                sample_mode=constants.AcquisitionType.FINITE,
+                samps_per_chan=number_of_samples,
+            )
+            values = task.read(
+                number_of_samples_per_channel=number_of_samples,
+                timeout=0.1,
+            )
+        return [float(value) for value in cast(list[float], values)]
 
     def write_voltage(self, physical_channel: str, voltage: float) -> None:
         with self._output_lock:
@@ -136,20 +167,45 @@ class NidaqmxDataAcquisition:
         self._output_authorized = True
 
     def read_voltage(self, channel: str) -> float:
+        return self.read_voltages(channel, 1)[0]
+
+    def read_voltages(self, channel: str, number_of_samples: int) -> list[float]:
+        if number_of_samples < 1:
+            raise ValueError("NI sample count must be positive")
         try:
             physical_channel = self._channels[channel]
         except KeyError as error:
             raise KeyError(f"unknown NI logical input channel: {channel}") from error
-        voltage = self._backend.read_voltage(physical_channel)
-        if not isfinite(voltage):
+        read_many = getattr(self._backend, "read_voltages", None)
+        voltages = (
+            [self._backend.read_voltage(physical_channel)]
+            if number_of_samples == 1
+            else read_many(physical_channel, number_of_samples)
+            if callable(read_many)
+            else [
+                self._backend.read_voltage(physical_channel)
+                for _ in range(number_of_samples)
+            ]
+        )
+        if len(voltages) != number_of_samples:
+            raise ValueError(
+                f"NI channel {channel} returned {len(voltages)} samples; "
+                f"expected {number_of_samples}"
+            )
+        if not all(isfinite(voltage) for voltage in voltages):
             raise ValueError(f"NI channel {channel} returned a non-finite voltage")
         categories = {
             "line_pressure": DiagnosticCategory.NI_LINE,
             "differential_pressure": DiagnosticCategory.NI_DIFFERENTIAL,
         }
         category = categories[channel]
-        self._log(category, "RX", f"{physical_channel}={voltage:.6f} V")
-        return voltage
+        self._log(
+            category,
+            "RX",
+            f"{physical_channel} samples={len(voltages)} "
+            f"min={min(voltages):.6f} V max={max(voltages):.6f} V",
+        )
+        return voltages
 
     def write_voltage(self, channel: str, voltage: float) -> None:
         if channel != "valve_output":

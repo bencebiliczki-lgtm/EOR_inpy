@@ -17,6 +17,12 @@ besajtolt térfogat követését, az 1 másodperc–1 óra intervallumkorlátot,
 és kapcsolatvesztés utáni biztonságos állapotot, valamint a nyers CSV fejlécét és
 append működését.
 
+Az analóg jelfeldolgozás tesztjei lefedik a 20 mintás burstöt, az izolált tüske
+mediános elutasítását, az EMA átmenetét és a három burst után elfogadott tartós
+lépcsőt. Külön biztonsági teszt igazolja, hogy a nyers nyomás már akkor leállítást
+vált ki, amikor a szűrt PID-/kijelzési érték még a határ alatt van. A CSV-tesztek a
+nyers és szűrt oszlopokat, valamint a V1/V2 migrációt is ellenőrzik.
+
 A vonali nyomás egyben a belépő nyomás; a regressziós tesztek biztosítják, hogy ne
 jöjjön létre hozzá duplikált NI-csatorna, kalibráció vagy CSV-mező. A korábbi,
 `inlet_pressure_bar` oszlopot tartalmazó mérési fájlok továbbra is megnyithatók.
@@ -41,6 +47,10 @@ megőrzését, a szakaszok sorrendjét és átnevezését, az UTC-normalizálás
 az ismeretlenül újabb sémaverzió elutasítását. A projekttörlési teszt ellenőrzi a
 fázis-metaadatok kaszkádos törlését; a UI-teszt az INI-hivatkozások tisztítását és a
 nyers CSV-k változatlan megőrzését is igazolja.
+
+Az időzónatesztek külön téli és nyári UTC-időponttal ellenőrzik az
+`Europe/Budapest` átváltást, valamint az UTC szerint előző napra eső, de magyar
+helyi idő szerint már következő napi projektmappa elnevezését.
 
 A szabályozási tesztek lefedik a kézi kimenet korlátozását, mindkét választható
 nyomásforrást, a közvetlen és fordított hatásirányt, a kimeneti telítést,

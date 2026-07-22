@@ -89,6 +89,8 @@ class FakeSerial:
     writes: list[bytes] = field(default_factory=list)
     reset_count: int = 0
     closed: bool = False
+    is_open: bool = True
+    open_count: int = 0
 
     def write(self, data: bytes) -> int:
         self.writes.append(data)
@@ -102,6 +104,12 @@ class FakeSerial:
 
     def close(self) -> None:
         self.closed = True
+        self.is_open = False
+
+    def open(self) -> None:
+        self.open_count += 1
+        self.closed = False
+        self.is_open = True
 
 
 def test_client_starts_network_and_waits_for_delayed_response() -> None:
@@ -112,6 +120,22 @@ def test_client_starts_network_and_waits_for_delayed_response() -> None:
     assert serial.writes[0] == b"\r"
     assert serial.writes.count(encode_command(6, "RSVP")) == 1
     assert serial.reset_count == 1
+
+
+def test_client_close_releases_and_open_reacquires_serial_port() -> None:
+    serial = FakeSerial([response("READY"), response("READY")])
+    client = DasnetClient(serial, unit_id=6)
+    client.command("RSVP")
+
+    client.close()
+    assert serial.closed
+    assert not serial.is_open
+
+    client.open()
+    assert serial.is_open
+    assert serial.open_count == 1
+    client.command("RSVP")
+    assert serial.writes.count(b"\r") == 2
 
 
 def test_client_collects_fragmented_response_until_cr() -> None:

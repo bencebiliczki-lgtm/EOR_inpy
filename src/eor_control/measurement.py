@@ -2,11 +2,18 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Event
 from time import monotonic, sleep
+from typing import cast
 
 from eor_control.calibration import LinearCalibration
 from eor_control.devices import Clock, DataAcquisition, Pump
-from eor_control.domain import MeasurementRecord, MeasurementSnapshot
+from eor_control.domain import (
+    DataQuality,
+    MeasurementRecord,
+    MeasurementSnapshot,
+    PumpStatus,
+)
 from eor_control.safety import SafetyLimits, SafetyMonitor
+from eor_control.signal_filter import AnalogFilterConfig, AnalogSignalFilter
 from eor_control.storage import MeasurementWriter
 
 
@@ -41,6 +48,7 @@ class MeasurementService:
         clock: Clock | None = None,
         channels: MeasurementChannels | None = None,
         persistence_enabled: bool = True,
+        analog_filter_config: AnalogFilterConfig | None = None,
     ) -> None:
         self._jacket_pump = jacket_pump
         self._injection_pump = injection_pump
@@ -52,6 +60,15 @@ class MeasurementService:
         self._clock = clock or SystemClock()
         self._channels = channels or MeasurementChannels()
         self._persistence_enabled = persistence_enabled
+        self._analog_filter_config = analog_filter_config or AnalogFilterConfig()
+        self._analog_filters = {
+            "line_pressure": self._make_analog_filter(
+                self._analog_filter_config.line_spike_limit_voltage
+            ),
+            "differential_pressure": self._make_analog_filter(
+                self._analog_filter_config.differential_spike_limit_voltage
+            ),
+        }
         self._initial_jacket_volume_ml: float | None = None
         self._initial_injection_volume_ml: float | None = None
 
@@ -59,6 +76,8 @@ class MeasurementService:
         """Start the injected-volume counter from the next acquired pump status."""
         self._initial_jacket_volume_ml = None
         self._initial_injection_volume_ml = None
+        for signal_filter in self._analog_filters.values():
+            signal_filter.reset()
 
     def read_pressure_inputs_individually(
         self,
@@ -99,22 +118,24 @@ class MeasurementService:
         pressure_target_bar: float | None = None,
         use_line_pressure_for_control: bool = False,
     ) -> MeasurementRecord:
-        jacket = self._jacket_pump.read_status()
-        injection = self._injection_pump.read_status()
+        jacket, jacket_quality = self._read_pump(self._jacket_pump)
+        injection, injection_quality = self._read_pump(self._injection_pump)
         if self._initial_jacket_volume_ml is None:
             self._initial_jacket_volume_ml = jacket.remaining_volume_ml
         if self._initial_injection_volume_ml is None:
             self._initial_injection_volume_ml = injection.remaining_volume_ml
 
-        line_pressure = self._read_optional_pressure(
+        line_pressure, raw_line_pressure = self._read_optional_pressure(
             self._channels.line_pressure,
             self._line_calibration,
             "line pressure input",
+            "line_pressure",
         )
-        differential_pressure = self._read_optional_pressure(
+        differential_pressure, raw_differential_pressure = self._read_optional_pressure(
             self._channels.differential_pressure,
             self._differential_calibration,
             "differential pressure input",
+            "differential_pressure",
         )
 
         snapshot = MeasurementSnapshot(
@@ -125,6 +146,9 @@ class MeasurementService:
             line_pressure_bar=line_pressure,
             differential_pressure_bar=differential_pressure,
             valve_percent=valve_percent,
+            quality=self._combined_quality(jacket_quality, injection_quality),
+            raw_line_pressure_bar=raw_line_pressure,
+            raw_differential_pressure_bar=raw_differential_pressure,
         )
         if use_line_pressure_for_control:
             if snapshot.line_pressure_bar is None:
@@ -164,14 +188,54 @@ class MeasurementService:
         channel: str | None,
         calibration: LinearCalibration,
         label: str,
-    ) -> float | None:
+        filter_key: str,
+    ) -> tuple[float | None, float | None]:
         if channel is None:
-            return None
-        voltage = self._daq.read_voltage(channel)
+            return None, None
+        config = self._analog_filter_config
+        read_many = getattr(self._daq, "read_voltages", None)
+        samples = (
+            read_many(channel, config.samples_per_read)
+            if config.enabled and callable(read_many)
+            else [self._daq.read_voltage(channel)]
+        )
+        filtered = self._analog_filters[filter_key].process(samples)
         try:
-            return calibration.convert(voltage)
+            return (
+                calibration.convert(filtered.filtered_voltage),
+                calibration.convert(filtered.raw_voltage),
+            )
         except ValueError as error:
             raise ValueError(f"{label}: {error}") from error
+
+    def _make_analog_filter(self, spike_limit_voltage: float) -> AnalogSignalFilter:
+        config = self._analog_filter_config
+        return AnalogSignalFilter(
+            alpha=config.ema_alpha if config.enabled else 1.0,
+            median_enabled=config.median_enabled if config.enabled else False,
+            spike_rejection_enabled=(
+                config.spike_rejection_enabled if config.enabled else False
+            ),
+            spike_limit_voltage=spike_limit_voltage,
+            spike_confirmation_samples=config.spike_confirmation_samples,
+        )
+
+    @staticmethod
+    def _read_pump(pump: Pump) -> tuple[PumpStatus, DataQuality]:
+        read_cached = getattr(pump, "read_cached_status", None)
+        if callable(read_cached):
+            return cast(tuple[PumpStatus, DataQuality], read_cached())
+        return pump.read_status(), DataQuality.GOOD
+
+    @staticmethod
+    def _combined_quality(*qualities: DataQuality) -> DataQuality:
+        priority = {
+            DataQuality.GOOD: 0,
+            DataQuality.STALE: 1,
+            DataQuality.OUT_OF_RANGE: 2,
+            DataQuality.DISCONNECTED: 3,
+        }
+        return max(qualities, key=priority.__getitem__)
 
     def run(
         self,
@@ -216,6 +280,8 @@ class MeasurementService:
         self._line_calibration = line_calibration
         self._differential_calibration = differential_calibration
         self._safety_monitor.configure(safety_limits)
+        for signal_filter in self._analog_filters.values():
+            signal_filter.reset()
 
     def close(self) -> None:
         try:

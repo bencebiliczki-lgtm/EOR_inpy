@@ -115,6 +115,7 @@ from eor_control.projects import (
     ProjectRepository,
 )
 from eor_control.pump_control import PumpControlService, PumpOperatingMode, PumpRole
+from eor_control.pump_telemetry import PollingPump
 from eor_control.runtime import BackgroundControlRunner, RuntimeSettings
 from eor_control.safety import ManualSafetyMonitor, SafetyLimits, SafetyMonitor
 from eor_control.simulators import (
@@ -122,6 +123,7 @@ from eor_control.simulators import (
     SimulatedPump,
     SimulatedValveActuator,
 )
+from eor_control.timezone import format_hungarian_time
 
 LIGHT_STYLESHEET = """
 QMainWindow, QWidget { background: #f5f7fa; color: #1f2933; }
@@ -727,7 +729,9 @@ class ProjectSelectionDialog(ResizableDialog):
             self.project_table.setItem(
                 row,
                 2,
-                QTableWidgetItem(project.created_at.astimezone().strftime("%Y-%m-%d %H:%M")),
+                QTableWidgetItem(
+                    format_hungarian_time(project.created_at, "%Y-%m-%d %H:%M")
+                ),
             )
             if project.id == selected_project_id:
                 selected_row = row
@@ -3439,7 +3443,7 @@ class DeveloperViewDialog(ResizableDialog):
         self._table.setObjectName("device_communication_table")
         self._table.setHorizontalHeaderLabels(
             (
-                "UTC idő",
+                "Magyar idő",
                 "Monotonic",
                 "Szint",
                 "Forrás",
@@ -3490,7 +3494,7 @@ class DeveloperViewDialog(ResizableDialog):
             self._table.insertRow(row)
             source, destination, transport = self._event_route(event)
             values = (
-                event.recorded_at.isoformat(),
+                format_hungarian_time(event.recorded_at, "%Y-%m-%d %H:%M:%S.%f %Z"),
                 f"{event.monotonic_seconds:.6f}",
                 event.level,
                 source,
@@ -4385,6 +4389,8 @@ class DashboardWindow(QMainWindow):
         self._measurement_writer = measurement_writer
         self._nas_sync = nas_sync
         self._run_mode = RunMode.SIMULATION
+        self._preferred_run_mode = self._stored_run_mode()
+        self._startup_mode_restore_started = False
         self._partial_hardware_mode = False
         self._pump_control: PumpControlService | None = None
         self._active_hardware_configuration: HardwareConfiguration | None = None
@@ -5172,7 +5178,7 @@ class DashboardWindow(QMainWindow):
             "setpoint": f"{self._setpoint.value():g} bar",
             "recording_interval": f"{self._recording_interval.value()} s",
             "last_update": (
-                snapshot.recorded_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                format_hungarian_time(snapshot.recorded_at, "%Y-%m-%d %H:%M:%S")
                 if snapshot is not None
                 else "Nincs mérési adat"
             ),
@@ -5277,6 +5283,36 @@ class DashboardWindow(QMainWindow):
         )
         self._simulation_mode_action.blockSignals(blocked)
 
+    def _stored_run_mode(self) -> RunMode:
+        stored = str(
+            self._user_settings.value(
+                "application/last_run_mode", RunMode.SIMULATION.value
+            )
+        )
+        try:
+            return RunMode(stored)
+        except ValueError:
+            return RunMode.SIMULATION
+
+    def _remember_run_mode(self, mode: RunMode) -> None:
+        self._preferred_run_mode = mode
+        self._user_settings.setValue("application/last_run_mode", mode.value)
+        self._user_settings.sync()
+
+    def _restore_startup_mode(self) -> None:
+        if self._startup_mode_restore_started:
+            return
+        self._startup_mode_restore_started = True
+        if self._project_selector_required:
+            self._project_selector_prompted = True
+            self._open_project_selector()
+        if (
+            not self._project_selector_required
+            and self._preferred_run_mode is RunMode.HARDWARE
+            and self._run_mode is RunMode.SIMULATION
+        ):
+            self._open_device_settings()
+
     def _restore_theme(self) -> None:
         theme = str(self._user_settings.value("theme", "system"))
         if theme not in self._theme_actions:
@@ -5373,7 +5409,7 @@ class DashboardWindow(QMainWindow):
         if message == self._active_alarm_reason:
             return
         self._active_alarm_reason = message
-        timestamp = datetime.now(UTC).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+        timestamp = format_hungarian_time(datetime.now(UTC))
         self._active_alarm_text = (
             f"⛔ LEÁLLÍTÁST OKOZÓ HIBA | {timestamp} | {message} | "
             "Automatikus művelet: pumpa STOP és szelep SAFE megkísérelve. | "
@@ -5717,20 +5753,26 @@ class DashboardWindow(QMainWindow):
                     + "; ".join(cleanup_errors)
                 )
         jacket = (
-            open_isco_pump(
-                configuration.jacket_config(),
-                diagnostics=self._diagnostics,
-                diagnostic_category=DiagnosticCategory.JACKET_PUMP,
+            PollingPump(
+                open_isco_pump(
+                    configuration.jacket_config(),
+                    diagnostics=self._diagnostics,
+                    diagnostic_category=DiagnosticCategory.JACKET_PUMP,
+                ),
+                name="jacket",
             )
             if configuration.jacket_pump_enabled
             else DisabledPump("jacket")
         )
         try:
             injection = (
-                open_isco_pump(
-                    configuration.injection_config(),
-                    diagnostics=self._diagnostics,
-                    diagnostic_category=DiagnosticCategory.INJECTION_PUMP,
+                PollingPump(
+                    open_isco_pump(
+                        configuration.injection_config(),
+                        diagnostics=self._diagnostics,
+                        diagnostic_category=DiagnosticCategory.INJECTION_PUMP,
+                    ),
+                    name="injection",
                 )
                 if configuration.injection_pump_enabled
                 else DisabledPump("injection")
@@ -5833,6 +5875,7 @@ class DashboardWindow(QMainWindow):
         self._hardware_actuator = actuator
         self._runtime = self._make_runtime(new_loop)
         self._run_mode = RunMode.HARDWARE
+        self._remember_run_mode(RunMode.HARDWARE)
         self._set_line_pressure_source_available(configuration.line_pressure_enabled)
         self._partial_hardware_mode = partial
         self._sync_simulation_mode_action()
@@ -5930,6 +5973,7 @@ class DashboardWindow(QMainWindow):
         self._hardware_actuator = None
         self._runtime = self._make_runtime(new_loop)
         self._run_mode = RunMode.SIMULATION
+        self._remember_run_mode(RunMode.SIMULATION)
         self._partial_hardware_mode = False
         self._sync_simulation_mode_action()
         self._diagnostics.emit(
@@ -6107,6 +6151,22 @@ class DashboardWindow(QMainWindow):
 
     def _connect_devices(self) -> None:
         try:
+            if (
+                self._run_mode is RunMode.HARDWARE
+                and not self._devices.status.hardware_authorized
+            ):
+                confirmation, accepted = QInputDialog.getText(
+                    self,
+                    "Fizikai hardver újracsatlakoztatása",
+                    "A COM-portok újranyitásához és a fizikai hardver ismételt "
+                    "engedélyezéséhez írd be pontosan:\n\n"
+                    f"{DeviceControlService.HARDWARE_CONFIRMATION}",
+                )
+                if not accepted:
+                    return
+                self._devices.authorize_hardware(confirmation)
+                if self._pump_control is not None:
+                    self._pump_control.authorize(confirmation)
             self._devices.connect()
             if self._pump_control is not None:
                 self._pump_control.observe_connected(*tuple(PumpRole))
@@ -6122,7 +6182,6 @@ class DashboardWindow(QMainWindow):
             if self._pump_control is not None:
                 self._pump_control.observe_disconnected(*tuple(PumpRole))
                 self._pump_control.revoke()
-                self._pump_control = None
         except Exception as error:
             self._show_error(str(error))
         self._set_all_connections("LEVÁLASZTVA", ok=None)
@@ -7221,7 +7280,7 @@ class DashboardWindow(QMainWindow):
             except OSError:
                 size = 0
             updated = (
-                recorded_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                format_hungarian_time(recorded_at, "%Y-%m-%d %H:%M:%S")
                 if recorded_at is not None
                 else "első ciklusra vár"
             )
@@ -7248,9 +7307,8 @@ class DashboardWindow(QMainWindow):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
-        if self._project_selector_required and not self._project_selector_prompted:
-            self._project_selector_prompted = True
-            QTimer.singleShot(0, self._open_project_selector)
+        if not self._startup_mode_restore_started:
+            QTimer.singleShot(0, self._restore_startup_mode)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._save_user_settings()

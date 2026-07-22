@@ -11,6 +11,11 @@ class ScriptedClient:
     responses: dict[str, list[str]]
     commands: list[str] = field(default_factory=list)
     closed: bool = False
+    open_count: int = 0
+
+    def open(self) -> None:
+        self.open_count += 1
+        self.closed = False
 
     def command(self, message: str) -> DasnetResponse:
         self.commands.append(message)
@@ -48,6 +53,20 @@ def test_connect_identifies_260d_without_entering_remote_mode() -> None:
     assert "REMOTE" not in client.commands
 
 
+def test_disconnect_releases_client_and_next_connect_reopens_it() -> None:
+    pump, client = connected_pump()
+    pump.disconnect()
+    assert client.closed
+    client.responses["RSVP"] = ["READY"]
+    client.responses["IDENTIFY"] = ["MODEL 260D PUMP"]
+
+    pump.connect()
+
+    assert not client.closed
+    assert client.open_count == 2
+    assert client.commands.count("RSVP") == 2
+
+
 def test_status_queries_documented_fields_and_converts_flow_to_hour() -> None:
     pump, client = connected_pump()
 
@@ -64,6 +83,7 @@ def test_non_260d_identity_is_rejected() -> None:
 
     with pytest.raises(ConnectionError, match="not a 260D"):
         IscoPump(client, IscoSerialConfig("COM1", 6)).connect()
+    assert client.closed
 
 
 def test_pump_problem_in_status_is_rejected() -> None:

@@ -38,6 +38,25 @@ def test_inputs_use_configured_physical_channels() -> None:
     assert daq.read_voltage("differential_pressure") == 1.5
 
 
+def test_input_burst_is_read_in_one_backend_operation() -> None:
+    class BurstBackend(FakeBackend):
+        reads: list[tuple[str, int]] = []
+
+        def read_voltages(
+            self, physical_channel: str, number_of_samples: int
+        ) -> list[float]:
+            self.reads.append((physical_channel, number_of_samples))
+            return [2.0, 2.01, 4.8, 1.99, 2.02]
+
+    backend = BurstBackend()
+    daq = NidaqmxDataAcquisition(backend, config())
+
+    values = daq.read_voltages("line_pressure", 5)
+
+    assert values == [2.0, 2.01, 4.8, 1.99, 2.02]
+    assert backend.reads == [("Dev1/ai0", 5)]
+
+
 def test_output_requires_exact_confirmation_and_range() -> None:
     backend = FakeBackend()
     daq = NidaqmxDataAcquisition(backend, config())
@@ -151,3 +170,46 @@ def test_physical_backend_reuses_one_persistent_ao_task(
     assert isinstance(task, FakeTask)
     assert task.writes == [1.0, 2.0]
     assert task.closed
+
+
+def test_physical_backend_uses_finite_timed_burst_for_multiple_samples(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timing_calls: list[tuple[float, object, int]] = []
+
+    class FakeTask:
+        def __init__(self) -> None:
+            self.ai_channels = SimpleNamespace(
+                add_ai_voltage_chan=lambda channel, terminal_config: None
+            )
+            self.timing = SimpleNamespace(
+                cfg_samp_clk_timing=lambda rate, sample_mode, samps_per_chan: (
+                    timing_calls.append((rate, sample_mode, samps_per_chan))
+                )
+            )
+
+        def __enter__(self) -> "FakeTask":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def read(self, *, number_of_samples_per_channel: int, timeout: float) -> list[float]:
+            assert number_of_samples_per_channel == 20
+            assert timeout == pytest.approx(0.1)
+            return [2.0] * number_of_samples_per_channel
+
+    def import_module(name: str) -> object:
+        if name == "nidaqmx.constants":
+            return SimpleNamespace(
+                TerminalConfiguration=SimpleNamespace(DEFAULT="default"),
+                AcquisitionType=SimpleNamespace(FINITE="finite"),
+            )
+        return SimpleNamespace(Task=FakeTask)
+
+    monkeypatch.setattr(ni.importlib, "import_module", import_module)
+
+    values = NidaqmxBackend().read_voltages("Dev1/ai0", 20)
+
+    assert values == [2.0] * 20
+    assert timing_calls == [(1000.0, "finite", 20)]

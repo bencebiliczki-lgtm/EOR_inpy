@@ -28,6 +28,8 @@ class MeasurementSnapshot:
     differential_pressure_bar: float | None
     valve_percent: float
     quality: DataQuality = DataQuality.GOOD
+    raw_line_pressure_bar: float | None = None
+    raw_differential_pressure_bar: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

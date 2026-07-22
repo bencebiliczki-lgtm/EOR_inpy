@@ -30,7 +30,11 @@ from PySide6.QtWidgets import (  # noqa: E402
     QWidget,
 )
 
-from eor_control.application import ApplicationState, RunMode  # noqa: E402
+from eor_control.application import (  # noqa: E402
+    ApplicationState,
+    DeviceControlService,
+    RunMode,
+)
 from eor_control.device_testing import (  # noqa: E402
     DeviceTestReport,
     FunctionalDeviceTestSession,
@@ -47,6 +51,10 @@ from eor_control.hardware import (  # noqa: E402
 )
 from eor_control.projects import ProjectRepository  # noqa: E402
 from eor_control.pump_control import PumpRole  # noqa: E402
+from eor_control.simulators import (  # noqa: E402
+    SimulatedDataAcquisition,
+    SimulatedPump,
+)
 from eor_control.ui import (  # noqa: E402
     ADD_STAGE_ACTION_DATA,
     DARK_STYLESHEET,
@@ -1121,6 +1129,83 @@ def test_developer_can_switch_back_to_non_persistent_simulation(tmp_path: Path) 
     assert "nincs mérési adatmentés" in window._current_mode_message
     assert "szimuláció" in window.windowTitle().lower()
     assert not (tmp_path / "projects").exists()
+    assert settings.value("application/last_run_mode") == RunMode.SIMULATION.value
+    window.close()
+
+
+def test_last_hardware_mode_opens_safe_activation_flow_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    settings = QSettings(str(tmp_path / "hardware.ini"), QSettings.Format.IniFormat)
+    settings.setValue("application/last_run_mode", RunMode.HARDWARE.value)
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3", settings=settings
+    )
+    window._project_selector_required = False
+    opened: list[bool] = []
+    monkeypatch.setattr(window, "_open_device_settings", lambda: opened.append(True))
+
+    window._restore_startup_mode()
+    window._restore_startup_mode()
+
+    assert opened == [True]
+    assert window._run_mode is RunMode.SIMULATION
+    window.close()
+
+
+def test_invalid_last_run_mode_falls_back_to_simulation(tmp_path: Path) -> None:
+    application()
+    settings = QSettings(str(tmp_path / "invalid.ini"), QSettings.Format.IniFormat)
+    settings.setValue("application/last_run_mode", "unknown")
+
+    window = build_simulated_dashboard(tmp_path / "raw.csv", settings=settings)
+
+    assert window._preferred_run_mode is RunMode.SIMULATION
+    window.close()
+
+
+def test_hardware_disconnect_releases_and_reconnects_without_settings_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+    )
+    jacket = SimulatedPump()
+    injection = SimulatedPump()
+    daq = SimulatedDataAcquisition()
+    devices = DeviceControlService(
+        jacket_pump=jacket,
+        injection_pump=injection,
+        daq=daq,
+        mode=RunMode.HARDWARE,
+    )
+    devices.authorize_hardware(DeviceControlService.HARDWARE_CONFIRMATION)
+    devices.connect()
+    window._devices = devices
+    window._run_mode = RunMode.HARDWARE
+
+    window._disconnect_devices()
+
+    assert not jacket.connected
+    assert not injection.connected
+    assert not devices.status.hardware_authorized
+    monkeypatch.setattr(
+        QInputDialog,
+        "getText",
+        lambda *_args, **_kwargs: (
+            DeviceControlService.HARDWARE_CONFIRMATION,
+            True,
+        ),
+    )
+
+    window._connect_devices()
+
+    assert jacket.connected
+    assert injection.connected
+    assert devices.status.hardware_authorized
+    window._disconnect_devices()
     window.close()
 
 

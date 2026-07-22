@@ -14,6 +14,7 @@ from time import sleep
 
 from eor_control.domain import MeasurementRecord
 from eor_control.storage import CsvMeasurementWriter
+from eor_control.timezone import as_hungarian_time
 
 
 def safe_filename(value: str) -> str:
@@ -100,7 +101,10 @@ def read_measurement_table(path: Path) -> MeasurementTable:
             for row in rows
         ]
         header = tuple(rows[0])
-    if header == CsvMeasurementWriter.LEGACY_HEADER:
+    if header in (
+        CsvMeasurementWriter.LEGACY_HEADER,
+        CsvMeasurementWriter.V2_HEADER,
+    ):
         legacy_index = {name: index for index, name in enumerate(header)}
         converted_rows: list[list[str]] = [list(CsvMeasurementWriter.HEADER)]
         for row in rows[1:]:
@@ -109,8 +113,14 @@ def read_measurement_table(path: Path) -> MeasurementTable:
                     (
                         ""
                         if name == "jacket_net_volume_ml"
+                        and name not in legacy_index
                         else row[legacy_index["injected_volume_ml"]]
                         if name == "injection_net_volume_ml"
+                        and name not in legacy_index
+                        else row[legacy_index["line_pressure_bar"]]
+                        if name == "raw_line_pressure_bar"
+                        else row[legacy_index["differential_pressure_bar"]]
+                        if name == "raw_differential_pressure_bar"
                         else row[legacy_index[name]]
                     )
                     for name in CsvMeasurementWriter.HEADER
@@ -485,8 +495,11 @@ class ProjectMeasurementWriter:
         if project_id <= 0:
             raise ValueError("érvénytelen projektazonosító")
         timestamp = created_at or datetime.now(UTC)
-        folder = f"{timestamp:%Y-%m-%d}_{project_id:06d}_{safe_filename(project_name)}"
-        relative_folder = Path("projects") / str(timestamp.year) / folder
+        local_timestamp = as_hungarian_time(timestamp)
+        folder = (
+            f"{local_timestamp:%Y-%m-%d}_{project_id:06d}_{safe_filename(project_name)}"
+        )
+        relative_folder = Path("projects") / str(local_timestamp.year) / folder
         project_file_prefix = safe_filename(project_name)
         relative_path = relative_folder / (
             f"{project_file_prefix}_{safe_filename(stage_name)}_live_raw.csv"
@@ -553,7 +566,7 @@ class ProjectMeasurementWriter:
             os.replace(temporary, destination)
             if self._nas_sync is not None:
                 self._nas_sync.enqueue(
-                    destination, Path(str(created_at.year)) / relative_folder.name / filename
+                    destination, Path(*relative_folder.parts[1:]) / filename
                 )
 
     def write(self, record: MeasurementRecord) -> None:

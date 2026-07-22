@@ -33,7 +33,7 @@ class CsvMeasurementWriter:
         "quality",
         "safety_reasons",
     )
-    HEADER = (
+    V2_HEADER = (
         "recorded_at_utc",
         "monotonic_seconds",
         "jacket_pressure_bar",
@@ -45,6 +45,26 @@ class CsvMeasurementWriter:
         "injection_remaining_volume_ml",
         "injection_net_volume_ml",
         "line_pressure_bar",
+        "differential_pressure_bar",
+        "valve_percent",
+        "active_stage",
+        "quality",
+        "safety_reasons",
+    )
+    HEADER = (
+        "recorded_at_utc",
+        "monotonic_seconds",
+        "jacket_pressure_bar",
+        "jacket_flow_ml_per_hour",
+        "jacket_remaining_volume_ml",
+        "jacket_net_volume_ml",
+        "injection_pressure_bar",
+        "injection_flow_ml_per_hour",
+        "injection_remaining_volume_ml",
+        "injection_net_volume_ml",
+        "raw_line_pressure_bar",
+        "line_pressure_bar",
+        "raw_differential_pressure_bar",
         "differential_pressure_bar",
         "valve_percent",
         "active_stage",
@@ -87,8 +107,9 @@ class CsvMeasurementWriter:
                 for row in rows
             ]
             header = tuple(rows[0])
-        if header != cls.LEGACY_HEADER:
+        if header not in (cls.LEGACY_HEADER, cls.V2_HEADER):
             raise ValueError("a meglévő mérési CSV fejléce nem támogatott")
+        backup_version = "v1" if header == cls.LEGACY_HEADER else "v2"
         legacy_index = {name: index for index, name in enumerate(header)}
         converted = [list(cls.HEADER)]
         for row in rows[1:]:
@@ -99,14 +120,22 @@ class CsvMeasurementWriter:
                     (
                         ""
                         if name == "jacket_net_volume_ml"
+                        and name not in legacy_index
                         else row[legacy_index["injected_volume_ml"]]
                         if name == "injection_net_volume_ml"
+                        and name not in legacy_index
+                        else row[legacy_index["line_pressure_bar"]]
+                        if name == "raw_line_pressure_bar"
+                        else row[legacy_index["differential_pressure_bar"]]
+                        if name == "raw_differential_pressure_bar"
                         else row[legacy_index[name]]
                     )
                     for name in cls.HEADER
                 ]
             )
-        backup = path.with_name(f"{path.stem}_v1_backup{path.suffix}")
+        backup = path.with_name(
+            f"{path.stem}_{backup_version}_backup{path.suffix}"
+        )
         if not backup.exists():
             shutil.copy2(path, backup)
         temporary = path.with_suffix(f"{path.suffix}.upgrade.tmp")
@@ -131,7 +160,9 @@ class CsvMeasurementWriter:
                 self._hu(snapshot.injection_pump.flow_ml_per_hour),
                 self._hu(snapshot.injection_pump.remaining_volume_ml),
                 self._hu(record.injection_net_volume_ml),
+                self._hu(snapshot.raw_line_pressure_bar),
                 self._hu(snapshot.line_pressure_bar),
+                self._hu(snapshot.raw_differential_pressure_bar),
                 self._hu(snapshot.differential_pressure_bar),
                 self._hu(snapshot.valve_percent),
                 record.active_stage,

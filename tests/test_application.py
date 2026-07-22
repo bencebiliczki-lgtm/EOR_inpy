@@ -93,6 +93,14 @@ class StopFailingPump(SimulatedPump):
         raise ConnectionError("simulated STOP failure")
 
 
+class DisconnectFailingPump(SimulatedPump):
+    disconnect_attempted: bool = False
+
+    def disconnect(self) -> None:
+        self.disconnect_attempted = True
+        raise ConnectionError("simulated disconnect failure")
+
+
 def test_connection_failure_enters_fault_and_requests_safe_state() -> None:
     jacket = FailingPump()
     injection = SimulatedPump()
@@ -125,3 +133,20 @@ def test_safe_state_attempts_every_device_when_first_stop_fails() -> None:
     assert "jacket pump STOP failed" in control.status.fault_reason
     assert injection.stop_requested
     assert daq.safe_state_requested
+
+
+def test_disconnect_attempts_both_pumps_when_first_close_fails() -> None:
+    jacket = DisconnectFailingPump()
+    injection = SimulatedPump()
+    daq = SimulatedDataAcquisition()
+    control = DeviceControlService(
+        jacket_pump=jacket, injection_pump=injection, daq=daq
+    )
+    control.connect()
+
+    with pytest.raises(RuntimeError, match="jacket pump disconnect failed"):
+        control.disconnect()
+
+    assert jacket.disconnect_attempted
+    assert not injection.connected
+    assert control.status.state is ApplicationState.FAULT

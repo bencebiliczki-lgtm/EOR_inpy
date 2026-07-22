@@ -77,6 +77,10 @@ class DeviceControlService:
         if self._state is not ApplicationState.READY:
             raise RuntimeError("measurement can only start from ready state")
         self._require_hardware_authorization()
+        for pump in (self._jacket_pump, self._injection_pump):
+            acknowledge = getattr(pump, "acknowledge_stop_latch", None)
+            if callable(acknowledge):
+                acknowledge()
         self._state = ApplicationState.RUNNING
 
     def stop(self) -> None:
@@ -97,16 +101,32 @@ class DeviceControlService:
             raise RuntimeError("there is no fault to acknowledge")
         self._fault_reason = None
         self._state = ApplicationState.IDLE
+        for pump in (self._jacket_pump, self._injection_pump):
+            acknowledge = getattr(pump, "acknowledge_stop_latch", None)
+            if callable(acknowledge):
+                acknowledge()
         if self._mode is RunMode.HARDWARE:
             self._hardware_authorized = False
 
     def disconnect(self) -> None:
+        errors: list[str] = []
         if self._state is ApplicationState.RUNNING:
-            self._request_safe_state()
-        self._jacket_pump.disconnect()
-        self._injection_pump.disconnect()
-        self._state = ApplicationState.IDLE
+            errors.extend(self._request_safe_state())
+        for label, pump in (
+            ("jacket pump", self._jacket_pump),
+            ("injection pump", self._injection_pump),
+        ):
+            try:
+                pump.disconnect()
+            except Exception as error:
+                errors.append(f"{label} disconnect failed: {error}")
         self._hardware_authorized = False
+        if errors:
+            self._fault_reason = "; ".join(errors)
+            self._state = ApplicationState.FAULT
+            raise RuntimeError(self._fault_reason)
+        self._fault_reason = None
+        self._state = ApplicationState.IDLE
 
     def _require_hardware_authorization(self) -> None:
         if self._mode is RunMode.HARDWARE and not self._hardware_authorized:

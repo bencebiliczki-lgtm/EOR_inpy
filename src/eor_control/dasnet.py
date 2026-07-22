@@ -152,6 +152,17 @@ class DasnetClient:
         with self._command_lock:
             return self._command_locked(message)
 
+    def open(self) -> None:
+        """Reopen a previously closed pyserial connection when necessary."""
+        with self._command_lock:
+            is_open = getattr(self._connection, "is_open", None)
+            if is_open is False:
+                open_connection = getattr(self._connection, "open", None)
+                if not callable(open_connection):
+                    raise ConnectionError("serial connection cannot be reopened")
+                open_connection()
+            self._network_started = False
+
     def _command_locked(self, message: str) -> DasnetResponse:
         frame = encode_command(self._unit_id, message, source_id=self._source_id)
         last_error: DasnetError | None = None
@@ -204,7 +215,9 @@ class DasnetClient:
         return bytes(response)
 
     def close(self) -> None:
-        self._connection.close()
+        with self._command_lock:
+            self._connection.close()
+            self._network_started = False
 
     def _log(self, direction: str, message: str, *, level: str = "INFO") -> None:
         if self._diagnostics is not None:

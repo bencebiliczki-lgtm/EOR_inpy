@@ -43,6 +43,11 @@ class SimulatedDataAcquisition:
         except KeyError as error:
             raise ConnectionError(f"no simulated input for {channel}") from error
 
+    def read_voltages(self, channel: str, number_of_samples: int) -> list[float]:
+        if number_of_samples < 1:
+            raise ValueError("simulated sample count must be positive")
+        return [self.read_voltage(channel)] * number_of_samples
+
     def write_voltage(self, channel: str, voltage: float) -> None:
         if not 1.0 <= voltage <= 5.0:
             raise ValueError("simulated analog output must be between 1 V and 5 V")

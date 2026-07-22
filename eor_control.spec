@@ -1,9 +1,10 @@
 # PyInstaller onefile build for the offline Windows measurement workstation.
 from pathlib import Path
-from PyInstaller.utils.hooks import copy_metadata
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 root = Path(SPECPATH)
 package_metadata = copy_metadata("nidaqmx", recursive=True)
+timezone_data = collect_data_files("tzdata")
 
 a = Analysis(
     [str(root / "src" / "eor_control" / "__main__.py")],
@@ -12,7 +13,7 @@ a = Analysis(
     datas=[
         (str(root / "img"), "img"),
         (str(root / "docs" / "drivers_readme.txt"), "."),
-    ] + package_metadata,
+    ] + package_metadata + timezone_data,
     hiddenimports=[
         "openpyxl",
         "nidaqmx",
@@ -22,6 +23,7 @@ a = Analysis(
         "serial.tools.list_ports",
         "serial.tools.list_ports_windows",
         "pyqtgraph",
+        "tzdata",
     ],
     hookspath=[],
     hooksconfig={},

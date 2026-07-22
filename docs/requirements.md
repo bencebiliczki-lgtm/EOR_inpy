@@ -47,6 +47,10 @@ A mintavételi gyakoriság 1 másodperc és 1 óra között konfigurálható. A 
 
 ## Megjelenítés
 
+- Az embernek szánt időpontok a magyar `Europe/Budapest` időzónában jelenjenek
+  meg, a téli/nyári időszámítást automatikusan követve. A nyers mérési és
+  projektadatok időbélyege továbbra is UTC legyen.
+
 - A szerkeszthető szövegmezők háttere legyen jól olvasható minden témában. A
   dashboard tetején mindig látható, szöveggel is azonosítható üzemmód- és
   riasztássáv legyen; a szín nem lehet az egyetlen állapothordozó. Háttérben vagy
@@ -129,6 +133,9 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 ## Adatmentés
 
 - A nyers mérési adatok folyamatos, összeomlástűrő helyi mentése kötelező.
+- Az NI nyomásbemeneteknél a ciklusonkénti mintaburst mediánját és az abból képzett
+  EMA-szűrt nyomást külön kell megőrizni. A PID és a kijelzés a szűrt értéket, a
+  kemény nyomás-interlock a szűretlen értéket használja.
 - Nyers mérési adat kizárólag explicit, megerősített hardvermódban menthető. A
   szimuláció nem hozhat létre vagy módosíthat CSV-t, projekt-pillanatképet vagy
   NAS-szinkronfeladatot, még akkor sem, ha a runtime perzisztálást kérne.

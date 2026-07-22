@@ -68,6 +68,8 @@ class SafetyMonitor:
         optional_measurements = (
             snapshot.line_pressure_bar,
             snapshot.differential_pressure_bar,
+            snapshot.raw_line_pressure_bar,
+            snapshot.raw_differential_pressure_bar,
         )
         if not all(isfinite(value) for value in measured_values) or not all(
             value is None or isfinite(value) for value in optional_measurements
@@ -90,15 +92,25 @@ class SafetyMonitor:
             reasons.append("jacket pressure limit exceeded")
         if snapshot.injection_pump.pressure_bar > self._limits.max_injection_pressure_bar:
             reasons.append("injection pressure limit exceeded")
+        safety_differential_pressure = (
+            snapshot.raw_differential_pressure_bar
+            if snapshot.raw_differential_pressure_bar is not None
+            else snapshot.differential_pressure_bar
+        )
         if (
-            snapshot.differential_pressure_bar is not None
-            and snapshot.differential_pressure_bar
+            safety_differential_pressure is not None
+            and safety_differential_pressure
             >= self._limits.max_differential_pressure_bar
         ):
             reasons.append("differential pressure limit reached")
+        safety_line_pressure = (
+            snapshot.raw_line_pressure_bar
+            if snapshot.raw_line_pressure_bar is not None
+            else snapshot.line_pressure_bar
+        )
         if (
-            snapshot.line_pressure_bar is not None
-            and snapshot.line_pressure_bar > self._limits.max_line_pressure_bar
+            safety_line_pressure is not None
+            and safety_line_pressure > self._limits.max_line_pressure_bar
         ):
             reasons.append("line pressure limit exceeded")
         margin = snapshot.jacket_pump.pressure_bar - snapshot.injection_pump.pressure_bar

@@ -16,6 +16,8 @@ def record(stage: str = "water") -> MeasurementRecord:
             line_pressure_bar=101.0,
             differential_pressure_bar=2.5,
             valve_percent=45.0,
+            raw_line_pressure_bar=102.0,
+            raw_differential_pressure_bar=2.75,
         ),
         injected_volume_ml=10.0,
         active_stage=stage,
@@ -40,6 +42,12 @@ def test_csv_writer_persists_header_and_measurement(tmp_path: Path) -> None:
     assert rows[1][0] == "2026-07-13T12:30:00+00:00"
     assert rows[1][CsvMeasurementWriter.HEADER.index("jacket_net_volume_ml")] == "-2,5"
     assert rows[1][CsvMeasurementWriter.HEADER.index("injection_net_volume_ml")] == "10,0"
+    assert rows[1][CsvMeasurementWriter.HEADER.index("raw_line_pressure_bar")] == (
+        "102,0"
+    )
+    assert rows[1][
+        CsvMeasurementWriter.HEADER.index("raw_differential_pressure_bar")
+    ] == "2,75"
     stage_index = CsvMeasurementWriter.HEADER.index("active_stage")
     assert rows[1][stage_index:] == ["water", "good", "example fault"]
 
@@ -98,3 +106,25 @@ def test_csv_writer_upgrades_legacy_file_and_preserves_backup(tmp_path: Path) ->
         "-2,5"
     )
     assert (tmp_path / "legacy_raw_v1_backup.csv").is_file()
+
+
+def test_csv_writer_upgrades_prefilter_file_and_copies_values_to_raw_columns(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "prefilter.csv"
+    values = {name: "1,0" for name in CsvMeasurementWriter.V2_HEADER}
+    values["line_pressure_bar"] = "101,0"
+    values["differential_pressure_bar"] = "2,5"
+    with path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.writer(file, delimiter=";", lineterminator="\n")
+        writer.writerow(CsvMeasurementWriter.V2_HEADER)
+        writer.writerow([values[name] for name in CsvMeasurementWriter.V2_HEADER])
+
+    with CsvMeasurementWriter(path):
+        pass
+
+    rows = read_rows(path)
+    header = CsvMeasurementWriter.HEADER
+    assert rows[1][header.index("raw_line_pressure_bar")] == "101,0"
+    assert rows[1][header.index("raw_differential_pressure_bar")] == "2,5"
+    assert (tmp_path / "prefilter_v2_backup.csv").is_file()

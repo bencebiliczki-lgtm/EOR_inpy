@@ -36,6 +36,8 @@ def test_logger_filters_categories_and_appends_file(tmp_path: Path) -> None:
     assert report.endswith("</html>\n")
     assert 'id="search"' in report
     assert 'id="level"' in report
+    assert "Europe/Budapest megjelenítés" in report
+    assert "Magyar idő" in report
 
 
 def test_events_can_be_read_incrementally_and_memory_cleared(tmp_path: Path) -> None:

@@ -79,6 +79,20 @@ def test_project_writer_creates_portable_json_snapshots(tmp_path: Path) -> None:
     ) == {"interval": 5}
 
 
+def test_project_folder_uses_hungarian_calendar_date(tmp_path: Path) -> None:
+    writer = ProjectMeasurementWriter(tmp_path)
+
+    source = writer.select_project_with_metadata(
+        9,
+        "Éjfél projekt",
+        created_at=datetime(2025, 12, 31, 23, 30, tzinfo=UTC),
+    )
+    writer.close()
+
+    assert source.parent.parent.name == "2026"
+    assert source.parent.name.startswith("2026-01-01_000009_")
+
+
 def test_user_csv_export_uses_semicolon_and_decimal_comma(tmp_path: Path) -> None:
     writer = ProjectMeasurementWriter(tmp_path)
     source = writer.select_project(1, "Export", stage_name="víz")
@@ -127,6 +141,8 @@ def test_reader_keeps_legacy_comma_delimited_raw_files_compatible(tmp_path: Path
     assert "inlet_pressure_bar" not in table.header
     assert table.column("jacket_net_volume_ml") == ("",)
     assert table.column("injection_net_volume_ml") == ("1.5",)
+    assert table.column("raw_line_pressure_bar") == ("1.5",)
+    assert table.column("raw_differential_pressure_bar") == ("1.5",)
 
 
 def test_measurement_table_filters_stages_and_keeps_repeated_segments() -> None:
