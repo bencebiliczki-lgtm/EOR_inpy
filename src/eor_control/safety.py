@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from math import isfinite
 
-from eor_control.domain import DataQuality, MeasurementSnapshot
+from eor_control.domain import DataQuality, MeasurementSnapshot, PumpStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,12 +62,16 @@ class SafetyMonitor:
             snapshot.injection_pump.pressure_bar,
             snapshot.injection_pump.flow_ml_per_hour,
             snapshot.injection_pump.remaining_volume_ml,
-            snapshot.line_pressure_bar,
-            snapshot.differential_pressure_bar,
             snapshot.valve_percent,
             snapshot.monotonic_seconds,
         )
-        if not all(isfinite(value) for value in measured_values):
+        optional_measurements = (
+            snapshot.line_pressure_bar,
+            snapshot.differential_pressure_bar,
+        )
+        if not all(isfinite(value) for value in measured_values) or not all(
+            value is None or isfinite(value) for value in optional_measurements
+        ):
             reasons.append("non-finite measurement value")
         if emergency_stop:
             reasons.append("manual emergency stop")
@@ -86,9 +90,16 @@ class SafetyMonitor:
             reasons.append("jacket pressure limit exceeded")
         if snapshot.injection_pump.pressure_bar > self._limits.max_injection_pressure_bar:
             reasons.append("injection pressure limit exceeded")
-        if snapshot.differential_pressure_bar >= self._limits.max_differential_pressure_bar:
+        if (
+            snapshot.differential_pressure_bar is not None
+            and snapshot.differential_pressure_bar
+            >= self._limits.max_differential_pressure_bar
+        ):
             reasons.append("differential pressure limit reached")
-        if snapshot.line_pressure_bar > self._limits.max_line_pressure_bar:
+        if (
+            snapshot.line_pressure_bar is not None
+            and snapshot.line_pressure_bar > self._limits.max_line_pressure_bar
+        ):
             reasons.append("line pressure limit exceeded")
         margin = snapshot.jacket_pump.pressure_bar - snapshot.injection_pump.pressure_bar
         if margin < self._limits.minimum_jacket_margin_bar:
@@ -118,3 +129,37 @@ class SafetyMonitor:
 
         self._latched_reasons = tuple(dict.fromkeys((*previous_reasons, *self._latched_reasons)))
         return SafetyDecision(False, self._latched_reasons, True)
+
+
+class ManualSafetyMonitor:
+    """Safety rules for one explicitly selected manual hardware operation."""
+
+    @staticmethod
+    def evaluate_pump(
+        status: PumpStatus, *, maximum_pressure_bar: float
+    ) -> SafetyDecision:
+        reasons: list[str] = []
+        values = (
+            status.pressure_bar,
+            status.flow_ml_per_hour,
+            status.remaining_volume_ml,
+            maximum_pressure_bar,
+        )
+        if not status.connected:
+            reasons.append("selected pump is disconnected")
+        if not all(isfinite(value) for value in values):
+            reasons.append("selected pump returned a non-finite value")
+        elif maximum_pressure_bar <= 0.0:
+            reasons.append("manual pump pressure limit is invalid")
+        elif status.pressure_bar > maximum_pressure_bar:
+            reasons.append("selected pump pressure limit exceeded")
+        return SafetyDecision(not reasons, tuple(reasons), bool(reasons))
+
+    @staticmethod
+    def evaluate_valve(output_percent: float) -> SafetyDecision:
+        reasons: list[str] = []
+        if not isfinite(output_percent):
+            reasons.append("manual valve output is not finite")
+        elif not 0.0 <= output_percent <= 100.0:
+            reasons.append("manual valve output is outside 0-100 percent")
+        return SafetyDecision(not reasons, tuple(reasons), bool(reasons))

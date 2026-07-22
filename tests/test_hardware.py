@@ -5,6 +5,7 @@ import pytest
 from eor_control import hardware
 from eor_control.hardware import (
     ConnectionTestRegistry,
+    ConnectionTestResult,
     DeviceConnectionResult,
     HardwareConfiguration,
     HardwareTestDevice,
@@ -40,6 +41,25 @@ def test_hardware_configuration_builds_adapter_configs() -> None:
     assert config.ni_config().line_pressure_channel == "Dev1/ai0"
     assert config.ni_terminal_configuration == "DEFAULT"
     assert config.supervised_test_minutes == 60
+
+
+def test_line_pressure_device_can_be_omitted_from_hardware_profile() -> None:
+    values = configuration().to_settings()
+    values["line_pressure_enabled"] = False
+    values["line_pressure_channel"] = ""
+
+    config = HardwareConfiguration(**values)  # type: ignore[arg-type]
+
+    assert config.measurement_ready
+    assert config.ni_config().line_pressure_channel is None
+    assert HardwareTestDevice.LINE_PRESSURE not in config.enabled_test_devices()
+    successful = ConnectionTestResult(
+        tuple(
+            DeviceConnectionResult(device, True, device.value)
+            for device in config.enabled_test_devices()
+        )
+    )
+    assert successful.successful_for(config.enabled_test_devices())
 
 
 def test_serial_port_display_name_does_not_repeat_embedded_com_port() -> None:

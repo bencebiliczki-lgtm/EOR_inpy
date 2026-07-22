@@ -256,6 +256,8 @@ class ValveController:
             PressureSource.LINE_SENSOR: snapshot.line_pressure_bar,
         }
         measurement = measurements[source]
+        if measurement is None:
+            raise ValueError("the selected pressure source is not configured")
         transition_reason = None
         if self._last_mode is ControlMode.MANUAL:
             self._pid.prepare_bumpless(

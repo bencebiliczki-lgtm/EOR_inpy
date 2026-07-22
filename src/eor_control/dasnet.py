@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from threading import Lock
 from typing import Protocol
 
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
@@ -129,20 +130,29 @@ class DasnetClient:
         unit_id: int,
         source_id: int = 0,
         attempts: int = 3,
+        response_reads_per_attempt: int = 4,
         diagnostics: DiagnosticLogger | None = None,
         diagnostic_category: DiagnosticCategory = DiagnosticCategory.SYSTEM,
     ) -> None:
         if attempts < 1:
             raise ValueError("DASNET attempts must be positive")
+        if response_reads_per_attempt < 1:
+            raise ValueError("DASNET response reads per attempt must be positive")
         self._connection = connection
         self._unit_id = unit_id
         self._source_id = source_id
         self._attempts = attempts
+        self._response_reads_per_attempt = response_reads_per_attempt
         self._network_started = False
+        self._command_lock = Lock()
         self._diagnostics = diagnostics
         self._diagnostic_category = diagnostic_category
 
     def command(self, message: str) -> DasnetResponse:
+        with self._command_lock:
+            return self._command_locked(message)
+
+    def _command_locked(self, message: str) -> DasnetResponse:
         frame = encode_command(self._unit_id, message, source_id=self._source_id)
         last_error: DasnetError | None = None
         for _ in range(self._attempts):
@@ -153,7 +163,7 @@ class DasnetClient:
                 self._network_started = True
             self._log("TX", frame.decode("ascii"))
             self._connection.write(frame)
-            response_frame = self._connection.read_until(b"\r", 512)
+            response_frame = self._read_response_frame()
             if not response_frame:
                 self._log("TIMEOUT", "no response", level="ERROR")
                 last_error = DasnetTimeoutError("DASNET pump did not respond")
@@ -178,6 +188,20 @@ class DasnetClient:
         if last_error is None:
             raise DasnetTimeoutError("DASNET command failed without a response")
         raise last_error
+
+    def _read_response_frame(self) -> bytes:
+        """Collect a possibly fragmented response across bounded serial reads."""
+        response = bytearray()
+        for _ in range(self._response_reads_per_attempt):
+            remaining = 512 - len(response)
+            if remaining <= 0:
+                break
+            chunk = self._connection.read_until(b"\r", remaining)
+            if chunk:
+                response.extend(chunk)
+                if response.endswith(b"\r"):
+                    break
+        return bytes(response)
 
     def close(self) -> None:
         self._connection.close()

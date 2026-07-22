@@ -75,9 +75,9 @@ class NidaqmxBackend:
 
 @dataclass(frozen=True, slots=True)
 class NidaqConfig:
-    line_pressure_channel: str
-    differential_pressure_channel: str
-    valve_output_channel: str
+    line_pressure_channel: str | None
+    differential_pressure_channel: str | None
+    valve_output_channel: str | None
     safe_output_voltage: float
     output_min_voltage: float = 1.0
     output_max_voltage: float = 5.0
@@ -88,9 +88,12 @@ class NidaqConfig:
             self.differential_pressure_channel,
             self.valve_output_channel,
         )
-        if any(not channel.strip() for channel in channels):
-            raise ValueError("NI physical channel names must not be empty")
-        if len(set(channels)) != len(channels):
+        configured_channels = tuple(
+            channel.strip() for channel in channels if channel is not None
+        )
+        if any(not channel for channel in configured_channels):
+            raise ValueError("configured NI physical channel names must not be empty")
+        if len(set(configured_channels)) != len(configured_channels):
             raise ValueError("NI input and output channels must be distinct")
         voltages = (
             self.safe_output_voltage,
@@ -119,8 +122,12 @@ class NidaqmxDataAcquisition:
         self._output_authorized = False
         self._diagnostics = diagnostics
         self._channels = {
-            "line_pressure": config.line_pressure_channel,
-            "differential_pressure": config.differential_pressure_channel,
+            key: channel
+            for key, channel in (
+                ("line_pressure", config.line_pressure_channel),
+                ("differential_pressure", config.differential_pressure_channel),
+            )
+            if channel is not None
         }
 
     def authorize_output(self, confirmation: str) -> None:
@@ -149,6 +156,8 @@ class NidaqmxDataAcquisition:
             raise KeyError(f"unknown NI logical output channel: {channel}")
         if not self._output_authorized:
             raise PermissionError("NI physical output requires explicit operator confirmation")
+        if self._config.valve_output_channel is None:
+            raise ConnectionError("NI valve output is not configured")
         self._validate_output(voltage)
         self._backend.write_voltage(self._config.valve_output_channel, voltage)
         self._log(
@@ -160,6 +169,8 @@ class NidaqmxDataAcquisition:
     def set_safe_state(self) -> None:
         try:
             if self._output_authorized:
+                if self._config.valve_output_channel is None:
+                    return
                 self._backend.write_voltage(
                     self._config.valve_output_channel, self._config.safe_output_voltage
                 )

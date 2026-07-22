@@ -32,7 +32,6 @@ Ez a repository a Miskolci Egyetem AFKI EOR mérőrendszerének Windows 10 alatt
 ## Biztonsági szabályok
 
 - A biztonsági felügyelet minden esetben elsőbbséget élvez a PID-del és a kezelői paranccsal szemben.
-- A köpenypumpa nyomása üzemi mérés közben legalább 20 barral legyen magasabb a besajtolási nyomásnál.
 - Kapcsolatvesztés, érvénytelen szenzoradat vagy határérték-túllépés biztonságos állapotot váltson ki.
 - Valódi hardverre író műveletet csak explicit hardveres módban és külön kezelői megerősítéssel szabad engedélyezni.
 - Teszt és CI nem küldhet valódi pumpa-, szelep- vagy NI kimeneti parancsot.

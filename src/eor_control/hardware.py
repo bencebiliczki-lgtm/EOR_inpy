@@ -1,5 +1,6 @@
 import importlib
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from hashlib import sha256
@@ -172,26 +173,41 @@ class HardwareConfiguration:
     cable_disconnect_test_completed: bool = False
     emergency_stop_test_completed: bool = False
     supervised_test_completed: bool = False
+    jacket_pump_enabled: bool = True
+    injection_pump_enabled: bool = True
+    line_pressure_enabled: bool = True
+    differential_pressure_enabled: bool = True
+    valve_output_enabled: bool = True
 
     def __post_init__(self) -> None:
-        if self.jacket_port.strip().upper() == self.injection_port.strip().upper():
+        if (
+            self.jacket_pump_enabled
+            and self.injection_pump_enabled
+            and self.jacket_port.strip().upper() == self.injection_port.strip().upper()
+        ):
             raise ValueError("the two ISCO pumps must use different COM ports")
-        IscoSerialConfig(
-            self.jacket_port,
-            self.jacket_unit_id,
-            self.jacket_channel,
-            self.baud_rate,
-        )
-        IscoSerialConfig(
-            self.injection_port,
-            self.injection_unit_id,
-            self.injection_channel,
-            self.baud_rate,
-        )
+        if self.jacket_pump_enabled:
+            IscoSerialConfig(
+                self.jacket_port,
+                self.jacket_unit_id,
+                self.jacket_channel,
+                self.baud_rate,
+            )
+        if self.injection_pump_enabled:
+            IscoSerialConfig(
+                self.injection_port,
+                self.injection_unit_id,
+                self.injection_channel,
+                self.baud_rate,
+            )
         NidaqConfig(
-            self.line_pressure_channel,
-            self.differential_pressure_channel,
-            self.valve_output_channel,
+            self.line_pressure_channel if self.line_pressure_enabled else None,
+            (
+                self.differential_pressure_channel
+                if self.differential_pressure_enabled
+                else None
+            ),
+            self.valve_output_channel if self.valve_output_enabled else None,
             self.safe_output_voltage,
         )
         if self.ni_terminal_configuration not in NidaqmxBackend.TERMINAL_CONFIGURATIONS:
@@ -208,6 +224,8 @@ class HardwareConfiguration:
             raise ValueError("valve endpoint voltages must differ")
 
     def jacket_config(self) -> IscoSerialConfig:
+        if not self.jacket_pump_enabled:
+            raise ValueError("jacket pump is not enabled")
         return IscoSerialConfig(
             self.jacket_port,
             self.jacket_unit_id,
@@ -216,6 +234,8 @@ class HardwareConfiguration:
         )
 
     def injection_config(self) -> IscoSerialConfig:
+        if not self.injection_pump_enabled:
+            raise ValueError("injection pump is not enabled")
         return IscoSerialConfig(
             self.injection_port,
             self.injection_unit_id,
@@ -225,10 +245,33 @@ class HardwareConfiguration:
 
     def ni_config(self) -> NidaqConfig:
         return NidaqConfig(
-            self.line_pressure_channel,
-            self.differential_pressure_channel,
-            self.valve_output_channel,
+            self.line_pressure_channel if self.line_pressure_enabled else None,
+            (
+                self.differential_pressure_channel
+                if self.differential_pressure_enabled
+                else None
+            ),
+            self.valve_output_channel if self.valve_output_enabled else None,
             self.safe_output_voltage,
+        )
+
+    def enabled_test_devices(self) -> tuple["HardwareTestDevice", ...]:
+        enabled = {
+            HardwareTestDevice.JACKET_PUMP: self.jacket_pump_enabled,
+            HardwareTestDevice.INJECTION_PUMP: self.injection_pump_enabled,
+            HardwareTestDevice.LINE_PRESSURE: self.line_pressure_enabled,
+            HardwareTestDevice.DIFFERENTIAL_PRESSURE: self.differential_pressure_enabled,
+        }
+        return tuple(device for device in HardwareTestDevice if enabled[device])
+
+    @property
+    def measurement_ready(self) -> bool:
+        """Core devices needed for a normal EOR measurement; line pressure is optional."""
+        return (
+            self.jacket_pump_enabled
+            and self.injection_pump_enabled
+            and self.differential_pressure_enabled
+            and self.valve_output_enabled
         )
 
     def to_settings(self) -> dict[str, object]:
@@ -253,16 +296,24 @@ class DeviceConnectionResult:
 @dataclass(frozen=True, slots=True)
 class ConnectionTestResult:
     devices: tuple[DeviceConnectionResult, ...]
+    required_devices: tuple[HardwareTestDevice, ...] = tuple(HardwareTestDevice)
 
     @property
     def all_successful(self) -> bool:
-        tested = {result.device for result in self.devices}
-        return tested == set(HardwareTestDevice) and all(
-            result.successful for result in self.devices
+        results = {result.device: result for result in self.devices}
+        return all(
+            device in results and results[device].successful
+            for device in self.required_devices
         )
 
     def for_device(self, device: HardwareTestDevice) -> DeviceConnectionResult | None:
         return next((result for result in self.devices if result.device is device), None)
+
+    def successful_for(self, devices: tuple[HardwareTestDevice, ...]) -> bool:
+        results = {result.device: result for result in self.devices}
+        return all(
+            device in results and results[device].successful for device in devices
+        )
 
 
 def connection_configuration_fingerprint(
@@ -271,22 +322,26 @@ def connection_configuration_fingerprint(
     """Hash only settings that can affect one read-only connection test."""
     fields: dict[HardwareTestDevice, tuple[object, ...]] = {
         HardwareTestDevice.JACKET_PUMP: (
+            configuration.jacket_pump_enabled,
             configuration.jacket_port,
             configuration.jacket_unit_id,
             configuration.jacket_channel,
             configuration.baud_rate,
         ),
         HardwareTestDevice.INJECTION_PUMP: (
+            configuration.injection_pump_enabled,
             configuration.injection_port,
             configuration.injection_unit_id,
             configuration.injection_channel,
             configuration.baud_rate,
         ),
         HardwareTestDevice.LINE_PRESSURE: (
+            configuration.line_pressure_enabled,
             configuration.line_pressure_channel,
             configuration.ni_terminal_configuration,
         ),
         HardwareTestDevice.DIFFERENTIAL_PRESSURE: (
+            configuration.differential_pressure_enabled,
             configuration.differential_pressure_channel,
             configuration.ni_terminal_configuration,
         ),
@@ -341,7 +396,8 @@ class ConnectionTestRegistry:
                 result
                 for device in HardwareTestDevice
                 if (result := self.result_for(configuration, device)) is not None
-            )
+            ),
+            configuration.enabled_test_devices(),
         )
 
     def invalidate_changed(
@@ -388,26 +444,27 @@ class PhysicalHardwareConnectionTester:
         self._diagnostics = diagnostics
 
     def test(self, configuration: HardwareConfiguration) -> ConnectionTestResult:
+        operations: dict[HardwareTestDevice, Callable[[], DeviceConnectionResult]] = {
+            HardwareTestDevice.JACKET_PUMP: lambda: self.test_pump(
+                configuration.jacket_config(), HardwareTestDevice.JACKET_PUMP
+            ),
+            HardwareTestDevice.INJECTION_PUMP: lambda: self.test_pump(
+                configuration.injection_config(), HardwareTestDevice.INJECTION_PUMP
+            ),
+            HardwareTestDevice.LINE_PRESSURE: lambda: self.test_ni_input(
+                configuration.line_pressure_channel,
+                configuration.ni_terminal_configuration,
+                HardwareTestDevice.LINE_PRESSURE,
+            ),
+            HardwareTestDevice.DIFFERENTIAL_PRESSURE: lambda: self.test_ni_input(
+                configuration.differential_pressure_channel,
+                configuration.ni_terminal_configuration,
+                HardwareTestDevice.DIFFERENTIAL_PRESSURE,
+            ),
+        }
         return ConnectionTestResult(
-            (
-                self.test_pump(
-                    configuration.jacket_config(), HardwareTestDevice.JACKET_PUMP
-                ),
-                self.test_pump(
-                    configuration.injection_config(),
-                    HardwareTestDevice.INJECTION_PUMP,
-                ),
-                self.test_ni_input(
-                    configuration.line_pressure_channel,
-                    configuration.ni_terminal_configuration,
-                    HardwareTestDevice.LINE_PRESSURE,
-                ),
-                self.test_ni_input(
-                    configuration.differential_pressure_channel,
-                    configuration.ni_terminal_configuration,
-                    HardwareTestDevice.DIFFERENTIAL_PRESSURE,
-                ),
-            )
+            tuple(operations[device]() for device in configuration.enabled_test_devices()),
+            configuration.enabled_test_devices(),
         )
 
     def test_pump(

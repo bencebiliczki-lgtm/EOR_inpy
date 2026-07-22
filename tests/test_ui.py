@@ -53,14 +53,19 @@ from eor_control.ui import (  # noqa: E402
     LIGHT_STYLESHEET,
     SYSTEM_STYLESHEET,
     WINDOWS_APP_USER_MODEL_ID,
+    CalibrationSettingsDialog,
+    DataManagementDialog,
     DeveloperViewDialog,
     DeviceSettingsDialog,
     DeviceTestWizard,
     LoggingSettingsDialog,
     MeasurementHistoryView,
+    MeasurementOverviewDialog,
+    PreflightDialog,
     ProjectSelectionDialog,
     ProjectSettingsDialog,
     PumpControlDialog,
+    ResizableDialog,
     StageSettingsDialog,
     application_icon,
     application_icon_path,
@@ -100,6 +105,32 @@ def assert_input_fields_are_labelled(root: QWidget) -> None:
     assert unlabelled == []
 
 
+def test_application_dialogs_are_resizable() -> None:
+    application()
+    dialog = ResizableDialog()
+
+    assert dialog.isSizeGripEnabled()
+    assert dialog.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint
+    assert dialog.sizePolicy().horizontalPolicy() is QSizePolicy.Policy.Expanding
+    assert dialog.sizePolicy().verticalPolicy() is QSizePolicy.Policy.Expanding
+    for dialog_type in (
+        StageSettingsDialog,
+        ProjectSelectionDialog,
+        ProjectSettingsDialog,
+        DeviceSettingsDialog,
+        DeviceTestWizard,
+        PumpControlDialog,
+        LoggingSettingsDialog,
+        DeveloperViewDialog,
+        DataManagementDialog,
+        CalibrationSettingsDialog,
+        MeasurementOverviewDialog,
+        PreflightDialog,
+    ):
+        assert issubclass(dialog_type, ResizableDialog)
+    dialog.close()
+
+
 def test_stage_settings_input_fields_are_labelled() -> None:
     application()
     dialog = StageSettingsDialog()
@@ -121,7 +152,7 @@ def test_manual_control_queues_command_during_telemetry_and_shows_success() -> N
     dialog._execute(lambda: executed.append("RUN"), "tesztparancs")
 
     assert executed == []
-    assert dialog._pending_command is not None
+    assert len(dialog._pending_commands) == 1
     assert "várakozik" in dialog._operation_status.text()
     dialog._telemetry_failed("teszt telemetriahiba")
     for _ in range(20):
@@ -139,6 +170,81 @@ def test_manual_control_queues_command_during_telemetry_and_shows_success() -> N
     assert dialog._operation_status.text() == "SIKERES — tesztparancs"
     assert all(button.isEnabled() for button in dialog._buttons)
     dialog.close()
+
+
+def test_manual_control_queues_multiple_commands_in_order() -> None:
+    app = application()
+    dialog = PumpControlDialog(  # type: ignore[arg-type]
+        object(),
+        object(),
+        lambda: "Teszt szakasz",
+    )
+    dialog._telemetry_timer.stop()
+    executed: list[str] = []
+    dialog._telemetry_active = True
+
+    dialog._execute(lambda: executed.append("REMOTE"), "remote")
+    dialog._execute(lambda: executed.append("CONFIGURE"), "configure")
+    dialog._execute(lambda: executed.append("RUN"), "run")
+
+    assert len(dialog._pending_commands) == 3
+    dialog._telemetry_failed("teszt telemetriahiba")
+    for _ in range(100):
+        app.processEvents()
+        if executed == ["REMOTE", "CONFIGURE", "RUN"]:
+            break
+        sleep(0.01)
+
+    assert executed == ["REMOTE", "CONFIGURE", "RUN"]
+    assert not dialog._pending_commands
+    dialog.close()
+
+
+def test_manual_control_has_combined_remote_connect_and_closes_ports() -> None:
+    app = application()
+
+    class ManualService:
+        def __init__(self) -> None:
+            self.connect_remote_calls: list[PumpRole] = []
+            self.shutdown_calls = 0
+
+        def connect_remote(self, role: PumpRole) -> PumpStatus:
+            self.connect_remote_calls.append(role)
+            return PumpStatus(10.0, 0.0, 100.0)
+
+        def shutdown_connections(self) -> tuple[str, ...]:
+            self.shutdown_calls += 1
+            return ()
+
+    service = ManualService()
+    dialog = PumpControlDialog(  # type: ignore[arg-type]
+        service,
+        object(),
+        lambda: "Teszt szakasz",
+    )
+    dialog._telemetry_timer.stop()
+    button_texts = {button.text() for button in dialog.findChildren(QPushButton)}
+
+    assert "CSATLAKOZÁS + REMOTE" in button_texts
+    assert "REMOTE" not in button_texts
+    assert "LOCAL" not in button_texts
+
+    dialog._connect_pump(PumpRole.JACKET)
+    for _ in range(100):
+        app.processEvents()
+        if service.connect_remote_calls:
+            break
+        sleep(0.01)
+    assert service.connect_remote_calls == [PumpRole.JACKET]
+
+    dialog._request_close()
+    for _ in range(100):
+        app.processEvents()
+        if dialog._shutdown_complete:
+            break
+        sleep(0.01)
+    assert service.shutdown_calls == 1
+    assert dialog._shutdown_complete
 
 
 def test_manual_control_retains_partial_pump_status_when_sensor_is_missing() -> None:
@@ -192,7 +298,7 @@ def test_manual_control_retains_partial_pump_status_when_sensor_is_missing() -> 
     assert dialog._line_pressure_status.text() == "KAPCSOLÓDVA | 12.50 bar"
     assert "sensor is not connected" in dialog._differential_pressure_status.text()
     assert "RÉSZLEGES KAPCSOLAT" in dialog._safety_status.text()
-    assert "RUN" in dialog._safety_status.text()
+    assert "manuális biztonsági profil" in dialog._safety_status.text()
     assert full_safety_checks == []
     dialog.close()
 
@@ -502,6 +608,103 @@ def test_device_settings_shows_when_no_device_is_available(tmp_path: Path) -> No
     dialog.close()
 
 
+def test_device_settings_can_remove_optional_line_pressure_device(
+    tmp_path: Path,
+) -> None:
+    application()
+    dialog = DeviceSettingsDialog(
+        UnusedTester(),  # type: ignore[arg-type]
+        settings=QSettings(str(tmp_path / "modular.ini"), QSettings.Format.IniFormat),
+        current_mode=RunMode.SIMULATION,
+        discoverer=lambda: HardwareDiscovery(
+            serial_ports=(SerialPortInfo("COM1"), SerialPortInfo("COM2")),
+            ni_input_channels=(NiPhysicalChannelInfo("Dev1/ai1", "Dev1"),),
+            ni_output_channels=(NiPhysicalChannelInfo("Dev1/ao0", "Dev1"),),
+        ),
+    )
+    dialog.jacket_port.setCurrentIndex(dialog.jacket_port.findData("COM1"))
+    dialog.injection_port.setCurrentIndex(dialog.injection_port.findData("COM2"))
+    dialog.ni_device.setCurrentIndex(dialog.ni_device.findData("Dev1"))
+
+    dialog.line_enabled.setChecked(False)
+    configuration = dialog._read_configuration()
+
+    assert not configuration.line_pressure_enabled
+    assert configuration.line_pressure_channel == ""
+    assert configuration.measurement_ready
+    assert not dialog.line_channel.isEnabled()
+    assert not dialog._device_test_buttons[HardwareTestDevice.LINE_PRESSURE].isEnabled()
+    assert "NINCS HOZZÁADVA" in dialog._connection_result_labels[
+        HardwareTestDevice.LINE_PRESSURE
+    ].text()
+    dialog.close()
+
+
+def test_device_settings_uses_selected_project_device_profile(tmp_path: Path) -> None:
+    application()
+    dialog = DeviceSettingsDialog(
+        UnusedTester(),  # type: ignore[arg-type]
+        settings=QSettings(str(tmp_path / "project-profile.ini"), QSettings.Format.IniFormat),
+        current_mode=RunMode.SIMULATION,
+        device_profile={
+            "jacket_pump_enabled": True,
+            "injection_pump_enabled": False,
+            "line_pressure_enabled": False,
+            "differential_pressure_enabled": True,
+            "valve_output_enabled": True,
+        },
+        discoverer=HardwareDiscovery,
+    )
+
+    assert dialog.jacket_enabled.isChecked()
+    assert not dialog.injection_enabled.isChecked()
+    assert not dialog.line_enabled.isChecked()
+    assert dialog.delta_enabled.isChecked()
+    assert dialog.valve_enabled.isChecked()
+    dialog.close()
+
+
+def test_valve_only_profile_can_enter_independent_manual_test_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    dialog = DeviceSettingsDialog(
+        UnusedTester(),  # type: ignore[arg-type]
+        settings=QSettings(str(tmp_path / "valve-only.ini"), QSettings.Format.IniFormat),
+        current_mode=RunMode.SIMULATION,
+        developer_mode=True,
+        device_profile={
+            "jacket_pump_enabled": False,
+            "injection_pump_enabled": False,
+            "line_pressure_enabled": False,
+            "differential_pressure_enabled": False,
+            "valve_output_enabled": True,
+        },
+        discoverer=lambda: HardwareDiscovery(
+            ni_output_channels=(NiPhysicalChannelInfo("Dev1/ao0", "Dev1"),)
+        ),
+    )
+    monkeypatch.setattr(
+        QInputDialog,
+        "getText",
+        lambda *_args, **_kwargs: (
+            DeviceSettingsDialog.PARTIAL_HARDWARE_CONFIRMATION,
+            True,
+        ),
+    )
+    dialog.ni_device.setCurrentIndex(dialog.ni_device.findData("Dev1"))
+
+    assert dialog._partial_activate_button.isEnabled()
+    assert "ÖNÁLLÓAN TESZTELHETŐ" in dialog._valve_test_status.text()
+    dialog._activate_partial()
+
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert dialog.partial_activation
+    assert dialog.configuration is not None
+    assert dialog.configuration.valve_output_enabled
+    assert dialog.configuration.enabled_test_devices() == ()
+
+
 def test_device_settings_rejects_successful_ni_read_outside_calibration(
     tmp_path: Path,
 ) -> None:
@@ -676,6 +879,46 @@ def test_project_selector_can_delete_project_but_keeps_raw_files(
         assert settings.value("project/last_stage_id") is None
         assert settings.value(f"project/last_stage_by_project/{project.id}") is None
         assert raw_file.read_text(encoding="utf-8") == "measurement"
+        dialog.close()
+
+
+def test_project_settings_adds_and_removes_devices_without_validation(
+    tmp_path: Path,
+) -> None:
+    application()
+    with ProjectRepository(tmp_path / "project-devices.sqlite3") as repository:
+        project = repository.create_project(
+            name="Moduláris projekt",
+            configuration={
+                "mode": "simulation",
+                "devices": {
+                    "jacket_pump_enabled": True,
+                    "injection_pump_enabled": True,
+                    "line_pressure_enabled": False,
+                    "differential_pressure_enabled": True,
+                    "valve_output_enabled": True,
+                },
+            },
+            calibration_snapshot={},
+        )
+        stage = repository.add_stage(project.id, "Víz")
+        dialog = ProjectSettingsDialog(
+            repository,
+            selected_project_id=project.id,
+            selected_stage_id=stage.id,
+            configuration={},
+            calibration_snapshot={},
+        )
+
+        assert not dialog.device_checks["line_pressure_enabled"].isChecked()
+        dialog.device_checks["injection_pump_enabled"].setChecked(False)
+        dialog.device_checks["line_pressure_enabled"].setChecked(True)
+        dialog._save_device_profile()
+
+        saved = repository.get_project(project.id).configuration["devices"]
+        assert isinstance(saved, dict)
+        assert saved["injection_pump_enabled"] is False
+        assert saved["line_pressure_enabled"] is True
         dialog.close()
 
 
@@ -1021,20 +1264,22 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert "nincs mérési adatmentés" in window._current_mode_message
     mode_banner = window.findChild(QLabel, "dashboard_mode_label")
     alarm_banner = window.findChild(QLabel, "dashboard_alarm_label")
-    assert mode_banner is not None
-    assert mode_banner.text() == window._current_mode_message
+    assert mode_banner is None
     assert alarm_banner is not None
-    assert alarm_banner.text() == "✓ Nincs aktív riasztás"
+    assert alarm_banner.isHidden()
+    assert alarm_banner.text() == ""
     assert window._active_alarm_text == "Nincs aktív riasztás"
     window._set_active_alarm("teszt biztonsági ok")
     retained_alarm = alarm_banner.text()
+    assert not alarm_banner.isHidden()
     application().processEvents()
     window._set_active_alarm("teszt biztonsági ok")
     assert alarm_banner.text() == retained_alarm
     assert "Automatikus művelet" in retained_alarm
     assert "Következő lépés" in retained_alarm
     window._clear_active_alarm()
-    assert alarm_banner.text() == "✓ Nincs aktív riasztás"
+    assert alarm_banner.isHidden()
+    assert alarm_banner.text() == ""
     assert not window._developer_mode
     assert window._kp.isHidden()
     window._set_developer_mode(True)
@@ -1103,7 +1348,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
         *window._connection_labels.values(),
     ):
         assert "background:transparent" in label.styleSheet()
-    banner_labels = {mode_banner, alarm_banner}
+    banner_labels = {alarm_banner}
     for label in window.findChildren(QLabel):
         if label in banner_labels:
             continue
@@ -1129,7 +1374,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert valve_settings is not None
     control_form = valve_settings.layout()
     assert isinstance(control_form, QFormLayout)
-    assert control_form.rowWrapPolicy() == QFormLayout.RowWrapPolicy.DontWrapRows
+    assert control_form.rowWrapPolicy() == QFormLayout.RowWrapPolicy.WrapAllRows
     window.resize(1200, 420)
     window.show()
     application().processEvents()
@@ -1149,6 +1394,11 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
         window._output_max,
     )
     assert len({field.width() for field in control_fields}) == 1
+    assert len({button.width() for button in window._primary_control_buttons}) == 1
+    assert all(
+        button.width() >= control_scroll.viewport().width() - 40
+        for button in window._primary_control_buttons
+    )
     assert status_scroll.verticalScrollBar().isVisible()
     assert control_scroll.verticalScrollBar().isVisible()
     left_width = status_scroll.width()
@@ -1160,6 +1410,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     application().processEvents()
     assert control_scroll.width() > right_width
     assert len({field.width() for field in control_fields}) == 1
+    assert len({button.width() for button in window._primary_control_buttons}) == 1
     chart_splitter = window.findChild(QSplitter, "live_chart_splitter")
     assert chart_splitter is not None
     assert chart_splitter.count() == 2
@@ -1210,6 +1461,13 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert "Nincs rögzített minta" in history._status.text()
     assert history._stage_plot.objectName() == "measurement_stage_timeline"
     assert history._checks["jacket_pressure_bar"].isChecked()
+    assert not history._settings_panel.isHidden()
+    history._settings_toggle.setChecked(False)
+    assert not history._settings_panel.isVisible()
+    assert history._settings_toggle.text() == "Beállítások megjelenítése ▼"
+    history._settings_toggle.setChecked(True)
+    assert not history._settings_panel.isHidden()
+    assert history._settings_toggle.text() == "Beállítások elrejtése ▲"
     history._time_range.setCurrentIndex(4)
     assert history._custom_minutes.isEnabled()
     history._auto_y.setChecked(False)
@@ -1236,7 +1494,9 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert calibration_tabs.count() == 2
     assert calibration_tabs.tabText(0) == "Érzékelők kalibrációja"
     assert calibration_tabs.tabText(1) == "Biztonsági határértékek"
-    assert window._minimum_margin.minimum() == 20.0
+    assert window._minimum_margin.minimum() == 0.1
+    window._minimum_margin.setValue(10.0)
+    assert window._minimum_margin.value() == 10.0
     window._open_measurement_overview()
     overview = window._overview_dialog
     assert overview is not None
@@ -1246,7 +1506,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert overview.value_labels["line_calibration"].text() == (
         "1–5 V → 0–400 bar"
     )
-    assert overview.value_labels["minimum_margin"].text() == "20 bar"
+    assert overview.value_labels["minimum_margin"].text() == "10 bar"
     overview.close()
     window._manual_output.setValue(33.0)
     window._recording_interval.setValue(7)
@@ -1309,10 +1569,6 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     )
     device_dialog.pump_cabling_notes.setText("Gyári null-modem kábel")
     device_dialog.ni_wiring_notes.setText("Differenciális, közös föld nélkül")
-    device_dialog.supervised_test_minutes.setValue(90)
-    device_dialog.cable_disconnect_test.setChecked(True)
-    device_dialog.emergency_stop_test.setChecked(True)
-    device_dialog.supervised_test.setChecked(True)
     device_dialog._save_only()
     reopened_devices = DeviceSettingsDialog(
         UnusedTester(),  # type: ignore[arg-type]
@@ -1327,10 +1583,11 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert reopened_devices.terminal_configuration.currentData() == "DIFFERENTIAL"
     assert reopened_devices.pump_cabling_notes.text() == "Gyári null-modem kábel"
     assert reopened_devices.ni_wiring_notes.text() == "Differenciális, közös föld nélkül"
-    assert reopened_devices.supervised_test_minutes.value() == 90
-    assert reopened_devices.cable_disconnect_test.isChecked()
-    assert reopened_devices.emergency_stop_test.isChecked()
-    assert reopened_devices.supervised_test.isChecked()
+    assert all(
+        group.title() != "Helyszíni validáció felhasználói adatai"
+        for group in reopened_devices.findChildren(QGroupBox)
+    )
+    assert reopened_devices._functional_test_button.isHidden()
     reopened_devices.close()
     device_dialog._configuration = device_dialog._read_configuration()
     device_dialog._test_passed(

@@ -23,8 +23,8 @@ class SystemClock:
 
 @dataclass(frozen=True, slots=True)
 class MeasurementChannels:
-    line_pressure: str = "line_pressure"
-    differential_pressure: str = "differential_pressure"
+    line_pressure: str | None = "line_pressure"
+    differential_pressure: str | None = "differential_pressure"
 
 
 class MeasurementService:
@@ -80,6 +80,8 @@ class MeasurementService:
             ),
         )
         for key, channel, calibration in inputs:
+            if channel is None:
+                continue
             try:
                 voltage = self._daq.read_voltage(channel)
                 values[key] = calibration.convert(voltage)
@@ -104,20 +106,16 @@ class MeasurementService:
         if self._initial_injection_volume_ml is None:
             self._initial_injection_volume_ml = injection.remaining_volume_ml
 
-        line_voltage = self._daq.read_voltage(self._channels.line_pressure)
-        differential_voltage = self._daq.read_voltage(
-            self._channels.differential_pressure
+        line_pressure = self._read_optional_pressure(
+            self._channels.line_pressure,
+            self._line_calibration,
+            "line pressure input",
         )
-        try:
-            line_pressure = self._line_calibration.convert(line_voltage)
-        except ValueError as error:
-            raise ValueError(f"line pressure input: {error}") from error
-        try:
-            differential_pressure = self._differential_calibration.convert(
-                differential_voltage
-            )
-        except ValueError as error:
-            raise ValueError(f"differential pressure input: {error}") from error
+        differential_pressure = self._read_optional_pressure(
+            self._channels.differential_pressure,
+            self._differential_calibration,
+            "differential pressure input",
+        )
 
         snapshot = MeasurementSnapshot(
             recorded_at=self._clock.utc_now(),
@@ -129,6 +127,10 @@ class MeasurementService:
             valve_percent=valve_percent,
         )
         if use_line_pressure_for_control:
+            if snapshot.line_pressure_bar is None:
+                raise ValueError(
+                    "line pressure control source is selected but the sensor is not configured"
+                )
             controlled_pressure = snapshot.line_pressure_bar
         else:
             controlled_pressure = snapshot.injection_pump.pressure_bar
@@ -156,6 +158,20 @@ class MeasurementService:
         if not decision.safe:
             self.request_safe_state()
         return record
+
+    def _read_optional_pressure(
+        self,
+        channel: str | None,
+        calibration: LinearCalibration,
+        label: str,
+    ) -> float | None:
+        if channel is None:
+            return None
+        voltage = self._daq.read_voltage(channel)
+        try:
+            return calibration.convert(voltage)
+        except ValueError as error:
+            raise ValueError(f"{label}: {error}") from error
 
     def run(
         self,

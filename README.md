@@ -65,7 +65,7 @@ Első indításkor nyisd meg a `Projekt` → `Projektkezelő…` ablakot, hozz l
 projektet és legalább egy mérési szakaszt, majd kattints a `Csatlakozás` és a
 `Mérés indítása` gombra. Indítás előtt kötelező, tételes ellenőrzőablak jelenik
 meg a projekt, eszközkapcsolatok, szenzoradatok, kalibráció, biztonsági reteszek,
-legalább 20 bar köpenynyomás-többlet és tárhely állapotával. Hiba tiltja az
+a konfigurált minimális köpenynyomás-többlet és tárhely állapotával. Hiba tiltja az
 indítást; figyelmeztetés külön kezelői jóváhagyást igényel. A projekt és szakaszok a
 `data/projects.sqlite3` adatbázisban maradnak meg. A PID erősítések, hatásirány és
 a `Hiba nyugtázása` gombbal oldható; ezt követően újra csatlakozni kell.
@@ -119,9 +119,14 @@ A beállítások explicit INI-fájlja a hordozható alkalmazásmappa
 `AFKI/EORControl` beállításokat az alkalmazás az első induláskor automatikusan
 átmásolja, ha az INI még üres. A témaválasztás azonnal lemezre kerül.
 
-Az eszközök a `Beállítások` → `Eszközök…` ablakban konfigurálhatók. A dashboard és
-az ablak is jól látható `SZIMULÁCIÓ` vagy `HARDVER` módszalagot mutat. Hardvermód
-csak mindkét ISCO pumpa és mindkét NI analóg bemenet sikeres, csak olvasási tesztje
+Az eszközök projektenkénti moduláris profilként konfigurálhatók: a
+`Projektbeállítások` ablakban a két pumpa, a két nyomásbemenet és a
+szelepkimenet külön-külön hozzáadható vagy eltávolítható. Az
+`Eszközök…` ablak automatikusan a kiválasztott projekt profilját tölti be. A
+dashboardon nincs állandó módszalag vagy „nincs riasztás” sáv: az üzemmód az
+ablak címében és az állapotsorban látható, a piros riasztási sáv pedig csak
+tényleges aktív hiba idejére jelenik meg. Hardvermód
+csak az aktív mérési profil kötelező eszközeinek sikeres, csak olvasási tesztje
 után, a `HARDVER mód aktiválása` gombbal kapcsolható be. Az eszközbeállításokban
 a két pumpa és a két NI bemenet külön-külön is tesztelhető; az összesített próba
 részleges hiba esetén is megmutatja, mely kapcsolatok voltak sikeresek. A szelep
@@ -131,18 +136,21 @@ Developer módban legalább egy sikeres egyedi kapcsolatpróba után külön
 **Részleges HARDVER tesztmód** aktiválható. Ebben a módban normál mérés nem
 indítható, viszont a manuális hardverablakban a két pumpa egymástól és az
 NI-bemenetektől függetlenül kapcsolható vagy választható le. A működő szenzorok
-értéke részleges telemetriaként megmarad; hiányos biztonsági telemetria mellett
-pumpa-RUN és nem-SAFE szelepírás továbbra is tiltott.
+értéke részleges telemetriaként megmarad. A manuális parancsot külön,
+céleszköz-specifikus biztonsági profil felügyeli, ezért egy nem hozzáadott
+vonali nyomásmérő nem blokkolja a pumpa vagy szelep kezelését.
 Mindkét NI bemenet és a szelep NI kimenete felhasználó által megadható és külön
 menthető; egyik fizikai csatorna sincs kötelezően a forráskódba rögzítve.
 Ugyanitt választható az NI bemeneti bekötési mód, megadható a pumpa- és NI-kábelezés
-megjegyzése, a szelep 0%/100% és safe-state feszültsége, továbbá rögzíthető a
-kábelkihúzási, vészleállítási és felügyelt kommunikációs próba teljesítése és előírt
-időtartama. A differenciálnyomás tényleges tartományát a felhasználó a kalibrációs
-ablakban adja meg.
+megjegyzése, valamint a szelep 0%/100% és safe-state feszültsége. A korábbi
+helyszíni validációs adatblokk nem része az eszközbeállításoknak. A
+differenciálnyomás tényleges tartományát a felhasználó a kalibrációs ablakban adja meg.
 Az alkalmazás minden új indításkor biztonsági okból szimulációs módból indul.
 A Windows tálca rejtett ikonjának helyi menüjéből az ablak újra megnyitható, vagy
 a `Program bezárása` művelettel az alkalmazás biztonságosan leállítható. A tálcás
+A dashboard jobb oldali vezérlősávja egysávos, teljes szélességű gombokat és
+beviteli mezőket használ; a
+címkék keskenyebb ablaknál a mezők fölé törnek, ezért a vezérlők nem vágódnak le.
 kilépés ugyanazt a runtime-leállítási, safe-state, eszközleválasztási és
 adattároló-lezárási útvonalat használja, mint a főablak bezárása.
 
@@ -159,15 +167,16 @@ A `Rendszer és módváltás` kategória a port- és NI-csatornafelderítés ös
 valamint a teljes import- vagy driverhibát `DISCOVERY` iránnyal rögzíti. A
 Naplózás ablak a tényleges abszolút logfájlnevet mutatja.
 
-Sikeresen aktivált hardvermódban és csatlakoztatott (`READY`) állapotban a
+Sikeresen aktivált hardverprofilban a
 Developer módban a `Developer` → `Felügyelt manuális hardvervezérlés…` ablakból
-kezelhető mindkét ISCO pumpa és a szelep. Az ablak élőben mutatja a pumpák
+kezelhető minden hozzáadott ISCO pumpa és a szelep. Az ablak élőben mutatja a pumpák
 áramlását és nyomását, valamint a vonali és differenciálnyomást. Pumpaindítás és
-szelepírás előtt a teljes biztonsági felügyelet friss mérési pillanatképet értékel;
-aktív vagy reteszelt biztonsági ok esetén a kimenet nem engedélyezett.
-A sorrend: `REMOTE`, üzemmód/célérték beállítása, először köpenypumpa `RUN`, majd
-csak legalább 20 bar igazolt köpenytöbbletnél a besajtolópumpa `RUN`. Mindkét RUN
-külön pontos megerősítő szöveget kér. Elérhető külön STOP, STOP ALL, CLEAR és LOCAL.
+szelepírás előtt a manuális biztonsági profil a megcélzott eszköz kapcsolatát,
+saját visszajelzését és határértékét ellenőrzi. A `CSATLAKOZÁS + REMOTE` egyetlen
+műveletként azonosítja a pumpát és REMOTE módba állítja, ezt követi az
+üzemmód/célérték beállítása, majd az adott pumpa `RUN`. Mindkét RUN külön pontos
+megerősítő szöveget kér. Az ablak bezárása minden pumpán megkísérli a STOP-ot,
+bontja a kapcsolatot és lezárja a COM-portokat.
 
 A `Projekt` → `Adatkezelés és export…` ablak pontosvesszős vagy más elválasztójú,
 igény szerint tizedesvesszős CSV-t, továbbá diagramot is tartalmazó Excel-fájlt
@@ -176,7 +185,10 @@ egyesítő exportfájl. Ugyanitt kapcsolható be a NAS-mentés. A másolás hát
 hálózati művelet SQLite-várólistán marad, és a program automatikusan újrapróbálja.
 
 A dashboard középső részén az **Élő mérés** és a **Teljes mérés** fülek között lehet
-váltani. A **Teljes mérés** fül a kiválasztott projekt korábbi adatait is
+váltani. A **Teljes mérés** fül adatsor-, fázis-, időtartomány- és tengelybeállításai
+a **Megjelenítési beállítások** fejléc segítségével elrejthetők, így a diagram a
+rendelkezésre álló teljes függőleges helyet használhatja.
+A **Teljes mérés** fül a kiválasztott projekt korábbi adatait is
 visszatölti. Az adatsorok külön kapcsolhatók, választható vagy egyéni
 időtartomány adható meg, az Y tengely automatikus vagy kézi lehet, a grafikon pedig
 egérrel szabadon nagyítható és mozgatható. A nézet mérési fázisra szűrhető, az

@@ -300,13 +300,21 @@ class TerminalApplication:
             line_pressure = snapshot.line_pressure_bar
             differential_pressure = snapshot.differential_pressure_bar
             assert injection_pressure is not None
-            assert line_pressure is not None
-            assert differential_pressure is not None
+            line_text = (
+                "nincs hozzáadva"
+                if line_pressure is None
+                else f"{line_pressure:.2f} bar"
+            )
+            differential_text = (
+                "nincs hozzáadva"
+                if differential_pressure is None
+                else f"{differential_pressure:.2f} bar"
+            )
             self._write(
                 f"Köpeny={snapshot.jacket_pressure_bar:.2f} bar; "
                 f"besajtolás={injection_pressure:.2f} bar; "
-                f"vonali={line_pressure:.2f} bar; "
-                f"differenciál={differential_pressure:.2f} bar"
+                f"vonali={line_text}; "
+                f"differenciál={differential_text}"
             )
         if snapshot.fault_reason:
             self._write(f"Hiba={snapshot.fault_reason}")

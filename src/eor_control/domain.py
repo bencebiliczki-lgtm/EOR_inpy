@@ -24,8 +24,8 @@ class MeasurementSnapshot:
     monotonic_seconds: float
     jacket_pump: PumpStatus
     injection_pump: PumpStatus
-    line_pressure_bar: float
-    differential_pressure_bar: float
+    line_pressure_bar: float | None
+    differential_pressure_bar: float | None
     valve_percent: float
     quality: DataQuality = DataQuality.GOOD
 

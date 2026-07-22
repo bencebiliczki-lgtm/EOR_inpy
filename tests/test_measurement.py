@@ -6,7 +6,7 @@ import pytest
 
 from eor_control.calibration import LinearCalibration
 from eor_control.domain import MeasurementRecord
-from eor_control.measurement import MeasurementService
+from eor_control.measurement import MeasurementChannels, MeasurementService
 from eor_control.safety import SafetyLimits, SafetyMonitor
 from eor_control.simulators import SimulatedDataAcquisition, SimulatedPump
 
@@ -169,6 +169,22 @@ def test_service_telemetry_keeps_valid_sensor_when_other_sensor_is_missing() -> 
     assert values["line_pressure"] == pytest.approx(100.0)
     assert "differential_pressure" not in values
     assert "differential_pressure" in errors
+
+
+def test_measurement_runs_without_optional_line_pressure_sensor() -> None:
+    measurement_service, _, _, daq, writer = service()
+    del daq.inputs["line_pressure"]
+    measurement_service._channels = MeasurementChannels(line_pressure=None)
+
+    record = measurement_service.sample_once(active_stage="water", valve_percent=0.0)
+    values, errors = measurement_service.read_pressure_inputs_individually()
+
+    assert record.snapshot.line_pressure_bar is None
+    assert record.snapshot.differential_pressure_bar == pytest.approx(5.0)
+    assert record.safety_reasons == ()
+    assert writer.records == [record]
+    assert "line_pressure" not in values
+    assert "line_pressure" not in errors
 
 
 @pytest.mark.parametrize("interval", [0.9, 3600.1])

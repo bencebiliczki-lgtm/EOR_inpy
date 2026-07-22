@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from eor_control.domain import DataQuality, MeasurementSnapshot, PumpStatus
-from eor_control.safety import SafetyLimits, SafetyMonitor
+from eor_control.safety import ManualSafetyMonitor, SafetyLimits, SafetyMonitor
 
 
 def snapshot(
@@ -45,6 +45,18 @@ def test_margin_below_twenty_bar_is_unsafe() -> None:
     assert "jacket pressure margin is too low" in decision.reasons
 
 
+def test_configured_margin_may_be_below_twenty_bar() -> None:
+    safety_monitor = SafetyMonitor(SafetyLimits(400.0, 350.0, 50.0, 10.0))
+
+    assert safety_monitor.evaluate(snapshot(110.0, 100.0)).safe
+
+    decision = SafetyMonitor(SafetyLimits(400.0, 350.0, 50.0, 10.0)).evaluate(
+        snapshot(109.9, 100.0)
+    )
+    assert not decision.safe
+    assert "jacket pressure margin is too low" in decision.reasons
+
+
 def test_differential_limit_is_inclusive() -> None:
     decision = monitor().evaluate(snapshot(120.0, 100.0, delta_p=50.0))
 
@@ -68,6 +80,34 @@ def test_line_pressure_limit_is_supervised() -> None:
 
     assert not decision.safe
     assert "line pressure limit exceeded" in decision.reasons
+
+
+def test_missing_optional_pressure_inputs_do_not_create_safety_fault() -> None:
+    optional = snapshot(120.0, 100.0)
+    optional = MeasurementSnapshot(
+        recorded_at=optional.recorded_at,
+        monotonic_seconds=optional.monotonic_seconds,
+        jacket_pump=optional.jacket_pump,
+        injection_pump=optional.injection_pump,
+        line_pressure_bar=None,
+        differential_pressure_bar=None,
+        valve_percent=optional.valve_percent,
+    )
+
+    assert monitor().evaluate(optional).safe
+
+
+def test_manual_safety_only_checks_selected_pump() -> None:
+    safe = ManualSafetyMonitor.evaluate_pump(
+        PumpStatus(100.0, 1.0, 200.0), maximum_pressure_bar=150.0
+    )
+    unsafe = ManualSafetyMonitor.evaluate_pump(
+        PumpStatus(151.0, 1.0, 200.0), maximum_pressure_bar=150.0
+    )
+
+    assert safe.safe
+    assert not unsafe.safe
+    assert unsafe.reasons == ("selected pump pressure limit exceeded",)
 
 
 @pytest.mark.parametrize("invalid_value", [float("nan"), float("inf"), float("-inf")])

@@ -99,8 +99,22 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 - Developer tesztmódban az eszközök külön-külön kapcsolhatók és kérdezhetők le;
   egy még be nem kötött eszköz hibája nem rejtheti el a többi sikeres kapcsolatát,
   és nem tilthatja azok STOP vagy leválasztási műveletét. Normál méréshez továbbra
-  is minden kötelező eszköz szükséges. Hiányos biztonsági telemetria mellett RUN
-  és nem-SAFE kimeneti parancs nem engedélyezhető.
+  is minden, az aktív mérési profilban kötelező eszköz szükséges. A vonali
+  nyomásmérő opcionális; hiányában nem olvasható és nem választható PID-forrásnak,
+  de a besajtolópumpa nyomásáról szabályozott mérést nem blokkolhatja.
+- A hozzáadott eszközök listája projektenként tárolódjon és a
+  Projektbeállításokban kapcsolatpróba vagy helyszíni validáció nélkül legyen
+  szerkeszthető. Az Eszközbeállítások a kiválasztott projekt profilját használja;
+  eltérő aktív hardverprofillal normál mérés nem indulhat.
+- A manuális hardvervezérlés külön biztonsági profilt használjon: a megcélzott
+  pumpa kapcsolatát, véges saját státuszát és maximális nyomását, illetve a
+  szelep 0–100%-os tartományát ellenőrizze. Nem kapcsolódó, ki nem épített
+  érzékelő hiánya nem tilthatja a manuális parancsot. A fizikai kimenet
+  megerősítése, a STOP/safe-state elsőbbsége és a véges kommunikációs timeout megmarad.
+- Developer részleges hardvermódban minden hozzáadott eszköz a többi eszköz
+  kapcsolati eredményétől függetlenül legyen tesztelhető. A csak szelepet
+  tartalmazó profil olvasási kapcsolatpróba nélkül is megnyithassa a manuális
+  tesztmódot; minden tényleges AO-írás külön megerősítést igényeljen.
 - Automatikus nyomásfelépítés közben a köpeny- és besajtolási nyomás megengedett különbségének betartása.
 - A szelep automata és kézi módban működhet.
 - Automata módban a szabályozási forrás választható legyen: besajtoló pumpa nyomása vagy vonali nyomásmérő.
@@ -123,10 +137,6 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   Minimalizált vagy háttérben lévő alkalmazásnál Windows tálcaértesítés és
   tálcagomb-figyelmeztetés is szükséges; azonos aktív hiba ciklusonként ne
   ismétlődjön.
-- Minden mérés előtt tételes előellenőrzés szükséges. A projekt/szakasz,
-  eszközkapcsolatok, szenzoradatok, kalibráció és határértékek, biztonsági reteszek,
-  legalább 20 bar köpenynyomás-többlet és helyi tárhely hibája tiltsa az indítást.
-  Figyelmeztetés csak külön kezelői jóváhagyással engedhető tovább.
 - Developer módban külön **Szimulációs mód** kapcsoló legyen. Az átváltás csak
   leválasztott, IDLE állapotban történhet; a szimulációs runtime fizikai kimenetet
   és mérési perzisztenciát nem használhat.

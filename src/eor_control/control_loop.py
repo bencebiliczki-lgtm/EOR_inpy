@@ -11,7 +11,7 @@ from eor_control.control import (
 from eor_control.devices import ValveActuator
 from eor_control.domain import MeasurementRecord
 from eor_control.measurement import MeasurementService
-from eor_control.safety import SafetyDecision, SafetyLimits
+from eor_control.safety import ManualSafetyMonitor, SafetyDecision, SafetyLimits
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +91,15 @@ class ControlLoop:
             valve_percent=self._last_output_percent,
             persist=False,
         )
+
+    def write_manual_output(self, output_percent: float) -> float:
+        """Apply one confirmed manual output without requiring unrelated sensors."""
+        decision = ManualSafetyMonitor.evaluate_valve(output_percent)
+        if not decision.safe:
+            raise PermissionError("manual safety: " + "; ".join(decision.reasons))
+        self._actuator.write_percent(output_percent)
+        self._last_output_percent = output_percent
+        return output_percent
 
     def read_pressure_inputs_individually(
         self,

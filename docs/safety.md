@@ -9,7 +9,6 @@ A rendszer magas nyomáson működik, ezért a szoftver hibája nem eredményezh
 - konfigurált maximális pumpanyomás túllépése;
 - differenciálnyomás `Y` határának elérése;
 - szabályozási cél fölé növő nyomás konfigurált `X` eltéréssel;
-- köpeny- és besajtolási nyomás közötti legalább 20 baros különbség elvesztése;
 - szenzorjel tartományon kívül, nem szám vagy elavult adat;
 - pumpa-, NI- vagy vezérlési kommunikáció elvesztése;
 - vezérlési ciklus határidejének túllépése;
@@ -37,13 +36,16 @@ interlockot kap. A konfigurált célérték plusz a `max_control_overshoot_bar` 
 elérése reteszelt hibát és kimenettiltást vált ki. A dashboardon ez az eltérés
 pozitív, véges barértékként állítható.
 
-Fizikai pumpaindítás csak HARDVER + READY állapotban, korábbi kapcsolatpróba és
-hardverengedély után lehetséges. A köpenypumpa indításához `RUN JACKET PUMP`, a
-besajtolópumpához `RUN INJECTION PUMP` pontos kezelői megerősítés szükséges. A
-besajtolás 20 bar alatti pillanatnyi köpenytöbbletnél szoftveresen blokkolt.
-A mérés indítása előtt egy nem mentett, teljes biztonsági kiértékelésű minta készül.
-Kalibrációs tartományhiba vagy aktív interlock esetén a futtatószál nem indul el,
-az alkalmazás biztonságos kimeneti állapotot kér, és a konkrét okot megjeleníti.
+## Manuális biztonsági profil
+
+A Developer manuális vezérlés nem készít teljes mérési pillanatképet minden
+parancshoz. Pumpa-RUN előtt csak a kiválasztott, hozzáadott pumpa kapcsolatát,
+véges nyomás-/áramlás-/térfogatadatát és saját maximális nyomását ellenőrzi.
+A manuális szelepírás a megerősítés mellett a véges 0–100%-os tartományt és
+az NI kimenet hardverengedélyét ellenőrzi. Nem hozzáadott vonali vagy
+differenciálnyomás-bemenet nem generál manuális reteszt. A STOP, STOP ALL és
+safe-state parancsok elsőbbsége, valamint a kapcsolatvesztés véges felismerési ideje
+nem lazítható.
 
 A vezetett funkcionális teszt csak HARDVER + READY állapotban, leállított normál
 runtime, álló pumpák, aktuális sikeres kapcsolatpróba, aktív/reteszelt hiba nélküli

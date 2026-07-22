@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event, Lock, Thread
+from time import sleep
 
 import pytest
 
@@ -102,14 +104,78 @@ class FakeSerial:
         self.closed = True
 
 
-def test_client_starts_network_and_retries_timeout() -> None:
+def test_client_starts_network_and_waits_for_delayed_response() -> None:
     serial = FakeSerial([b"", response("READY")])
     client = DasnetClient(serial, unit_id=6)
 
     assert client.command("RSVP").message == "READY"
     assert serial.writes[0] == b"\r"
-    assert serial.writes.count(encode_command(6, "RSVP")) == 2
-    assert serial.reset_count == 2
+    assert serial.writes.count(encode_command(6, "RSVP")) == 1
+    assert serial.reset_count == 1
+
+
+def test_client_collects_fragmented_response_until_cr() -> None:
+    complete = response("READY")
+    serial = FakeSerial([complete[:5], complete[5:]])
+
+    assert DasnetClient(serial, unit_id=6).command("RSVP").message == "READY"
+    assert serial.writes.count(encode_command(6, "RSVP")) == 1
+
+
+@dataclass
+class BlockingSerial:
+    writes: list[bytes] = field(default_factory=list)
+    first_read_started: Event = field(default_factory=Event)
+    release_first_read: Event = field(default_factory=Event)
+    _read_count: int = 0
+    _lock: Lock = field(default_factory=Lock)
+
+    def write(self, data: bytes) -> int:
+        self.writes.append(data)
+        return len(data)
+
+    def read_until(self, expected: bytes = b"\n", size: int | None = None) -> bytes:
+        with self._lock:
+            self._read_count += 1
+            read_count = self._read_count
+        if read_count == 1:
+            self.first_read_started.set()
+            self.release_first_read.wait(timeout=1.0)
+        return response("READY")
+
+    def reset_input_buffer(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def test_client_serializes_concurrent_commands() -> None:
+    serial = BlockingSerial()
+    client = DasnetClient(serial, unit_id=6)
+    errors: list[Exception] = []
+
+    def command(message: str) -> None:
+        try:
+            client.command(message)
+        except Exception as error:
+            errors.append(error)
+
+    first = Thread(target=command, args=("RSVP",))
+    second = Thread(target=command, args=("IDENTIFY",))
+    first.start()
+    assert serial.first_read_started.wait(timeout=1.0)
+    second.start()
+    sleep(0.05)
+
+    assert encode_command(6, "IDENTIFY") not in serial.writes
+    serial.release_first_read.set()
+    first.join(timeout=1.0)
+    second.join(timeout=1.0)
+
+    assert errors == []
+    assert serial.writes.count(encode_command(6, "RSVP")) == 1
+    assert serial.writes.count(encode_command(6, "IDENTIFY")) == 1
 
 
 def test_client_retries_invalid_frame_then_raises_last_error() -> None:

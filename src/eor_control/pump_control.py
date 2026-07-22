@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
@@ -62,6 +63,9 @@ class PumpControlService:
         minimum_jacket_margin_bar: float = 20.0,
         diagnostics: DiagnosticLogger | None = None,
         safety_check: Callable[[], tuple[str, ...]] | None = None,
+        manual_safety_check: Callable[[PumpRole, PumpStatus], tuple[str, ...]]
+        | None = None,
+        enforce_injection_margin: bool = True,
     ) -> None:
         if not isfinite(minimum_jacket_margin_bar) or minimum_jacket_margin_bar <= 0.0:
             raise ValueError("minimum jacket margin must be positive and finite")
@@ -77,6 +81,8 @@ class PumpControlService:
         self._minimum_margin = minimum_jacket_margin_bar
         self._diagnostics = diagnostics
         self._safety_check = safety_check
+        self._manual_safety_check = manual_safety_check
+        self._enforce_injection_margin = enforce_injection_margin
         self._authorized = False
 
     def authorize(self, confirmation: str) -> None:
@@ -100,6 +106,21 @@ class PumpControlService:
         self._states[role] = PumpPreparationState()
         self._log(role.value, "CONNECTED")
         return self._pumps[role].read_status()
+
+    def connect_remote(self, role: PumpRole) -> PumpStatus:
+        """Connect, identify and enter REMOTE mode as one manual operation."""
+
+        try:
+            status = self.connect(role)
+            self.enter_remote(role)
+        except Exception:
+            if self._connected[role]:
+                with suppress(Exception):
+                    self._pumps[role].disconnect()
+                self._connected[role] = False
+                self._states[role] = PumpPreparationState()
+            raise
+        return status
 
     def disconnect(self, role: PumpRole) -> None:
         """Stop and disconnect one pump independently."""
@@ -129,12 +150,11 @@ class PumpControlService:
 
         errors: list[str] = []
         for role, pump in self._pumps.items():
-            if not self._connected[role]:
-                continue
-            try:
-                pump.request_stop()
-            except Exception as error:
-                errors.append(f"{role.value} STOP: {error}")
+            if self._connected[role]:
+                try:
+                    pump.request_stop()
+                except Exception as error:
+                    errors.append(f"{role.value} STOP: {error}")
             try:
                 pump.disconnect()
             except Exception as error:
@@ -209,10 +229,17 @@ class PumpControlService:
                 raise PermissionError(
                     "safety interlock active: " + "; ".join(reasons)
                 )
+        if self._manual_safety_check is not None:
+            status = self._pumps[role].read_status()
+            reasons = self._manual_safety_check(role, status)
+            if reasons:
+                raise PermissionError(
+                    "manual safety interlock active: " + "; ".join(reasons)
+                )
         state = self._states[role]
         if not state.remote or not state.configured or state.running:
             raise RuntimeError("pump must be configured and stopped in REMOTE mode")
-        if role is PumpRole.INJECTION:
+        if role is PumpRole.INJECTION and self._enforce_injection_margin:
             statuses = self.statuses()
             margin = (
                 statuses[PumpRole.JACKET].pressure_bar

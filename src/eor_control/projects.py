@@ -198,6 +198,20 @@ class ProjectRepository:
             raise KeyError(f"project {project_id} does not exist")
         return self._project_from_row(row, self.list_stages(project_id))
 
+    def update_project_configuration(
+        self, project_id: int, configuration: Mapping[str, object]
+    ) -> MeasurementProject:
+        """Replace one project's validated configuration snapshot."""
+
+        self._require_project(project_id)
+        configuration_json = self._serialize_snapshot(configuration)
+        with self._connection:
+            self._connection.execute(
+                "UPDATE projects SET configuration_json = ? WHERE id = ?",
+                (configuration_json, project_id),
+            )
+        return self.get_project(project_id)
+
     def list_projects(self) -> tuple[MeasurementProject, ...]:
         rows = self._connection.execute(
             "SELECT * FROM projects ORDER BY created_at_utc, id"

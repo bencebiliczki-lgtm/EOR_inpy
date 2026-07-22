@@ -33,6 +33,27 @@ def test_project_round_trip_preserves_snapshots_and_utc_time(tmp_path: Path) -> 
     }
 
 
+def test_project_configuration_can_update_modular_device_profile(tmp_path: Path) -> None:
+    with ProjectRepository(tmp_path / "projects.sqlite3") as repository:
+        project_id = create_project(repository)
+        project = repository.get_project(project_id)
+        configuration = dict(project.configuration)
+        configuration["devices"] = {
+            "jacket_pump_enabled": True,
+            "injection_pump_enabled": True,
+            "line_pressure_enabled": False,
+            "differential_pressure_enabled": True,
+            "valve_output_enabled": True,
+        }
+
+        updated = repository.update_project_configuration(
+            project_id, configuration
+        )
+
+    assert updated.configuration["interval_seconds"] == 5
+    assert updated.configuration["devices"] == configuration["devices"]
+
+
 def test_database_can_be_reopened(tmp_path: Path) -> None:
     path = tmp_path / "projects.sqlite3"
     with ProjectRepository(path) as repository:

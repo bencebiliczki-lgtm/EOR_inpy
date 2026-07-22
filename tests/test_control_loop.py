@@ -122,3 +122,13 @@ def test_interlock_suppresses_output_and_requests_safe_actuator_state() -> None:
     assert not result.command.enabled
     assert actuator.output_percent is None
     assert actuator.safe_state_requested
+
+
+def test_separate_manual_output_safety_does_not_require_measurement_snapshot() -> None:
+    control_loop, actuator, writer = loop(jacket_pressure=119.0)
+
+    result = control_loop.write_manual_output(35.0)
+
+    assert result == 35.0
+    assert actuator.output_percent == 35.0
+    assert writer.records == []

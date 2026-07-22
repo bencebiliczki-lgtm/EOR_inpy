@@ -4,6 +4,7 @@ import pytest
 
 from eor_control.domain import PumpStatus
 from eor_control.pump_control import PumpControlService, PumpOperatingMode, PumpRole
+from eor_control.safety import ManualSafetyMonitor
 
 
 @dataclass
@@ -47,12 +48,20 @@ class FakePump:
         self.commands.append("DISCONNECT")
 
 
-def service(jacket_pressure: float = 120.0, injection_pressure: float = 100.0) -> tuple[
+def service(
+    jacket_pressure: float = 120.0,
+    injection_pressure: float = 100.0,
+    minimum_jacket_margin_bar: float = 20.0,
+) -> tuple[
     PumpControlService, FakePump, FakePump
 ]:
     jacket = FakePump(jacket_pressure, [])
     injection = FakePump(injection_pressure, [])
-    control = PumpControlService(jacket_pump=jacket, injection_pump=injection)
+    control = PumpControlService(
+        jacket_pump=jacket,
+        injection_pump=injection,
+        minimum_jacket_margin_bar=minimum_jacket_margin_bar,
+    )
     control.authorize(PumpControlService.AUTHORIZATION)
     control.connect(PumpRole.JACKET)
     control.connect(PumpRole.INJECTION)
@@ -94,6 +103,39 @@ def test_injection_run_at_exact_margin_is_allowed() -> None:
     control.run(PumpRole.INJECTION, PumpControlService.RUN_INJECTION_CONFIRMATION)
 
     assert injection.commands[-1] == "RUN"
+
+
+def test_injection_run_uses_configured_margin_below_twenty_bar() -> None:
+    control, _, injection = service(
+        jacket_pressure=110.0,
+        minimum_jacket_margin_bar=10.0,
+    )
+    prepare(control, PumpRole.INJECTION)
+
+    control.run(PumpRole.INJECTION, PumpControlService.RUN_INJECTION_CONFIRMATION)
+
+    assert injection.commands[-1] == "RUN"
+
+
+def test_manual_pump_safety_does_not_require_other_devices_or_cross_pump_margin() -> None:
+    jacket = FakePump(0.0, [])
+    injection = FakePump(100.0, [])
+    control = PumpControlService(
+        jacket_pump=jacket,
+        injection_pump=injection,
+        manual_safety_check=lambda _role, status: ManualSafetyMonitor.evaluate_pump(
+            status, maximum_pressure_bar=150.0
+        ).reasons,
+        enforce_injection_margin=False,
+    )
+    control.authorize(PumpControlService.AUTHORIZATION)
+    control.connect(PumpRole.INJECTION)
+    prepare(control, PumpRole.INJECTION)
+
+    control.run(PumpRole.INJECTION, PumpControlService.RUN_INJECTION_CONFIRMATION)
+
+    assert injection.commands[-1] == "RUN"
+    assert jacket.commands == []
 
 
 def test_run_requires_exact_confirmation_and_configuration() -> None:
@@ -160,6 +202,42 @@ def test_pumps_connect_and_report_status_independently() -> None:
     assert errors[PumpRole.INJECTION] == "nincs csatlakoztatva"
 
 
+def test_manual_connect_enters_remote_as_one_operation() -> None:
+    jacket = FakePump(120.0, [])
+    control = PumpControlService(
+        jacket_pump=jacket,
+        injection_pump=FakePump(100.0, []),
+    )
+    control.authorize(PumpControlService.AUTHORIZATION)
+
+    status = control.connect_remote(PumpRole.JACKET)
+
+    assert status.pressure_bar == 120.0
+    assert jacket.commands == ["CONNECT", "REMOTE"]
+    assert control.connected(PumpRole.JACKET)
+    assert control.state(PumpRole.JACKET).remote
+
+
+class RemoteFailingPump(FakePump):
+    def enter_remote(self) -> None:
+        raise ConnectionError("REMOTE unavailable")
+
+
+def test_manual_connect_closes_port_when_remote_fails() -> None:
+    jacket = RemoteFailingPump(120.0, [])
+    control = PumpControlService(
+        jacket_pump=jacket,
+        injection_pump=FakePump(100.0, []),
+    )
+    control.authorize(PumpControlService.AUTHORIZATION)
+
+    with pytest.raises(ConnectionError, match="REMOTE unavailable"):
+        control.connect_remote(PumpRole.JACKET)
+
+    assert jacket.commands == ["CONNECT", "DISCONNECT"]
+    assert not control.connected(PumpRole.JACKET)
+
+
 class StopFailingPump(FakePump):
     def request_stop(self) -> None:
         raise ConnectionError("STOP unavailable")
@@ -182,3 +260,16 @@ def test_partial_shutdown_attempts_every_stop_and_disconnect_independently() -> 
     assert injection.commands == ["STOP", "DISCONNECT"]
     assert not control.connected(PumpRole.JACKET)
     assert not control.connected(PumpRole.INJECTION)
+
+
+def test_shutdown_closes_ports_even_when_pumps_were_not_connected() -> None:
+    jacket = FakePump(120.0, [])
+    injection = FakePump(100.0, [])
+    control = PumpControlService(jacket_pump=jacket, injection_pump=injection)
+    control.authorize(PumpControlService.AUTHORIZATION)
+
+    errors = control.shutdown_connections()
+
+    assert errors == ()
+    assert jacket.commands == ["DISCONNECT"]
+    assert injection.commands == ["DISCONNECT"]

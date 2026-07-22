@@ -34,3 +34,40 @@ class ValveActuator(Protocol):
     def write_percent(self, output_percent: float) -> None: ...
 
     def set_safe_state(self) -> None: ...
+
+
+class DisabledPump:
+    """Non-I/O adapter for a pump role that is not part of the active device set."""
+
+    def __init__(self, role: str) -> None:
+        self._message = f"{role} pump is not added to the active hardware profile"
+
+    def connect(self) -> None:
+        raise ConnectionError(self._message)
+
+    def read_status(self) -> PumpStatus:
+        raise ConnectionError(self._message)
+
+    def enter_remote(self) -> None:
+        raise ConnectionError(self._message)
+
+    def set_constant_flow(self, flow_ml_per_minute: float) -> None:
+        raise ConnectionError(self._message)
+
+    def set_constant_pressure(self, pressure_bar: float) -> None:
+        raise ConnectionError(self._message)
+
+    def run(self) -> None:
+        raise ConnectionError(self._message)
+
+    def request_stop(self) -> None:
+        return
+
+    def clear(self) -> None:
+        raise ConnectionError(self._message)
+
+    def return_local(self) -> None:
+        raise ConnectionError(self._message)
+
+    def disconnect(self) -> None:
+        return

@@ -142,8 +142,8 @@ class CsvMeasurementWriter:
         self._sync()
 
     @staticmethod
-    def _hu(value: float) -> str:
-        return str(value).replace(".", ",")
+    def _hu(value: float | None) -> str:
+        return "" if value is None else str(value).replace(".", ",")
 
     def _sync(self) -> None:
         self._file.flush()

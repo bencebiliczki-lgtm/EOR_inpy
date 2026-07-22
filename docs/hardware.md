@@ -57,9 +57,32 @@ előtt ellenőrzi is ezek elérhetőségét, így hiányos hardveres build nem k
 Ezeket, valamint a kábelezési megjegyzést a felhasználó az Eszközbeállításokban
 adja meg; a program a beállításokat megőrzi.
 
+## Projektenkénti moduláris eszközprofil
+
+Minden projekt konfigurációs pillanatképe külön `devices` profilt tárol. A
+Projektbeállításokban a köpenypumpa, a besajtolópumpa, a vonali
+nyomásmérő, a differenciálnyomás-mérő és a szelep AO-kimenete külön
+hozzáadható vagy eltávolítható. Az Eszközbeállítások ezt a projektprofilt tölti
+be, és sikeres aktiváláskor visszamenti. Csak a hozzáadott eszköz
+konfigurációja és csak olvasási kapcsolattesztje kötelező. Hiányos magprofil
+Developer manuális tesztmódot, a két pumpát, differenciálnyomást és
+szelepkimenetet tartalmazó profil normál mérési hardvermódot ad. A vonali
+nyomásmérő nem része a kötelező magnak.
+
+A projekt eszközlistájának szerkesztéséhez nincs helyszíni validációs adatlap
+vagy vezetett funkcionális teszt. Ha az aktív hardverösszeállítás eltér a
+kiválasztott projekt profiljától, normál mérés csak az eszközök újraaktiválása
+után indítható.
+
+Developer részleges hardvermódban minden szerepkör önállóan próbálható. A két
+pumpa és a két NI-bemenet saját, a többi eszköztől független kapcsolatpróbával
+engedélyezhető. A csak szelepet tartalmazó profil olvasási próba nélkül is
+aktiválható részleges manuális tesztmódba, mert AO-kapcsolat olvasással nem
+igazolható; a tényleges kimeneti írás továbbra is külön kezelői megerősítést kér.
+
 ## NI USB-6001
 
-A konfiguráció két analóg nyomásbemenetet kezel: vonali és differenciálnyomást.
+A konfiguráció legfeljebb két analóg nyomásbemenetet kezel: vonali és differenciálnyomást.
 A vonali nyomás egyben a berendezés belépő nyomása, ezért nem tartozik hozzá külön
 harmadik NI-csatorna. A fizikai csatornaneveket a felhasználó adja meg az
 Eszközbeállításokban; a program megőrzi és a csak olvasási kapcsolatpróbán
@@ -73,7 +96,8 @@ jeltartományuk 1–5 V, a vonali érzékelő alapértelmezett leképezése 0–
 - Analóg bemenet: vonali nyomásmérő.
 - Analóg bemenet: Siemens differenciálnyomás-mérő.
 - Analóg kimenet: HANBAY MCJ-050AF szelep vezérlése.
-- A beállított csatornák nem lehetnek üresek vagy azonosak. A bekötést, földelést,
+- A profilhoz hozzáadott csatornák nem lehetnek üresek vagy azonosak; az
+  eltávolított opcionális csatorna hiányzó adatot, nem mérési hibát jelent. A bekötést, földelést,
   bemeneti módot és mintavételi korlátokat a hardverdokumentációban kell rögzíteni.
   A felhasználó `DEFAULT`, `RSE`, `NRSE`, differenciális vagy
   pszeudodifferenciális bemeneti módot választhat, és külön bekötési/földelési

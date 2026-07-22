@@ -47,6 +47,13 @@ Qt főszálból közvetlenül nem fut.
 
 ## Projektfájlok, export és NAS
 
+A projekt `configuration_json` pillanatképe `devices` objektumban tárolja az öt
+moduláris eszköz szerepkör projektenkénti engedélyezését. A Projektbeállítások ezt
+közvetlenül módosítja; az Eszközbeállítások ebből inicializálja a hozzáadott
+eszközöket. A futtatási út összeveti az aktív hardverkonfigurációt a projekt
+profiljával, ezért projektváltás vagy profilszerkesztés után eltérő összeállítással
+nem indítható normál mérés.
+
 A `ProjectMeasurementWriter` az aktív projekt azonosítójából és Windows-biztos
 nevéből és dátumából `projects/<év>/<dátum>_<azonosító>_<név>` könyvtárat képez.
 Minden éles fázis saját `<projektnév>_<fázisnév>_live_raw.csv` fájlt kap. Projekt- vagy
@@ -143,7 +150,8 @@ A külön `CalibrationSettingsDialog` lapokra bontva kezeli a két érzékelő
 kalibrációját és a biztonsági határértékeket. Elfogadás előtt validálja mindkét
 lineáris kalibrációt és a `SafetyLimits` értékeit, majd a `MeasurementService`
 alkalmazási rétegen keresztül alkalmazza őket. Futó mérés közben az ablak tiltott.
-A köpenynyomás minimális többletének UI alsó korlátja 20 bar. Biztonsági
+A köpenynyomás minimális többletének alapértéke 20 bar, az UI-ban pozitív,
+0,1 bar vagy nagyobb értékre konfigurálható. Biztonsági
 újrakonfigurálás nem törli a monitor reteszelt okait; azok továbbra is csak külön
 kezelői nyugtázással oldhatók.
 
@@ -321,30 +329,47 @@ hardveraktiválás után engedélyezettek. A kezelő `CONST FLOW` vagy `CONST PR
 módot és célértéket állíthat, majd külön megerősítéssel indíthatja a pumpát.
 
 A besajtolópumpa `RUN` előtt a szolgáltatás friss státuszt olvas mindkét pumpáról,
-és 20 bar alatti köpenynyomás-többletnél megtagadja az indítást. A `STOP ALL`
+és a konfigurált minimum alatti köpenynyomás-többletnél megtagadja az indítást. A `STOP ALL`
 mindkét STOP-ot egymástól függetlenül megkísérli. `CLEAR` és `LOCAL` futó
 pumpánál tiltott. A dashboard globális STOP-ja szinkronizálja, a vészállapot pedig
 visszavonja a pumpavezérlési jogosultságot.
 
 A manuális pumpa- és szelepvezérlés csak Developer módban, egy közös ablakból
 érhető el. Részleges hardver tesztmódban az ablak `IDLE` állapotból is megnyitható,
-és a két pumpa külön kapcsolható, azonosítható és választható le. A pumpastátuszok
-és a két NI-bemenet külön hibahatárral olvasható, ezért egy hiányzó érzékelő nem
-rejti el a működő eszközök adatait. Minden pumpa-RUN előtt továbbra is a teljes
-`SafetyMonitor`-lánc fut le; a kézi szelepjel pedig a `ControlLoop` útvonalán jut
-az aktuátorra. Hiányos biztonsági telemetria a RUN és nem-SAFE szelepírást tiltja,
-de a STOP, safe-state és leválasztás mindig külön-külön megkísérelhető.
+és minden profilhoz hozzáadott pumpán a kapcsolódás, azonosítás és REMOTE módba
+lépés egyetlen UI-művelet. A pumpastátuszok és az engedélyezett NI-bemenetek külön
+hibahatárral olvashatók, ezért egy nem hozzáadott érzékelő nem jelenik meg
+kapcsolathibaként. Pumpa-RUN előtt a `ManualSafetyMonitor` csak a megcélzott pumpa
+kapcsolatát, véges saját adatait és maximális nyomását ellenőrzi. A kézi
+szelepjel a `ControlLoop.write_manual_output()` útvonalán, 0–100%-os
+tartományellenőrzéssel jut az aktuátorra. A STOP, safe-state és leválasztás
+mindig külön-külön megkísérelhető. A manuális ablak minden bezárási útvonala
+leállítja az időzített telemetriát, kivárja az aktív DASNET-műveletet, majd minden
+pumpán megkísérli a STOP-ot és a soros kliens lezárását.
 A manuális ablak időzített kapcsolatfrissítése nem hív közös `observe_once`
 mérési ciklust: a pumpák és az NI-bemenetek külön olvasása csak kapcsolat- és
-telemetriateszt. A teljes biztonsági mintavétel kizárólag tényleges RUN vagy
-nem-SAFE szelepírás kezdeményezésekor fut le.
+telemetriateszt. A teljes mérési `SafetyMonitor` kizárólag normál mérési
+preflightban és runtime-ban fut; nem kapcsolódó opcionális eszköz nem része a
+manuális parancs döntésének.
+
+Az `HardwareConfiguration` eszközönkénti engedélyezési jelzőket tartalmaz. Az
+`NidaqConfig` és a `MeasurementChannels` a nem hozzáadott bemenetet `None`
+csatornaként viszi tovább; a pillanatképben és CSV-ben ez hiányzó érték, nem
+kitalált nulla. Vonali bemenet nélkül a vonali PID-forrás eltűnik a UI-ból, a
+besajtolópumpa nyomásáról vezérelt normál mérés azonban elindítható.
 
 A Developer menüpont Developer módban mindig kattintható. Futó mérés vagy
 reteszelt hiba esetén a dashboard konkrét hibaüzenetben jelzi a szükséges
 előfeltételt. A vezérlőablak a telemetria-lekérdezést és a kezelői parancsot külön
 foglalt állapottal kezeli: a lekérdezés közben érkező parancs sorba áll, majd a
-lekérdezés befejezése után lefut. A felület minden parancsnál folyamatban, sikeres
-vagy sikertelen állapotot jelenít meg.
+lekérdezés befejezése után lefut. Folyamatban lévő parancs mellett további
+parancsok is sorba állnak; a STOP és safe-state műveletek a várakozó normál
+parancsok elé kerülnek. A felület minden parancsnál folyamatban, sikeres vagy
+sikertelen állapotot jelenít meg. Egy `DasnetClient` egyszerre pontosan egy
+tranzakciót enged a soros portra, és a 0,25 másodperces részolvasásokat több
+ablakon keresztül, legfeljebb 512 bájtos teljes, CR-rel lezárt keretté gyűjti.
+Kapcsolatvesztésnél a véges próbálkozási korlát megmarad, hogy a biztonsági
+felügyelet ne blokkolhasson korlátlan ideig.
 
 Az A/B/C/D csatorna az írási parancsokban is érvényesül: A csatornán utótag
 nélküli, B/C/D csatornán `FLOWx`, `PRESSx`, `RUNx`, `STOPx` alak készül.
