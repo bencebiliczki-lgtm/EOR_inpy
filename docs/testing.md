@@ -133,9 +133,13 @@ A pumpavezérlési tesztek ellenőrzik a REMOTE–konfigurálás–RUN–STOP–
 a pontos RUN-megerősítést, a konfigurálatlan indítás tiltását, a 20 baros interlock
 határ alatti és pontos határértékű esetét, valamint a globális safe STOP
 állapotszinkronját. Külön teszt igazolja a B csatorna parancsutótagjait.
-A Qt-teszt emellett igazolja, hogy a Developer hardvervezérlés menüpontja tiltott
-előfeltételnél is visszajelzést ad, a telemetria közben kiadott parancs sorba áll,
-majd végrehajtás után látható sikerállapotot kap.
+A részleges kapcsolati tesztek igazolják, hogy az egyik pumpa vagy NI-bemenet hibája
+mellett a többi eszköz sikeres státusza megmarad, valamint hogy bezáráskor minden
+elérhető pumpán külön STOP és leválasztás történik. A Qt-teszt emellett igazolja,
+hogy a Developer manuális ablak részleges hardveres `IDLE` állapotból megnyitható,
+a telemetria közben kiadott parancs sorba áll, majd végrehajtás után látható
+sikerállapotot kap. Hiányos telemetria mellett a működő szenzor értéke látható,
+miközben a biztonságkritikus RUN tiltása egyértelmű marad.
 
 ## Hardveres smoke test
 

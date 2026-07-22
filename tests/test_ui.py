@@ -36,6 +36,7 @@ from eor_control.device_testing import (  # noqa: E402
     FunctionalDeviceTestSession,
 )
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger  # noqa: E402
+from eor_control.domain import PumpStatus  # noqa: E402
 from eor_control.hardware import (  # noqa: E402
     ConnectionTestResult,
     DeviceConnectionResult,
@@ -45,6 +46,7 @@ from eor_control.hardware import (  # noqa: E402
     SerialPortInfo,
 )
 from eor_control.projects import ProjectRepository  # noqa: E402
+from eor_control.pump_control import PumpRole  # noqa: E402
 from eor_control.ui import (  # noqa: E402
     ADD_STAGE_ACTION_DATA,
     DARK_STYLESHEET,
@@ -137,6 +139,91 @@ def test_manual_control_queues_command_during_telemetry_and_shows_success() -> N
     assert dialog._operation_status.text() == "SIKERES — tesztparancs"
     assert all(button.isEnabled() for button in dialog._buttons)
     dialog.close()
+
+
+def test_manual_control_retains_partial_pump_status_when_sensor_is_missing() -> None:
+    app = application()
+
+    class PartialService:
+        @staticmethod
+        def read_available_statuses() -> tuple[
+            dict[PumpRole, PumpStatus], dict[PumpRole, str]
+        ]:
+            return (
+                {PumpRole.JACKET: PumpStatus(120.0, 0.0, 200.0)},
+                {PumpRole.INJECTION: "nincs csatlakoztatva"},
+            )
+
+    class MissingSensorLoop:
+        @staticmethod
+        def read_pressure_inputs_individually() -> tuple[
+            dict[str, float], dict[str, str]
+        ]:
+            return (
+                {"line_pressure": 12.5},
+                {"differential_pressure": "sensor is not connected"},
+            )
+
+        @staticmethod
+        def observe_once(*, active_stage: str) -> object:
+            raise ConnectionError(
+                f"{active_stage}: differential pressure sensor is not connected"
+            )
+
+    dialog = PumpControlDialog(  # type: ignore[arg-type]
+        PartialService(),
+        MissingSensorLoop(),
+        lambda: "Teszt szakasz",
+    )
+    dialog._telemetry_timer.stop()
+
+    dialog._refresh_statuses()
+    for _ in range(100):
+        app.processEvents()
+        if not dialog._telemetry_active:
+            break
+        sleep(0.01)
+
+    assert "KAPCSOLÓDVA" in dialog._status_labels[PumpRole.JACKET].text()
+    assert "120.00 bar" in dialog._status_labels[PumpRole.JACKET].text()
+    assert "NINCS KAPCSOLAT" in dialog._status_labels[PumpRole.INJECTION].text()
+    assert dialog._line_pressure_status.text() == "12.50 bar"
+    assert "sensor is not connected" in dialog._differential_pressure_status.text()
+    assert "RÉSZLEGES TELEMETRIA" in dialog._safety_status.text()
+    assert "RUN" in dialog._safety_status.text()
+    dialog.close()
+
+
+def test_manual_control_opens_from_idle_partial_hardware_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+    )
+    window._set_developer_mode(True)
+    window._run_mode = RunMode.HARDWARE
+    window._partial_hardware_mode = True
+    window._pump_control = object()  # type: ignore[assignment]
+    opened: list[bool] = []
+
+    class FakeManualDialog:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            opened.append(True)
+
+        @staticmethod
+        def exec() -> int:
+            return 0
+
+    monkeypatch.setattr("eor_control.ui.PumpControlDialog", FakeManualDialog)
+
+    window._open_pump_control()
+
+    assert window._devices.status.state is ApplicationState.IDLE
+    assert opened == [True]
+    window._pump_control = None
+    window._run_mode = RunMode.SIMULATION
+    window.close()
 
 
 def test_guided_device_test_window_close_uses_central_safe_shutdown(
@@ -250,8 +337,10 @@ class UnusedTester:
         raise AssertionError("test should not be called directly")
 
 
-def test_device_settings_discovers_dropdown_choices(tmp_path: Path) -> None:
-    application()
+def test_device_settings_discovers_dropdown_choices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = application()
     settings = QSettings(str(tmp_path / "hardware.ini"), QSettings.Format.IniFormat)
     log_path = tmp_path / "communication.html"
     diagnostics = DiagnosticLogger(log_path)
@@ -279,6 +368,25 @@ def test_device_settings_discovers_dropdown_choices(tmp_path: Path) -> None:
 
     assert isinstance(dialog.jacket_port, QComboBox)
     assert_input_fields_are_labelled(dialog)
+    dialog.show()
+    app.processEvents()
+    expected_pump_labels = {
+        dialog.jacket_port: "Köpenypumpa soros portja (COM)",
+        dialog.jacket_id: "Köpenypumpa DASNET eszközazonosítója (0–9)",
+        dialog.jacket_channel: "Köpenypumpa pumpacsatornája (A–D)",
+        dialog.injection_port: "Besajtolópumpa soros portja (COM)",
+        dialog.injection_id: "Besajtolópumpa DASNET eszközazonosítója (0–9)",
+        dialog.injection_channel: "Besajtolópumpa pumpacsatornája (A–D)",
+        dialog.baud_rate: "Soros kommunikáció sebessége (baud)",
+        dialog.pump_cabling_notes: "Pumpák kábelezési megjegyzése",
+    }
+    all_labels = dialog.findChildren(QLabel)
+    for field, expected_text in expected_pump_labels.items():
+        label = next(item for item in all_labels if item.buddy() is field)
+        assert label.text() == expected_text
+        assert label.isVisible()
+        assert label.width() > 0
+        assert label.height() > 0
     assert dialog.device_tabs.count() == 2
     assert dialog.device_tabs.tabText(0) == "Pumpák"
     assert dialog.device_tabs.tabText(1) == "NI mérés és szelep"
@@ -349,6 +457,7 @@ def test_device_settings_discovers_dropdown_choices(tmp_path: Path) -> None:
         )
     )
     assert not dialog._activate_button.isEnabled()
+    assert dialog._partial_activate_button.isEnabled()
     assert "SIKERTELEN" in dialog._connection_result_labels[
         HardwareTestDevice.JACKET_PUMP
     ].text()
@@ -356,6 +465,17 @@ def test_device_settings_discovers_dropdown_choices(tmp_path: Path) -> None:
         HardwareTestDevice.INJECTION_PUMP
     ].text()
     assert "Sikeres kapcsolatok: 3/4" in dialog._result_label.text()
+    monkeypatch.setattr(
+        QInputDialog,
+        "getText",
+        lambda *_args, **_kwargs: (
+            DeviceSettingsDialog.PARTIAL_HARDWARE_CONFIRMATION,
+            True,
+        ),
+    )
+    dialog._activate_partial()
+    assert dialog.partial_activation
+    assert dialog.result() == QDialog.DialogCode.Accepted
     dialog.close()
 
 

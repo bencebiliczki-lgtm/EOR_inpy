@@ -160,6 +160,17 @@ def test_out_of_range_sensor_error_identifies_input_and_voltage() -> None:
         measurement_service.sample_once(active_stage="water", valve_percent=0.0)
 
 
+def test_service_telemetry_keeps_valid_sensor_when_other_sensor_is_missing() -> None:
+    measurement_service, _, _, daq, _ = service()
+    del daq.inputs["differential_pressure"]
+
+    values, errors = measurement_service.read_pressure_inputs_individually()
+
+    assert values["line_pressure"] == pytest.approx(100.0)
+    assert "differential_pressure" not in values
+    assert "differential_pressure" in errors
+
+
 @pytest.mark.parametrize("interval", [0.9, 3600.1])
 def test_measurement_interval_is_limited(interval: float) -> None:
     measurement_service, *_ = service()

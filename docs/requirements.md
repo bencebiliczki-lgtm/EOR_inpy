@@ -96,6 +96,11 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   fizikai kimenetet. A hardveres terminálvezérlés csak külön, később jóváhagyott,
   a felderítést és explicit kezelői megerősítést megtartó terv alapján engedhető.
 - Külön előkészítési nézet a pumpák felügyelt vezérlésére.
+- Developer tesztmódban az eszközök külön-külön kapcsolhatók és kérdezhetők le;
+  egy még be nem kötött eszköz hibája nem rejtheti el a többi sikeres kapcsolatát,
+  és nem tilthatja azok STOP vagy leválasztási műveletét. Normál méréshez továbbra
+  is minden kötelező eszköz szükséges. Hiányos biztonsági telemetria mellett RUN
+  és nem-SAFE kimeneti parancs nem engedélyezhető.
 - Automatikus nyomásfelépítés közben a köpeny- és besajtolási nyomás megengedett különbségének betartása.
 - A szelep automata és kézi módban működhet.
 - Automata módban a szabályozási forrás választható legyen: besajtoló pumpa nyomása vagy vonali nyomásmérő.

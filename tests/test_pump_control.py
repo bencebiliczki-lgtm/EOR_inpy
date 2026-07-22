@@ -10,8 +10,15 @@ from eor_control.pump_control import PumpControlService, PumpOperatingMode, Pump
 class FakePump:
     pressure: float
     commands: list[str]
+    connected: bool = False
+
+    def connect(self) -> None:
+        self.connected = True
+        self.commands.append("CONNECT")
 
     def read_status(self) -> PumpStatus:
+        if not self.connected:
+            raise ConnectionError("pump disconnected")
         return PumpStatus(self.pressure, 0.0, 200.0)
 
     def enter_remote(self) -> None:
@@ -35,6 +42,10 @@ class FakePump:
     def return_local(self) -> None:
         self.commands.append("LOCAL")
 
+    def disconnect(self) -> None:
+        self.connected = False
+        self.commands.append("DISCONNECT")
+
 
 def service(jacket_pressure: float = 120.0, injection_pressure: float = 100.0) -> tuple[
     PumpControlService, FakePump, FakePump
@@ -43,6 +54,10 @@ def service(jacket_pressure: float = 120.0, injection_pressure: float = 100.0) -
     injection = FakePump(injection_pressure, [])
     control = PumpControlService(jacket_pump=jacket, injection_pump=injection)
     control.authorize(PumpControlService.AUTHORIZATION)
+    control.connect(PumpRole.JACKET)
+    control.connect(PumpRole.INJECTION)
+    jacket.commands.clear()
+    injection.commands.clear()
     return control, jacket, injection
 
 
@@ -111,9 +126,59 @@ def test_full_safety_interlock_blocks_every_pump_run() -> None:
         safety_check=lambda: ("line pressure limit exceeded",),
     )
     control.authorize(PumpControlService.AUTHORIZATION)
+    control.connect(PumpRole.JACKET)
+    control.connect(PumpRole.INJECTION)
+    jacket.commands.clear()
+    injection.commands.clear()
     prepare(control, PumpRole.JACKET)
 
     with pytest.raises(PermissionError, match="safety interlock active"):
         control.run(PumpRole.JACKET, PumpControlService.RUN_JACKET_CONFIRMATION)
 
     assert "RUN" not in jacket.commands
+
+
+class ConnectFailingPump(FakePump):
+    def connect(self) -> None:
+        raise ConnectionError("sensor-side pump unavailable")
+
+
+def test_pumps_connect_and_report_status_independently() -> None:
+    jacket = FakePump(120.0, [])
+    injection = ConnectFailingPump(100.0, [])
+    control = PumpControlService(jacket_pump=jacket, injection_pump=injection)
+    control.authorize(PumpControlService.AUTHORIZATION)
+
+    jacket_status = control.connect(PumpRole.JACKET)
+    with pytest.raises(ConnectionError, match="unavailable"):
+        control.connect(PumpRole.INJECTION)
+    statuses, errors = control.read_available_statuses()
+
+    assert jacket_status.pressure_bar == 120.0
+    assert statuses[PumpRole.JACKET].pressure_bar == 120.0
+    assert PumpRole.INJECTION not in statuses
+    assert errors[PumpRole.INJECTION] == "nincs csatlakoztatva"
+
+
+class StopFailingPump(FakePump):
+    def request_stop(self) -> None:
+        raise ConnectionError("STOP unavailable")
+
+
+def test_partial_shutdown_attempts_every_stop_and_disconnect_independently() -> None:
+    jacket = StopFailingPump(120.0, [])
+    injection = FakePump(100.0, [])
+    control = PumpControlService(jacket_pump=jacket, injection_pump=injection)
+    control.authorize(PumpControlService.AUTHORIZATION)
+    control.connect(PumpRole.JACKET)
+    control.connect(PumpRole.INJECTION)
+    jacket.commands.clear()
+    injection.commands.clear()
+
+    errors = control.shutdown_connections()
+
+    assert errors == ("jacket STOP: STOP unavailable",)
+    assert jacket.commands == ["DISCONNECT"]
+    assert injection.commands == ["STOP", "DISCONNECT"]
+    assert not control.connected(PumpRole.JACKET)
+    assert not control.connected(PumpRole.INJECTION)

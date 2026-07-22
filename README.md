@@ -127,6 +127,12 @@ a két pumpa és a két NI bemenet külön-külön is tesztelhető; az összesí
 részleges hiba esetén is megmutatja, mely kapcsolatok voltak sikeresek. A szelep
 AO kapcsolatát a program nem jelöli olvasással igazoltnak, mert annak próbája
 fizikai kimeneti írást igényelne.
+Developer módban legalább egy sikeres egyedi kapcsolatpróba után külön
+**Részleges HARDVER tesztmód** aktiválható. Ebben a módban normál mérés nem
+indítható, viszont a manuális hardverablakban a két pumpa egymástól és az
+NI-bemenetektől függetlenül kapcsolható vagy választható le. A működő szenzorok
+értéke részleges telemetriaként megmarad; hiányos biztonsági telemetria mellett
+pumpa-RUN és nem-SAFE szelepírás továbbra is tiltott.
 Mindkét NI bemenet és a szelep NI kimenete felhasználó által megadható és külön
 menthető; egyik fizikai csatorna sincs kötelezően a forráskódba rögzítve.
 Ugyanitt választható az NI bemeneti bekötési mód, megadható a pumpa- és NI-kábelezés

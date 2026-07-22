@@ -60,6 +60,33 @@ class MeasurementService:
         self._initial_jacket_volume_ml = None
         self._initial_injection_volume_ml = None
 
+    def read_pressure_inputs_individually(
+        self,
+    ) -> tuple[dict[str, float], dict[str, str]]:
+        """Read each NI pressure input independently for service telemetry."""
+
+        values: dict[str, float] = {}
+        errors: dict[str, str] = {}
+        inputs = (
+            (
+                "line_pressure",
+                self._channels.line_pressure,
+                self._line_calibration,
+            ),
+            (
+                "differential_pressure",
+                self._channels.differential_pressure,
+                self._differential_calibration,
+            ),
+        )
+        for key, channel, calibration in inputs:
+            try:
+                voltage = self._daq.read_voltage(channel)
+                values[key] = calibration.convert(voltage)
+            except Exception as error:
+                errors[key] = str(error)
+        return values, errors
+
     def sample_once(
         self,
         *,

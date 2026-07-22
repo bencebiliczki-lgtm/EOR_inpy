@@ -5,7 +5,7 @@ import sys
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Thread
@@ -1047,6 +1047,8 @@ class EditableSelectionComboBox(QComboBox):
 
 
 class DeviceSettingsDialog(QDialog):
+    PARTIAL_HARDWARE_CONFIRMATION = "ENABLE PARTIAL HARDWARE TEST MODE"
+
     def __init__(
         self,
         tester: HardwareConnectionTester,
@@ -1080,6 +1082,7 @@ class DeviceSettingsDialog(QDialog):
         self._connection_registry = ConnectionTestRegistry()
         self._active_test_configuration: HardwareConfiguration | None = None
         self._configuration: HardwareConfiguration | None = None
+        self._partial_activation = False
         self.setWindowTitle("Eszközbeállítások")
         self.setMinimumSize(420, 360)
         screen = QApplication.primaryScreen()
@@ -1179,25 +1182,25 @@ class DeviceSettingsDialog(QDialog):
         )
         pump_box = QGroupBox("Pumpák csatlakoztatása")
         pump_form = QFormLayout(pump_box)
-        pump_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        pump_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         pump_form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
         )
         for label, pump_widget in (
-            ("Köpenypumpa csatlakozója", self.jacket_port),
-            ("Köpenypumpa vezérlőazonosítója", self.jacket_id),
-            ("Köpenypumpa csatlakozási helye", self.jacket_channel),
-            ("Besajtolópumpa csatlakozója", self.injection_port),
-            ("Besajtolópumpa vezérlőazonosítója", self.injection_id),
-            ("Besajtolópumpa csatlakozási helye", self.injection_channel),
-            ("Kapcsolati sebesség", self.baud_rate),
-            ("Kábelezési megjegyzés", self.pump_cabling_notes),
+            ("Köpenypumpa soros portja (COM)", self.jacket_port),
+            ("Köpenypumpa DASNET eszközazonosítója (0–9)", self.jacket_id),
+            ("Köpenypumpa pumpacsatornája (A–D)", self.jacket_channel),
+            ("Besajtolópumpa soros portja (COM)", self.injection_port),
+            ("Besajtolópumpa DASNET eszközazonosítója (0–9)", self.injection_id),
+            ("Besajtolópumpa pumpacsatornája (A–D)", self.injection_channel),
+            ("Soros kommunikáció sebessége (baud)", self.baud_rate),
+            ("Pumpák kábelezési megjegyzése", self.pump_cabling_notes),
         ):
             self._add_responsive_form_row(pump_form, label, pump_widget)
 
         ni_box = QGroupBox("Nyomásmérés és szelepvezérlés")
         ni_form = QFormLayout(ni_box)
-        ni_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        ni_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         ni_form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
         )
@@ -1279,7 +1282,7 @@ class DeviceSettingsDialog(QDialog):
         layout.addWidget(connection_box)
         validation = QGroupBox("Helyszíni validáció felhasználói adatai")
         validation_form = QFormLayout(validation)
-        validation_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        validation_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         validation_form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
         )
@@ -1344,6 +1347,16 @@ class DeviceSettingsDialog(QDialog):
         self._activate_button = QPushButton("HARDVER mód aktiválása")
         self._activate_button.setEnabled(False)
         self._activate_button.clicked.connect(self._activate)
+        self._partial_activate_button = QPushButton(
+            "Részleges HARDVER tesztmód aktiválása…"
+        )
+        self._partial_activate_button.setVisible(developer_mode)
+        self._partial_activate_button.setEnabled(False)
+        self._partial_activate_button.setToolTip(
+            "Csak Developer eszközteszthez. A normál mérés mindaddig tiltott, "
+            "amíg minden kötelező kapcsolat nem sikeres."
+        )
+        self._partial_activate_button.clicked.connect(self._activate_partial)
         self._functional_test_button = QPushButton(
             "Vezetett funkcionális eszközteszt…"
         )
@@ -1355,6 +1368,7 @@ class DeviceSettingsDialog(QDialog):
         outer_layout.addWidget(self._save_button)
         outer_layout.addWidget(self._test_button)
         outer_layout.addWidget(self._activate_button)
+        outer_layout.addWidget(self._partial_activate_button)
         outer_layout.addWidget(self._functional_test_button)
         outer_layout.addWidget(self._cancel_button)
         self._bridge = DeviceTestBridge(self)
@@ -1393,6 +1407,10 @@ class DeviceSettingsDialog(QDialog):
             return None
         return self._connection_registry.aggregate(self._configuration)
 
+    @property
+    def partial_activation(self) -> bool:
+        return self._partial_activation
+
     @staticmethod
     def _add_responsive_form_row(
         form: QFormLayout, label: str, field: QWidget
@@ -1401,7 +1419,7 @@ class DeviceSettingsDialog(QDialog):
         label_widget.setWordWrap(True)
         label_widget.setMinimumWidth(0)
         label_widget.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
         )
         field.setMinimumWidth(0)
         field.setSizePolicy(
@@ -1855,6 +1873,9 @@ class DeviceSettingsDialog(QDialog):
         if result.all_successful:
             self._configuration = configuration
         self._activate_button.setEnabled(result.all_successful)
+        self._partial_activate_button.setEnabled(
+            self._developer_mode and any(item.successful for item in result.devices)
+        )
         self._functional_test_button.setEnabled(
             result.all_successful
             and self._current_mode is RunMode.HARDWARE
@@ -1880,6 +1901,7 @@ class DeviceSettingsDialog(QDialog):
     def _connection_configuration_changed(self, *_args: object) -> None:
         self._test_succeeded = False
         self._activate_button.setEnabled(False)
+        self._partial_activate_button.setEnabled(False)
         self._functional_test_button.setEnabled(False)
         try:
             configuration = self._read_configuration()
@@ -1917,6 +1939,7 @@ class DeviceSettingsDialog(QDialog):
         self._test_button.setEnabled(True)
         self._set_device_test_buttons_enabled(True)
         self._activate_button.setEnabled(False)
+        self._partial_activate_button.setEnabled(False)
         self._functional_test_button.setEnabled(False)
         self._result_label.setText(f"SIKERTELEN KAPCSOLATPRÓBA: {message}")
         self._result_label.setStyleSheet("color:#b00020;font-weight:700")
@@ -1944,6 +1967,36 @@ class DeviceSettingsDialog(QDialog):
             self._test_failed("előbb sikeres kapcsolatpróba szükséges")
             return
         self._store_configuration(self._configuration)
+        self._partial_activation = False
+        self.accept()
+
+    def _activate_partial(self) -> None:
+        try:
+            configuration = self._read_configuration()
+        except ValueError as error:
+            self._test_failed(str(error))
+            return
+        result = self._connection_registry.aggregate(configuration)
+        if not any(item.successful for item in result.devices):
+            self._test_failed(
+                "a részleges tesztmódhoz legalább egy sikeres egyedi kapcsolatpróba szükséges"
+            )
+            return
+        confirmation, accepted = QInputDialog.getText(
+            self,
+            "Részleges fizikai hardver tesztmód",
+            "Ebben a módban normál mérés nem indítható. A kimeneti parancsok "
+            "továbbra is külön megerősítést és biztonsági ellenőrzést kérnek.\n\n"
+            f"Írd be pontosan: {self.PARTIAL_HARDWARE_CONFIRMATION}",
+        )
+        if not accepted:
+            return
+        if confirmation != self.PARTIAL_HARDWARE_CONFIRMATION:
+            self._test_failed("a részleges hardver tesztmód megerősítése nem egyezett")
+            return
+        self._configuration = configuration
+        self._partial_activation = True
+        self._store_configuration(configuration)
         self.accept()
 
     def _open_functional_test(self) -> None:
@@ -2387,6 +2440,16 @@ class DeviceTestWizard(QDialog):
         super().closeEvent(event)
 
 
+@dataclass(frozen=True, slots=True)
+class ManualTelemetryResult:
+    pump_statuses: dict[PumpRole, PumpStatus]
+    pump_errors: dict[PumpRole, str]
+    pressure_values: dict[str, float]
+    pressure_errors: dict[str, str]
+    measurement: MeasurementRecord | None
+    measurement_error: str | None
+
+
 class PumpControlDialog(QDialog):
     VALVE_CONFIRMATION = "SET VALVE OUTPUT"
 
@@ -2486,6 +2549,8 @@ class PumpControlDialog(QDialog):
         form.addRow("Állapot", status)
         form.addRow("Üzemmód", mode)
         form.addRow("Célérték", target)
+        form.addRow(self._button("KAPCSOLÓDÁS", lambda: self._connect_pump(role)))
+        form.addRow(self._button("LEVÁLASZTÁS", lambda: self._disconnect_pump(role)))
         form.addRow(self._button("REMOTE", lambda: self._remote(role)))
         form.addRow(self._button("Mód és célérték beállítása", lambda: self._configure(role)))
         form.addRow(self._button("RUN", lambda: self._run(role)))
@@ -2583,6 +2648,18 @@ class PumpControlDialog(QDialog):
     def _remote(self, role: PumpRole) -> None:
         self._execute(lambda: self._service.enter_remote(role), f"{role.value} REMOTE")
 
+    def _connect_pump(self, role: PumpRole) -> None:
+        self._execute(
+            lambda: self._service.connect(role),
+            f"{role.value} pump connected and identified",
+        )
+
+    def _disconnect_pump(self, role: PumpRole) -> None:
+        self._execute(
+            lambda: self._service.disconnect(role),
+            f"{role.value} pump safely disconnected",
+        )
+
     def _configure(self, role: PumpRole) -> None:
         mode = PumpOperatingMode(self._modes[role].currentData())
         target = self._targets[role].value()
@@ -2629,20 +2706,81 @@ class PumpControlDialog(QDialog):
 
         def execute() -> None:
             try:
-                result = self._control_loop.observe_once(
+                statuses, pump_errors = self._service.read_available_statuses()
+            except Exception as error:
+                self._telemetry_bridge.failed.emit(str(error))
+                return
+            pressure_values, pressure_errors = (
+                self._control_loop.read_pressure_inputs_individually()
+            )
+            measurement: MeasurementRecord | None
+            measurement_error: str | None
+            try:
+                measurement = self._control_loop.observe_once(
                     active_stage=self._active_stage_provider()
                     or "Developer manuális vezérlés"
                 )
             except Exception as error:
-                self._telemetry_bridge.failed.emit(str(error))
+                measurement = None
+                measurement_error = str(error)
             else:
-                self._telemetry_bridge.succeeded.emit(result)
+                measurement_error = None
+            self._telemetry_bridge.succeeded.emit(
+                ManualTelemetryResult(
+                    statuses,
+                    pump_errors,
+                    pressure_values,
+                    pressure_errors,
+                    measurement,
+                    measurement_error,
+                )
+            )
 
         Thread(target=execute, name="eor-manual-telemetry", daemon=True).start()
 
     def _telemetry_succeeded(self, result: object) -> None:
         self._telemetry_active = False
-        if isinstance(result, MeasurementRecord):
+        if isinstance(result, ManualTelemetryResult):
+            for role in PumpRole:
+                status = result.pump_statuses.get(role)
+                if status is not None:
+                    self._status_labels[role].setText(
+                        f"KAPCSOLÓDVA | {status.pressure_bar:.2f} bar | "
+                        f"{status.flow_ml_per_hour:.3f} ml/h | "
+                        f"{status.remaining_volume_ml:.3f} ml"
+                    )
+                else:
+                    self._status_labels[role].setText(
+                        "NINCS KAPCSOLAT — "
+                        + result.pump_errors.get(role, "ismeretlen hiba")
+                    )
+            if result.measurement is not None:
+                self._update_live_values(result.measurement)
+            else:
+                line_pressure = result.pressure_values.get("line_pressure")
+                differential_pressure = result.pressure_values.get(
+                    "differential_pressure"
+                )
+                self._line_pressure_status.setText(
+                    f"{line_pressure:.2f} bar"
+                    if line_pressure is not None
+                    else "NINCS ÉRVÉNYES ADAT — "
+                    + result.pressure_errors.get("line_pressure", "ismeretlen hiba")
+                )
+                self._differential_pressure_status.setText(
+                    f"{differential_pressure:.2f} bar"
+                    if differential_pressure is not None
+                    else "NINCS ÉRVÉNYES ADAT — "
+                    + result.pressure_errors.get(
+                        "differential_pressure", "ismeretlen hiba"
+                    )
+                )
+                self._safety_status.setText(
+                    "RÉSZLEGES TELEMETRIA — nem biztonságos RUN vagy szelepírás "
+                    "tiltva: " + (result.measurement_error or "ismeretlen mérési hiba")
+                )
+                self._safety_status.setStyleSheet("color:#b00020;font-weight:700")
+        elif isinstance(result, MeasurementRecord):
             self._update_live_values(result)
         self._run_pending_command()
 
@@ -3770,6 +3908,7 @@ class DashboardWindow(QMainWindow):
         self._measurement_writer = measurement_writer
         self._nas_sync = nas_sync
         self._run_mode = RunMode.SIMULATION
+        self._partial_hardware_mode = False
         self._pump_control: PumpControlService | None = None
         self._active_hardware_configuration: HardwareConfiguration | None = None
         self._hardware_connection_result: ConnectionTestResult | None = None
@@ -4681,7 +4820,18 @@ class DashboardWindow(QMainWindow):
             )
 
     def _refresh_mode_label(self) -> None:
-        if self._run_mode is RunMode.HARDWARE:
+        if self._run_mode is RunMode.HARDWARE and self._partial_hardware_mode:
+            self.setWindowTitle("AFKI EOR mérőrendszer — részleges hardver tesztmód")
+            message = (
+                "RÉSZLEGES HARDVER TESZTMÓD – egyenkénti eszközkezelés; "
+                "normál mérés nem indítható"
+            )
+            title = "Részleges hardver tesztmód"
+            style = (
+                "background:#9a6700;color:white;border-radius:6px;"
+                "padding:9px;font-size:14px;font-weight:800"
+            )
+        elif self._run_mode is RunMode.HARDWARE:
             self.setWindowTitle("AFKI EOR mérőrendszer — éles mérés")
             message = "HARDVER – fizikai berendezés vezérlése és mérési adatmentés"
             title = "Éles mérési mód"
@@ -4804,7 +4954,11 @@ class DashboardWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted or dialog.configuration is None:
             return
         try:
-            self._activate_hardware(dialog.configuration, dialog.connection_result)
+            self._activate_hardware(
+                dialog.configuration,
+                dialog.connection_result,
+                partial=dialog.partial_activation,
+            )
         except Exception as error:
             self._show_error(f"A hardvermód aktiválása sikertelen: {error}")
 
@@ -4817,9 +4971,15 @@ class DashboardWindow(QMainWindow):
                 "A manuális hardvervezérlés csak sikeresen aktivált hardvermódban érhető el."
             )
             return
-        if self._devices.status.state is not ApplicationState.READY:
+        if self._runtime.running or self._devices.status.state is ApplicationState.RUNNING:
             self._show_error(
-                "A pumpavezérléshez előbb csatlakozz az eszközökhöz; a mérés legyen leállítva."
+                "A manuális hardvervezérlés futó mérés közben nem nyitható meg."
+            )
+            return
+        if self._devices.status.state is ApplicationState.FAULT:
+            self._show_error(
+                "A manuális hardvervezérlés reteszelt hiba mellett nem nyitható meg. "
+                "Ellenőrizd a fizikai rendszert, majd nyugtázd a hibát."
             )
             return
         PumpControlDialog(
@@ -5019,7 +5179,16 @@ class DashboardWindow(QMainWindow):
         self,
         configuration: HardwareConfiguration,
         connection_result: ConnectionTestResult | None = None,
+        *,
+        partial: bool = False,
     ) -> None:
+        if self._pump_control is not None:
+            cleanup_errors = self._pump_control.shutdown_connections()
+            if cleanup_errors:
+                raise RuntimeError(
+                    "A korábbi részleges hardverkapcsolatok lezárása sikertelen: "
+                    + "; ".join(cleanup_errors)
+                )
         jacket = open_isco_pump(
             configuration.jacket_config(),
             diagnostics=self._diagnostics,
@@ -5113,11 +5282,21 @@ class DashboardWindow(QMainWindow):
         self._hardware_actuator = actuator
         self._runtime = self._make_runtime(new_loop)
         self._run_mode = RunMode.HARDWARE
+        self._partial_hardware_mode = partial
         self._sync_simulation_mode_action()
         self._diagnostics.emit(
-            DiagnosticCategory.SYSTEM, "MODE", "hardware mode activated"
+            DiagnosticCategory.SYSTEM,
+            "MODE",
+            "partial hardware test mode activated"
+            if partial
+            else "hardware mode activated",
         )
-        self._user_settings.setValue("hardware/last_test_succeeded", True)
+        self._user_settings.setValue(
+            "hardware/last_test_succeeded",
+            not partial
+            and connection_result is not None
+            and connection_result.all_successful,
+        )
         self._refresh_mode_label()
         self._refresh_state()
 
@@ -5129,6 +5308,16 @@ class DashboardWindow(QMainWindow):
                 "Szimulációs módra csak leválasztott, IDLE állapotban lehet váltani."
             )
             return
+
+        if self._pump_control is not None:
+            cleanup_errors = self._pump_control.shutdown_connections()
+            if cleanup_errors:
+                self._show_error(
+                    "A szimuláció nem aktiválható, mert a részleges "
+                    "hardverkapcsolatok biztonságos lezárása sikertelen: "
+                    + "; ".join(cleanup_errors)
+                )
+                return
 
         jacket = SimulatedPump(pressure_bar=120.0)
         injection = SimulatedPump(
@@ -5186,6 +5375,7 @@ class DashboardWindow(QMainWindow):
         self._hardware_actuator = None
         self._runtime = self._make_runtime(new_loop)
         self._run_mode = RunMode.SIMULATION
+        self._partial_hardware_mode = False
         self._sync_simulation_mode_action()
         self._diagnostics.emit(
             DiagnosticCategory.SYSTEM, "MODE", "simulation mode activated"
@@ -5344,6 +5534,8 @@ class DashboardWindow(QMainWindow):
     def _connect_devices(self) -> None:
         try:
             self._devices.connect()
+            if self._pump_control is not None:
+                self._pump_control.observe_connected(*tuple(PumpRole))
         except Exception as error:
             self._show_error(str(error))
         self._refresh_state()
@@ -5354,6 +5546,7 @@ class DashboardWindow(QMainWindow):
                 self._runtime.stop()
             self._devices.disconnect()
             if self._pump_control is not None:
+                self._pump_control.observe_disconnected(*tuple(PumpRole))
                 self._pump_control.revoke()
                 self._pump_control = None
         except Exception as error:
@@ -6326,13 +6519,18 @@ class DashboardWindow(QMainWindow):
             self._manual_control_action.setToolTip(
                 "Előbb aktiváld a hardvermódot az Eszközök ablakban."
             )
-        elif state is not ApplicationState.READY:
+        elif state is ApplicationState.RUNNING:
             self._manual_control_action.setToolTip(
-                "A vezérléshez csatlakoztasd az eszközöket, és állítsd le a mérést."
+                "Futó mérés közben a manuális hardvervezérlés nem nyitható meg."
+            )
+        elif state is ApplicationState.FAULT:
+            self._manual_control_action.setToolTip(
+                "Reteszelt hiba: fizikai ellenőrzés és hibanyugtázás szükséges."
             )
         else:
             self._manual_control_action.setToolTip(
-                "Felügyelt pumpa- és szelepvezérlés megnyitása."
+                "Felügyelt, eszközönkénti pumpa- és szelepvezérlés megnyitása. "
+                "A nem biztonságos RUN és szelepírás teljes biztonsági telemetriát igényel."
             )
         self._measurement_settings_action.setEnabled(
             state is not ApplicationState.RUNNING
@@ -6403,6 +6601,9 @@ class DashboardWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._save_user_settings()
+        application_managed_connection = (
+            self._devices.status.state is not ApplicationState.IDLE
+        )
         if self._runtime.running:
             self._runtime.stop()
         if self._devices.status.state in (
@@ -6413,7 +6614,11 @@ class DashboardWindow(QMainWindow):
         if self._devices.status.state is not ApplicationState.IDLE:
             self._devices.disconnect()
         if self._pump_control is not None:
-            self._pump_control.revoke()
+            if application_managed_connection:
+                self._pump_control.observe_disconnected(*tuple(PumpRole))
+                self._pump_control.revoke()
+            else:
+                self._pump_control.shutdown_connections()
         self._control_loop.close()
         self._nas_sync.close()
         self._projects.close()

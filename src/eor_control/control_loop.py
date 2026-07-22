@@ -92,6 +92,13 @@ class ControlLoop:
             persist=False,
         )
 
+    def read_pressure_inputs_individually(
+        self,
+    ) -> tuple[dict[str, float], dict[str, str]]:
+        """Return partial NI telemetry without weakening the safety decision path."""
+
+        return self._measurement.read_pressure_inputs_individually()
+
     def configure_measurement(
         self,
         *,

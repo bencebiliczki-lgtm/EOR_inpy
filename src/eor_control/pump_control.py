@@ -19,6 +19,8 @@ class PumpOperatingMode(StrEnum):
 
 
 class ControllablePump(Protocol):
+    def connect(self) -> None: ...
+
     def read_status(self) -> PumpStatus: ...
 
     def enter_remote(self) -> None: ...
@@ -34,6 +36,8 @@ class ControllablePump(Protocol):
     def clear(self) -> None: ...
 
     def return_local(self) -> None: ...
+
+    def disconnect(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +73,7 @@ class PumpControlService:
             PumpRole.JACKET: PumpPreparationState(),
             PumpRole.INJECTION: PumpPreparationState(),
         }
+        self._connected = {role: False for role in PumpRole}
         self._minimum_margin = minimum_jacket_margin_bar
         self._diagnostics = diagnostics
         self._safety_check = safety_check
@@ -83,18 +88,96 @@ class PumpControlService:
     def state(self, role: PumpRole) -> PumpPreparationState:
         return self._states[role]
 
+    def connected(self, role: PumpRole) -> bool:
+        return self._connected[role]
+
+    def connect(self, role: PumpRole) -> PumpStatus:
+        """Identify and connect one pump without requiring any other device."""
+
+        self._require_authorized()
+        self._pumps[role].connect()
+        self._connected[role] = True
+        self._states[role] = PumpPreparationState()
+        self._log(role.value, "CONNECTED")
+        return self._pumps[role].read_status()
+
+    def disconnect(self, role: PumpRole) -> None:
+        """Stop and disconnect one pump independently."""
+
+        self._require_authorized()
+        if self._states[role].running:
+            raise RuntimeError("pump must be stopped before disconnect")
+        self._pumps[role].request_stop()
+        self._pumps[role].disconnect()
+        self._connected[role] = False
+        self._states[role] = PumpPreparationState()
+        self._log(role.value, "DISCONNECTED")
+
+    def observe_connected(self, *roles: PumpRole) -> None:
+        """Synchronize state after the application service connected devices."""
+
+        for role in roles:
+            self._connected[role] = True
+
+    def observe_disconnected(self, *roles: PumpRole) -> None:
+        for role in roles:
+            self._connected[role] = False
+            self._states[role] = PumpPreparationState()
+
+    def shutdown_connections(self) -> tuple[str, ...]:
+        """Attempt STOP and disconnect for every individually connected pump."""
+
+        errors: list[str] = []
+        for role, pump in self._pumps.items():
+            if not self._connected[role]:
+                continue
+            try:
+                pump.request_stop()
+            except Exception as error:
+                errors.append(f"{role.value} STOP: {error}")
+            try:
+                pump.disconnect()
+            except Exception as error:
+                errors.append(f"{role.value} disconnect: {error}")
+            self._connected[role] = False
+            self._states[role] = PumpPreparationState()
+        self._authorized = False
+        return tuple(errors)
+
+    def read_available_statuses(
+        self,
+    ) -> tuple[dict[PumpRole, PumpStatus], dict[PumpRole, str]]:
+        """Read each connected pump independently and retain partial success."""
+
+        self._require_authorized()
+        statuses: dict[PumpRole, PumpStatus] = {}
+        errors: dict[PumpRole, str] = {}
+        for role, pump in self._pumps.items():
+            if not self._connected[role]:
+                errors[role] = "nincs csatlakoztatva"
+                continue
+            try:
+                statuses[role] = pump.read_status()
+            except Exception as error:
+                errors[role] = str(error)
+        return statuses, errors
+
     def statuses(self) -> dict[PumpRole, PumpStatus]:
         self._require_authorized()
+        for role in PumpRole:
+            self._require_connected(role)
         return {role: pump.read_status() for role, pump in self._pumps.items()}
 
     def enter_remote(self, role: PumpRole) -> None:
         self._require_authorized()
+        self._require_connected(role)
         self._pumps[role].enter_remote()
         self._states[role] = PumpPreparationState(remote=True)
         self._log(role.value, "REMOTE")
 
     def configure(self, role: PumpRole, mode: PumpOperatingMode, target: float) -> None:
         self._require_authorized()
+        self._require_connected(role)
         state = self._states[role]
         if not state.remote or state.running:
             raise RuntimeError("pump must be stopped in REMOTE mode before configuration")
@@ -112,6 +195,7 @@ class PumpControlService:
 
     def run(self, role: PumpRole, confirmation: str) -> None:
         self._require_authorized()
+        self._require_connected(role)
         expected = (
             self.RUN_JACKET_CONFIRMATION
             if role is PumpRole.JACKET
@@ -174,6 +258,7 @@ class PumpControlService:
 
     def clear(self, role: PumpRole) -> None:
         self._require_authorized()
+        self._require_connected(role)
         if self._states[role].running:
             raise RuntimeError("pump must be stopped before CLEAR")
         self._pumps[role].clear()
@@ -182,6 +267,7 @@ class PumpControlService:
 
     def return_local(self, role: PumpRole) -> None:
         self._require_authorized()
+        self._require_connected(role)
         if self._states[role].running:
             raise RuntimeError("pump must be stopped before LOCAL")
         self._pumps[role].return_local()
@@ -204,6 +290,10 @@ class PumpControlService:
     def _require_authorized(self) -> None:
         if not self._authorized:
             raise PermissionError("physical pump control is not authorized")
+
+    def _require_connected(self, role: PumpRole) -> None:
+        if not self._connected[role]:
+            raise ConnectionError(f"{role.value} pump is not connected")
 
     def _log(self, direction: str, message: str, *, level: str = "INFO") -> None:
         if self._diagnostics is not None:
