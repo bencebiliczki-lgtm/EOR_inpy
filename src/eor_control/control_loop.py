@@ -92,6 +92,43 @@ class ControlLoop:
             persist=False,
         )
 
+    def supervise_hold_once(
+        self,
+        *,
+        active_stage: str,
+        mode: ControlMode,
+        source: PressureSource,
+        setpoint_bar: float,
+    ) -> ControlCycleResult:
+        """Supervise a paused measurement without changing its held output."""
+        record = self._measurement.sample_once(
+            active_stage=active_stage,
+            valve_percent=self._last_output_percent,
+            persist=False,
+            pressure_target_bar=(
+                setpoint_bar if mode is ControlMode.AUTOMATIC else None
+            ),
+            use_line_pressure_for_control=source is PressureSource.LINE_SENSOR,
+        )
+        if record.safety_reasons:
+            self._last_output_percent = 0.0
+            command = ValveCommand(
+                False,
+                None,
+                mode,
+                source,
+                "paused measurement safety interlock",
+            )
+        else:
+            command = ValveCommand(
+                True,
+                self._last_output_percent,
+                mode,
+                source,
+                "measurement paused; physical output held",
+            )
+        return ControlCycleResult(record=record, command=command)
+
     def observe_pump_startup_once(self, *, active_stage: str) -> MeasurementRecord:
         """Supervise jacket pressure buildup before injection is allowed to run."""
         return self._measurement.sample_once(

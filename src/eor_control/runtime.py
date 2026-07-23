@@ -54,20 +54,45 @@ class BackgroundControlRunner:
         self._on_fault = on_fault
         self._settings: RuntimeSettings | None = None
         self._settings_lock = Lock()
+        self._cycle_lock = Lock()
         self._stop_event = Event()
+        self._pause_event = Event()
         self._thread: Thread | None = None
 
     @property
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    @property
+    def paused(self) -> bool:
+        return self.running and self._pause_event.is_set()
+
     def start(self, settings: RuntimeSettings) -> None:
         if self.running:
             raise RuntimeError("control runner is already running")
         self.update_settings(settings)
         self._stop_event.clear()
+        self._pause_event.clear()
         self._thread = Thread(target=self._run, name="eor-control-loop", daemon=True)
         self._thread.start()
+
+    def pause(self) -> None:
+        if not self.running:
+            raise RuntimeError("control runner is not running")
+        if self.paused:
+            raise RuntimeError("control runner is already paused")
+        self._pause_event.set()
+        # Do not return while a cycle that started before the pause request can
+        # still update the actuator, persistence, or UI.
+        with self._cycle_lock:
+            pass
+
+    def resume(self) -> None:
+        if not self.running:
+            raise RuntimeError("control runner is not running")
+        if not self.paused:
+            raise RuntimeError("control runner is not paused")
+        self._pause_event.clear()
 
     def update_settings(self, settings: RuntimeSettings) -> None:
         with self._settings_lock:
@@ -75,6 +100,7 @@ class BackgroundControlRunner:
 
     def stop(self, timeout_seconds: float = 2.0) -> None:
         self._stop_event.set()
+        self._pause_event.clear()
         thread = self._thread
         if thread is not None:
             thread.join(timeout_seconds)
@@ -102,24 +128,38 @@ class BackgroundControlRunner:
                 started = monotonic()
                 settings = self._current_settings()
                 deadline_missed = started > next_control + self._watchdog_tolerance
-                persist = started >= next_record
-                result = self._control_loop.execute_once(
-                    active_stage=settings.active_stage,
-                    mode=settings.mode,
-                    dt_seconds=max(started - previous_cycle, self._interval),
-                    manual_output_percent=settings.manual_output_percent,
-                    source=settings.source,
-                    setpoint_bar=settings.setpoint_bar,
-                    persist=persist,
-                    control_deadline_missed=deadline_missed,
-                )
-                cycle_elapsed = monotonic() - started
-                if cycle_elapsed > self._interval + self._watchdog_tolerance:
-                    raise TimeoutError(
-                        f"control cycle deadline missed: {cycle_elapsed:.3f} seconds"
+                paused = self._pause_event.is_set()
+                persist = not paused and started >= next_record
+                with self._cycle_lock:
+                    result = (
+                        self._control_loop.supervise_hold_once(
+                            active_stage=settings.active_stage,
+                            mode=settings.mode,
+                            source=settings.source,
+                            setpoint_bar=settings.setpoint_bar,
+                        )
+                        if paused
+                        else self._control_loop.execute_once(
+                            active_stage=settings.active_stage,
+                            mode=settings.mode,
+                            dt_seconds=max(started - previous_cycle, self._interval),
+                            manual_output_percent=settings.manual_output_percent,
+                            source=settings.source,
+                            setpoint_bar=settings.setpoint_bar,
+                            persist=persist,
+                            control_deadline_missed=deadline_missed,
+                        )
                     )
-                if self._on_cycle is not None:
-                    self._on_cycle(result)
+                    cycle_elapsed = monotonic() - started
+                    if cycle_elapsed > self._interval + self._watchdog_tolerance:
+                        raise TimeoutError(
+                            "control cycle deadline missed: "
+                            f"{cycle_elapsed:.3f} seconds"
+                        )
+                    if self._on_cycle is not None and (
+                        not paused or result.record.safety_reasons
+                    ):
+                        self._on_cycle(result)
                 previous_cycle = started
                 if persist:
                     next_record = started + settings.recording_interval_seconds

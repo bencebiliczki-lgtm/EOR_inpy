@@ -271,6 +271,14 @@ Az alkalmazás nem hagyatkozik a platformfüggő QSettings-alapértelmezésre: e
 Windows Registry `AFKI/EORControl` kulcsait. A témaváltás külön azonnali `sync()`
 műveletet végez, és az írási hibát az állapotsorban jelzi.
 
+A `SettingsHubDialog` az összes alkalmazásszintű beállítást egyetlen
+átméretezhető ablakban fogja össze. Bal oldali kategórialista választja ki az
+Eszközök, Kalibráció és biztonság, Naplózás, Megjelenés, illetve Developer
+módban a Vezérlési ciklus oldalt. A meglévő szerkesztők nem külön top-level
+dialógusként, hanem a jobb oldali `QStackedWidget` beágyazott oldalaiként
+működnek. A lusta betöltés miatt a hardverfelderítés csak az Eszközök kategória
+tényleges megnyitásakor indul el.
+
 ## Eszközmód és kapcsolatpróba
 
 A `DeviceSettingsDialog` tartósan tárolja a két ISCO soros konfigurációját, az NI
@@ -324,20 +332,33 @@ a következő indításkor a projekt visszaállítása után automatikusan megny
 előző hardverkonfigurációval feltöltött aktiválási folyamatot. A friss
 kapcsolatpróba és a kezelő `HARDVER mód aktiválása` művelete továbbra is kötelező;
 az eltárolt mód önmagában nem engedélyez fizikai kimenetet. Bekapcsolása csak
-leállított, leválasztott `IDLE` állapotban cserélheti le
-a hardveradaptereket szimulátorokra. Az új `MeasurementService` és
+leállított mérésnél, az élő kapcsolat biztonságos lezárása után cserélheti le a
+hardveradaptereket szimulátorokra. Az új `MeasurementService` és
 `ProjectMeasurementWriter` külön-külön is tiltott perzisztenciával indul. A
 kapcsoló kikapcsolása a meglévő, felderítést és kezelői megerősítést végző
 eszközbeállítási folyamatot nyitja meg; közvetlenül nem aktivál fizikai kimenetet.
 
-A dashboard `Leválasztás` művelete leállítja a pumpapolling workereket, mindkét
-ISCO kliensen külön-külön bezárja a soros kapcsolatot, és akkor is megkísérli a
-második COM-port felszabadítását, ha az első lezárása hibát jelez. A következő
-`Csatlakozás` a meglévő hardverkonfigurációval újranyitja a lezárt pyserial
-kapcsolatokat, új DASNET hálózati életciklust indít, és nem igényli az
-Eszközbeállítások ismételt megnyitását. Mivel a leválasztás visszavonja a fizikai
-hardver jogosultságát, az újracsatlakozás továbbra is bekéri a pontos kezelői
-megerősítő szöveget.
+A normál dashboardon nincs külön `Csatlakozás` és `Leválasztás`: a HARDVER mód
+aktiválása létrehozza a `PollingPump` workereket, megnyitja mindkét pyserial
+kapcsolatot, és a `DeviceControlService` állapotát közvetlenül `READY`-re viszi.
+A mérés leállítása `RUNNING → READY` átmenet, ezért STOP/safe-state után sem
+engedi el a portokat. A manuális fejlesztői ablak és a beállítási folyamat
+átmenetileg lezárhatja a kapcsolatokat, de visszatéréskor automatikusan újranyitja
+az aktív módot.
+
+A `BackgroundControlRunner` külön szünetjelet kezel. Szünetben nem hív PID-es,
+perzisztáló ciklust: a `ControlLoop.supervise_hold_once()` változatlanul hagyja
+az utolsó fizikai kimenetet, nem ír nyers rekordot, de minden ciklusban elvégzi a
+teljes biztonsági mintavételt. A folytatás ugyanabban a runtime-ban történik. A
+végleges Leállítás lezárja a fázist, elkészíti az Excel-lapot, majd törli a
+dashboard élő pufferét és táblázatát.
+
+Kritikus hardverhiba esetén a `DashboardWindow` közös helyreállítási útvonala
+STOP/safe-state-et kér, leállítja a polling workereket, külön-külön megkísérli
+mindkét COM-port és a DAQ erőforrásainak lezárását, majd a biztonságos,
+nem perzisztáló szimulációs adapterrétegre vált. Az előnyben részesített mód ettől
+HARDVER marad. A részletes hibaüzenet után `QTimer` nyitja meg az
+Eszközbeállításokat, hogy a kezelő azonnal új kapcsolatpróbát végezhessen.
 
 A `DashboardWindow` állandó, szöveges mód- és riasztássávot tart fenn. A reteszelt
 riasztás időpontot, okot, automatikus safe-state műveletet és kezelői következő

@@ -42,6 +42,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -50,11 +52,13 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QSystemTrayIcon,
     QTableView,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -97,7 +101,7 @@ from eor_control.device_testing import (
 )
 from eor_control.devices import DisabledPump
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticEvent, DiagnosticLogger
-from eor_control.domain import MeasurementRecord, PumpStatus
+from eor_control.domain import DataQuality, MeasurementRecord, PumpStatus
 from eor_control.hardware import (
     ConnectionTestRegistry,
     ConnectionTestResult,
@@ -518,6 +522,94 @@ class ResizableDialog(QDialog):
         self.setSizeGripEnabled(True)
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+
+class SettingsHubDialog(ResizableDialog):
+    """Visual-Studio-like container for embedded application settings pages."""
+
+    def __init__(
+        self,
+        pages: tuple[tuple[str, str, str, Callable[[], QWidget]], ...],
+        *,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("settings_hub_dialog")
+        self.setWindowTitle("Beállítások")
+        self.setMinimumSize(720, 480)
+        self.resize(940, 640)
+        layout = QVBoxLayout(self)
+        title = QLabel("Beállítások")
+        title.setStyleSheet("font-size:22px;font-weight:700;padding:4px")
+        layout.addWidget(title)
+
+        content = QSplitter()
+        content.setObjectName("settings_hub_splitter")
+        self.navigation = QListWidget()
+        self.navigation.setObjectName("settings_navigation")
+        self.navigation.setMinimumWidth(210)
+        self.navigation.setMaximumWidth(320)
+        self.pages = QStackedWidget()
+        self.pages.setObjectName("settings_pages")
+        self._page_definitions = pages
+        self._loaded_pages: dict[int, QWidget] = {}
+        for key, label, _description, _factory in pages:
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            self.navigation.addItem(item)
+            placeholder = QWidget()
+            placeholder.setObjectName(f"settings_placeholder_{key}")
+            self.pages.addWidget(placeholder)
+        self.navigation.currentRowChanged.connect(self._page_changed)
+        content.addWidget(self.navigation)
+        content.addWidget(self.pages)
+        content.setStretchFactor(0, 0)
+        content.setStretchFactor(1, 1)
+        content.setSizes([240, 680])
+        layout.addWidget(content, 1)
+        close = QPushButton("Bezárás")
+        close.clicked.connect(self.accept)
+        layout.addWidget(close)
+
+    def select_page(self, key: str) -> None:
+        for row in range(self.navigation.count()):
+            if (
+                self.navigation.item(row).data(Qt.ItemDataRole.UserRole)
+                == key
+            ):
+                self.navigation.setCurrentRow(row)
+                return
+        if self.navigation.count():
+            self.navigation.setCurrentRow(0)
+
+    def _page_changed(self, row: int) -> None:
+        if row < 0:
+            return
+        loaded = self._loaded_pages.get(row)
+        if loaded is not None:
+            self.pages.setCurrentWidget(loaded)
+            return
+        key, label, description, factory = self._page_definitions[row]
+        editor = factory()
+        editor.setObjectName(editor.objectName() or f"settings_editor_{key}")
+        page = QWidget()
+        page.setObjectName(f"settings_page_{key}")
+        page_layout = QVBoxLayout(page)
+        page_title = QLabel(label)
+        page_title.setStyleSheet("font-size:18px;font-weight:700")
+        page_layout.addWidget(page_title)
+        help_text = QLabel(description)
+        help_text.setWordWrap(True)
+        help_text.setStyleSheet("color:#66788a;padding:4px 0 12px 0")
+        page_layout.addWidget(help_text)
+        page_layout.addWidget(editor, 1)
+        placeholder = self.pages.widget(row)
+        if placeholder is not None:
+            self.pages.removeWidget(placeholder)
+            placeholder.deleteLater()
+        self.pages.insertWidget(row, page)
+        self._loaded_pages[row] = page
+        self.pages.setCurrentWidget(page)
 
 
 class StageSettingsDialog(ResizableDialog):
@@ -1154,8 +1246,6 @@ class EditableSelectionComboBox(QComboBox):
 
 
 class DeviceSettingsDialog(ResizableDialog):
-    PARTIAL_HARDWARE_CONFIRMATION = "ENABLE PARTIAL HARDWARE TEST MODE"
-
     def __init__(
         self,
         tester: HardwareConnectionTester,
@@ -1172,6 +1262,7 @@ class DeviceSettingsDialog(ResizableDialog):
             [HardwareConfiguration, ConnectionTestResult], None
         ]
         | None = None,
+        direct_control_opener: Callable[[HardwareConfiguration], None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1182,6 +1273,7 @@ class DeviceSettingsDialog(ResizableDialog):
         self._developer_mode = developer_mode
         self._current_mode = current_mode
         self._functional_test_opener = functional_test_opener
+        self._direct_control_opener = direct_control_opener
         self._voltage_ranges = {
             HardwareTestDevice.LINE_PRESSURE: line_voltage_range,
             HardwareTestDevice.DIFFERENTIAL_PRESSURE: differential_voltage_range,
@@ -1191,7 +1283,6 @@ class DeviceSettingsDialog(ResizableDialog):
         self._connection_registry = ConnectionTestRegistry()
         self._active_test_configuration: HardwareConfiguration | None = None
         self._configuration: HardwareConfiguration | None = None
-        self._partial_activation = False
         self.setWindowTitle("Eszközbeállítások")
         self.setMinimumSize(420, 360)
         screen = QApplication.primaryScreen()
@@ -1403,7 +1494,7 @@ class DeviceSettingsDialog(ResizableDialog):
             self._connection_result_labels[device] = status
             self._device_test_buttons[device] = button
         self._valve_test_status = QLabel(
-            "ÖNÁLLÓAN TESZTELHETŐ — Developer részleges hardvermódban, "
+            "ÖNÁLLÓAN KEZELHETŐ — a közvetlen eszközkezelőben, "
             "külön kimeneti megerősítéssel"
         )
         self._valve_test_status.setWordWrap(True)
@@ -1425,25 +1516,33 @@ class DeviceSettingsDialog(ResizableDialog):
         )
         calibration_help.setWordWrap(True)
         layout.addWidget(calibration_help)
-        self._save_button = QPushButton("Eszköz- és csatornabeállítások mentése")
+        self._save_button = QPushButton("Beállítások mentése")
+        self._save_button.setToolTip(
+            "Eszköz- és csatornabeállítások mentése"
+        )
         self._save_button.clicked.connect(self._save_only)
-        self._test_button = QPushButton("Kapcsolatok tesztelése (csak olvasás)")
+        self._test_button = QPushButton("Kapcsolatok tesztelése")
+        self._test_button.setToolTip(
+            "Csak olvasási kapcsolatpróba minden hozzáadott eszközön"
+        )
         self._test_button.clicked.connect(self._start_test)
         self._result_label = QLabel("A hardvermód aktiválásához sikeres kapcsolatpróba szükséges.")
         self._result_label.setWordWrap(True)
-        self._activate_button = QPushButton("HARDVER mód aktiválása")
+        self._activate_button = QPushButton("HARDVER aktiválása")
         self._activate_button.setEnabled(False)
         self._activate_button.clicked.connect(self._activate)
-        self._partial_activate_button = QPushButton(
-            "Részleges HARDVER tesztmód aktiválása…"
+        self._direct_control_button = QPushButton(
+            "Közvetlen kezelés…"
         )
-        self._partial_activate_button.setVisible(developer_mode)
-        self._partial_activate_button.setEnabled(False)
-        self._partial_activate_button.setToolTip(
-            "Csak Developer eszközteszthez. A normál mérés mindaddig tiltott, "
-            "amíg minden kötelező kapcsolat nem sikeres."
+        self._direct_control_button.setVisible(
+            developer_mode and direct_control_opener is not None
         )
-        self._partial_activate_button.clicked.connect(self._activate_partial)
+        self._direct_control_button.setEnabled(False)
+        self._direct_control_button.setToolTip(
+            "A kiválasztott eszközök külön kezelőfelülete. Nem aktivál "
+            "hardvermódot és nem enged mérésindítást."
+        )
+        self._direct_control_button.clicked.connect(self._open_direct_control)
         self._functional_test_button = QPushButton(
             "Vezetett funkcionális eszközteszt…"
         )
@@ -1453,11 +1552,21 @@ class DeviceSettingsDialog(ResizableDialog):
         self._cancel_button = QPushButton("Mégse")
         self._cancel_button.clicked.connect(self.reject)
         outer_layout.addWidget(self._result_label)
-        outer_layout.addWidget(self._save_button)
-        outer_layout.addWidget(self._test_button)
-        outer_layout.addWidget(self._activate_button)
-        outer_layout.addWidget(self._partial_activate_button)
-        outer_layout.addWidget(self._cancel_button)
+        self._action_row = QHBoxLayout()
+        self._action_row.setSpacing(8)
+        for action_button in (
+            self._save_button,
+            self._test_button,
+            self._activate_button,
+            self._direct_control_button,
+            self._cancel_button,
+        ):
+            action_button.setMinimumWidth(0)
+            action_button.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+            self._action_row.addWidget(action_button, 1)
+        outer_layout.addLayout(self._action_row)
         self._bridge = DeviceTestBridge(self)
         self._bridge.succeeded.connect(self._test_passed)
         self._bridge.failed.connect(self._test_failed)
@@ -1512,10 +1621,6 @@ class DeviceSettingsDialog(ResizableDialog):
         if self._configuration is None:
             return None
         return self._connection_registry.aggregate(self._configuration)
-
-    @property
-    def partial_activation(self) -> bool:
-        return self._partial_activation
 
     @staticmethod
     def _add_responsive_form_row(
@@ -1795,7 +1900,7 @@ class DeviceSettingsDialog(ResizableDialog):
                 label.setStyleSheet("color:#66788a;font-weight:700")
         if self.valve_enabled.isChecked():
             self._valve_test_status.setText(
-                "ÖNÁLLÓAN TESZTELHETŐ — Developer részleges hardvermódban, "
+                "ÖNÁLLÓAN KEZELHETŐ — a közvetlen eszközkezelőben, "
                 "külön kimeneti megerősítéssel"
             )
             self._valve_test_status.setStyleSheet(
@@ -2105,10 +2210,11 @@ class DeviceSettingsDialog(ResizableDialog):
         self._activate_button.setEnabled(
             selected_successful and configuration.measurement_ready
         )
-        self._partial_activate_button.setEnabled(
+        self._direct_control_button.setEnabled(
             self._developer_mode
+            and self._direct_control_opener is not None
             and (
-                any(item.successful for item in result.devices)
+                bool(configuration.enabled_test_devices())
                 or configuration.valve_output_enabled
             )
         )
@@ -2148,7 +2254,6 @@ class DeviceSettingsDialog(ResizableDialog):
     def _connection_configuration_changed(self, *_args: object) -> None:
         self._test_succeeded = False
         self._activate_button.setEnabled(False)
-        self._partial_activate_button.setEnabled(False)
         self._functional_test_button.setEnabled(False)
         try:
             configuration = self._read_configuration()
@@ -2187,7 +2292,6 @@ class DeviceSettingsDialog(ResizableDialog):
         self._test_button.setEnabled(True)
         self._set_device_test_buttons_enabled(True)
         self._activate_button.setEnabled(False)
-        self._partial_activate_button.setEnabled(False)
         self._functional_test_button.setEnabled(False)
         self._result_label.setText(f"SIKERTELEN KAPCSOLATPRÓBA: {message}")
         self._result_label.setStyleSheet("color:#b00020;font-weight:700")
@@ -2221,41 +2325,26 @@ class DeviceSettingsDialog(ResizableDialog):
             self._test_failed("előbb sikeres kapcsolatpróba szükséges")
             return
         self._store_configuration(self._configuration)
-        self._partial_activation = False
         self.accept()
 
-    def _activate_partial(self) -> None:
+    def _open_direct_control(self) -> None:
         try:
             configuration = self._read_configuration()
         except ValueError as error:
             self._test_failed(str(error))
             return
-        result = self._connection_registry.aggregate(configuration)
-        if (
-            not any(item.successful for item in result.devices)
-            and not configuration.valve_output_enabled
-        ):
-            self._test_failed(
-                "a részleges tesztmódhoz legalább egy sikeres egyedi "
-                "kapcsolatpróba vagy hozzáadott szelepkimenet szükséges"
-            )
+        if self._direct_control_opener is None:
             return
-        confirmation, accepted = QInputDialog.getText(
-            self,
-            "Részleges fizikai hardver tesztmód",
-            "Ebben a módban normál mérés nem indítható. A kimeneti parancsok "
-            "továbbra is külön megerősítést és biztonsági ellenőrzést kérnek.\n\n"
-            f"Írd be pontosan: {self.PARTIAL_HARDWARE_CONFIRMATION}",
-        )
-        if not accepted:
-            return
-        if confirmation != self.PARTIAL_HARDWARE_CONFIRMATION:
-            self._test_failed("a részleges hardver tesztmód megerősítése nem egyezett")
-            return
-        self._configuration = configuration
-        self._partial_activation = True
         self._store_configuration(configuration)
-        self.accept()
+        try:
+            self._direct_control_opener(configuration)
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                "Közvetlen eszközkezelés",
+                "A közvetlen eszközkapcsolat nem nyitható meg:\n"
+                f"{type(error).__name__}: {error}",
+            )
 
     def _open_functional_test(self) -> None:
         configuration = self._configuration
@@ -4713,7 +4802,6 @@ class DashboardWindow(QMainWindow):
         self._run_mode = RunMode.SIMULATION
         self._preferred_run_mode = self._stored_run_mode()
         self._startup_mode_restore_started = False
-        self._partial_hardware_mode = False
         self._pump_control: PumpControlService | None = None
         self._active_hardware_configuration: HardwareConfiguration | None = None
         self._hardware_connection_result: ConnectionTestResult | None = None
@@ -4722,6 +4810,7 @@ class DashboardWindow(QMainWindow):
         self._measurement_time_origin: float | None = None
         self._last_cycle_result: ControlCycleResult | None = None
         self._preflight_active = False
+        self._critical_hardware_recovery_active = False
         self._overview_dialog: MeasurementOverviewDialog | None = None
         self._active_alarm_text = "Nincs aktív riasztás"
         self._active_alarm_reason: str | None = None
@@ -4742,6 +4831,7 @@ class DashboardWindow(QMainWindow):
         self._injection_pressures: deque[float] = deque(maxlen=6000)
         self._injection_flows: deque[float] = deque(maxlen=6000)
         self._line_pressures: deque[float] = deque(maxlen=6000)
+        self._alarm_points: list[dict[str, object]] = []
         self._runtime_bridge = RuntimeBridge(self)
         self._runtime_bridge.cycle_completed.connect(self._handle_cycle)
         self._runtime_bridge.fault_raised.connect(self._handle_runtime_fault)
@@ -4770,6 +4860,11 @@ class DashboardWindow(QMainWindow):
         self._restore_control_settings()
         self._project_selector_required = not self._restore_project_selection()
         self._project_selector_prompted = False
+        if (
+            self._run_mode is RunMode.SIMULATION
+            and self._devices.status.state is ApplicationState.IDLE
+        ):
+            self._devices.connect()
         self._refresh_state()
 
     def _build_tray_menu(self) -> None:
@@ -4928,8 +5023,11 @@ class DashboardWindow(QMainWindow):
         controls = QGridLayout()
         self._connect_button = QPushButton("Csatlakozás")
         self._disconnect_button = QPushButton("Leválasztás")
+        self._connect_button.hide()
+        self._disconnect_button.hide()
         self._start_button = QPushButton("Mérés indítása")
-        self._stop_button = QPushButton("Leállítás")
+        self._pause_button = QPushButton("Mérés szüneteltetése")
+        self._stop_button = QPushButton("Mérés leállítása")
         self._acknowledge_button = QPushButton("Hiba nyugtázása")
         self._emergency_button = QPushButton("VÉSZLEÁLLÍTÁS")
         self._emergency_button.setStyleSheet(
@@ -4938,13 +5036,13 @@ class DashboardWindow(QMainWindow):
         self._connect_button.clicked.connect(self._connect_devices)
         self._disconnect_button.clicked.connect(self._disconnect_devices)
         self._start_button.clicked.connect(self._start)
+        self._pause_button.clicked.connect(self._pause_measurement)
         self._stop_button.clicked.connect(self._stop)
         self._acknowledge_button.clicked.connect(self._acknowledge_fault)
         self._emergency_button.clicked.connect(self._emergency_stop)
         self._primary_control_buttons = (
-            self._connect_button,
-            self._disconnect_button,
             self._start_button,
+            self._pause_button,
             self._stop_button,
             self._acknowledge_button,
             self._emergency_button,
@@ -5193,6 +5291,15 @@ class DashboardWindow(QMainWindow):
         self._jacket_curve = self._plot.plot(pen="#1565c0", name="Köpeny")
         self._injection_curve = self._plot.plot(pen="#c62828", name="Besajtolás")
         self._line_curve = self._plot.plot(pen="#2e7d32", name="Vonali")
+        self._alarm_scatter = pg.ScatterPlotItem(
+            size=12,
+            symbol="o",
+            pen=pg.mkPen("#ffffff", width=1),
+            hoverable=True,
+            name="Riasztás",
+        )
+        self._alarm_scatter.sigHovered.connect(self._alarm_points_hovered)
+        self._plot.addItem(self._alarm_scatter)
         self._flow_plot = pg.PlotWidget(title="Elmúlt 10 perc besajtolási üteme")
         self._flow_plot.setObjectName("live_injection_flow_plot")
         self._flow_plot.setMinimumWidth(0)
@@ -5305,22 +5412,30 @@ class DashboardWindow(QMainWindow):
         settings_menu = self.menuBar().addMenu("Beállítások")
         device_settings = QAction("Eszközök…", self)
         device_settings.setShortcut("Ctrl+Shift+D")
-        device_settings.triggered.connect(self._open_device_settings)
+        device_settings.triggered.connect(
+            lambda: self._open_settings_hub("devices")
+        )
         settings_menu.addAction(device_settings)
         logging_settings = QAction("Naplózás…", self)
-        logging_settings.triggered.connect(self._open_logging_settings)
+        logging_settings.triggered.connect(
+            lambda: self._open_settings_hub("logging")
+        )
         settings_menu.addAction(logging_settings)
         settings_menu.addSeparator()
         self._measurement_settings_action = QAction(
             "Kalibráció és biztonsági határértékek…", self
         )
         self._measurement_settings_action.triggered.connect(
-            self._open_calibration_settings
+            lambda: self._open_settings_hub("calibration")
         )
         settings_menu.addAction(self._measurement_settings_action)
         settings_menu.addSeparator()
 
-        theme_menu = settings_menu.addMenu("Megjelenés")
+        appearance_settings = QAction("Megjelenés…", self)
+        appearance_settings.triggered.connect(
+            lambda: self._open_settings_hub("appearance")
+        )
+        settings_menu.addAction(appearance_settings)
         theme_group = QActionGroup(self)
         theme_group.setExclusive(True)
         self._theme_actions: dict[str, QAction] = {}
@@ -5334,7 +5449,6 @@ class DashboardWindow(QMainWindow):
                 lambda checked=False, theme=key: self._set_theme(theme)
             )
             theme_group.addAction(action)
-            theme_menu.addAction(action)
             self._theme_actions[key] = action
 
         developer_menu = self.menuBar().addMenu("Developer")
@@ -5355,18 +5469,12 @@ class DashboardWindow(QMainWindow):
         self._simulation_mode_action.setVisible(self._developer_mode)
         self._simulation_mode_action.toggled.connect(self._simulation_mode_toggled)
         developer_menu.addAction(self._simulation_mode_action)
-        self._manual_control_action = QAction(
-            "Felügyelt manuális hardvervezérlés…", self
-        )
-        self._manual_control_action.setVisible(self._developer_mode)
-        self._manual_control_action.triggered.connect(self._open_pump_control)
-        developer_menu.addAction(self._manual_control_action)
         self._control_cycle_settings_action = QAction(
             "Vezérlési ciklus és watchdog…", self
         )
         self._control_cycle_settings_action.setVisible(self._developer_mode)
         self._control_cycle_settings_action.triggered.connect(
-            self._open_control_cycle_settings
+            lambda: self._open_settings_hub("control_cycle")
         )
         developer_menu.addAction(self._control_cycle_settings_action)
         self._developer_view_action = QAction("Eszközkommunikáció…", self)
@@ -5377,7 +5485,7 @@ class DashboardWindow(QMainWindow):
 
     def _restore_logging_settings(self) -> None:
         enabled_value = str(
-            self._user_settings.value("logging/enabled", "false")
+            self._user_settings.value("logging/enabled", "true")
         ).lower()
         enabled = enabled_value in {"1", "true", "yes"}
         raw_categories = self._user_settings.value(
@@ -5391,9 +5499,169 @@ class DashboardWindow(QMainWindow):
             except ValueError:
                 continue
         self._diagnostics.configure(enabled=enabled, categories=categories)
-        self._diagnostics.emit(
-            DiagnosticCategory.SYSTEM, "MODE", "simulation mode initialized"
+
+    def _open_settings_hub(self, initial_page: str = "devices") -> None:
+        if self._runtime.running and initial_page in {
+            "devices",
+            "calibration",
+            "control_cycle",
+        }:
+            self._show_error(
+                "Futó vagy szüneteltetett mérés közben ez a beállítás nem módosítható."
+            )
+            return
+        reconnect_state = {"required": False, "activated": False}
+        hub: SettingsHubDialog
+
+        def device_page() -> QWidget:
+            return self._create_device_settings_page(hub, reconnect_state)
+
+        pages: list[tuple[str, str, str, Callable[[], QWidget]]] = [
+            (
+                "devices",
+                "Eszközök",
+                "Pumpák, NI csatornák, kapcsolatpróba és közvetlen "
+                "eszközkezelés.",
+                device_page,
+            ),
+            (
+                "calibration",
+                "Kalibráció és biztonság",
+                "Érzékelő-kalibrációk, nyomáshatárok és biztonsági "
+                "tartalékok.",
+                self._create_calibration_settings_page,
+            ),
+            (
+                "logging",
+                "Naplózás",
+                "Kommunikációs és vezérlési naplók, valamint a naplózott "
+                "eszközcsoportok.",
+                self._create_logging_settings_page,
+            ),
+            (
+                "appearance",
+                "Megjelenés",
+                "Az alkalmazás rendszer-, világos vagy sötét témája.",
+                self._create_appearance_settings_page,
+            ),
+        ]
+        if self._developer_mode:
+            pages.append(
+                (
+                    "control_cycle",
+                    "Vezérlési ciklus",
+                    "PID-ciklusidő és watchdog-tűrés. Ezek módosítása csak "
+                    "leállított mérésnél engedélyezett.",
+                    self._create_control_cycle_settings_page,
+                )
+            )
+        hub = SettingsHubDialog(tuple(pages), parent=self)
+        hub.select_page(initial_page)
+        hub.exec()
+        if (
+            reconnect_state["required"]
+            and not reconnect_state["activated"]
+            and self._devices.status.state is ApplicationState.IDLE
+        ):
+            self._reconnect_active_mode()
+
+    @staticmethod
+    def _embedded_settings_dialog(dialog: QDialog) -> QDialog:
+        dialog.setWindowFlags(Qt.WindowType.Widget)
+        if isinstance(dialog, ResizableDialog):
+            dialog.setSizeGripEnabled(False)
+        dialog.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
+        return dialog
+
+    def _create_logging_settings_page(self) -> QWidget:
+        dialog = LoggingSettingsDialog(
+            self._diagnostics, self._user_settings
+        )
+        self._embedded_settings_dialog(dialog)
+        dialog.accepted.connect(lambda: QTimer.singleShot(0, dialog.show))
+        dialog.rejected.connect(lambda: QTimer.singleShot(0, dialog.show))
+        return dialog
+
+    def _create_calibration_settings_page(self) -> QWidget:
+        if self._runtime.running:
+            return QLabel(
+                "A kalibráció és a biztonsági határértékek futó vagy "
+                "szüneteltetett mérés közben nem módosíthatók."
+            )
+        dialog = CalibrationSettingsDialog()
+        dialog.restore_snapshot(self._measurement_settings.snapshot())
+        self._embedded_settings_dialog(dialog)
+
+        def apply() -> None:
+            self._measurement_settings.restore_snapshot(dialog.snapshot())
+            self._apply_measurement_settings()
+            self._save_user_settings()
+            if self._overview_dialog is not None:
+                self._overview_dialog.refresh()
+            QTimer.singleShot(0, dialog.show)
+
+        def restore() -> None:
+            dialog.restore_snapshot(self._measurement_settings.snapshot())
+            QTimer.singleShot(0, dialog.show)
+
+        dialog.accepted.connect(apply)
+        dialog.rejected.connect(restore)
+        return dialog
+
+    def _create_appearance_settings_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        form = QFormLayout()
+        theme = QComboBox()
+        theme.setObjectName("settings_theme")
+        for key, label in (
+            ("system", "Rendszerbeállítás"),
+            ("light", "Világos mód"),
+            ("dark", "Sötét mód"),
+        ):
+            theme.addItem(label, key)
+        selected = next(
+            (
+                key
+                for key, action in self._theme_actions.items()
+                if action.isChecked()
+            ),
+            "system",
+        )
+        theme.setCurrentIndex(max(0, theme.findData(selected)))
+        form.addRow(input_field_label("Alkalmazás témája", theme), theme)
+        layout.addLayout(form)
+        apply = QPushButton("Alkalmazás")
+        apply.clicked.connect(lambda: self._set_theme(str(theme.currentData())))
+        layout.addWidget(apply)
+        layout.addStretch()
+        return page
+
+    def _create_control_cycle_settings_page(self) -> QWidget:
+        if self._runtime.running:
+            return QLabel(
+                "A vezérlési ciklus futó vagy szüneteltetett mérés közben "
+                "nem módosítható."
+            )
+        dialog = ControlCycleSettingsDialog(self._user_settings)
+        self._embedded_settings_dialog(dialog)
+
+        def apply() -> None:
+            self._runtime = self._make_runtime(self._control_loop)
+            self._diagnostics.emit(
+                DiagnosticCategory.RUNTIME,
+                "CONFIG",
+                "control interval and watchdog tolerance updated: "
+                f"interval={dialog.control_interval.value():.3f}s, "
+                f"tolerance={dialog.watchdog_tolerance.value():.3f}s",
+            )
+            QTimer.singleShot(0, dialog.show)
+
+        dialog.accepted.connect(apply)
+        dialog.rejected.connect(lambda: QTimer.singleShot(0, dialog.show))
+        return dialog
 
     def _restore_nas_settings(self) -> None:
         enabled = str(self._user_settings.value("nas/enabled", "false")).lower() in {
@@ -5540,17 +5808,7 @@ class DashboardWindow(QMainWindow):
             self._refresh_measurement_history()
 
     def _open_calibration_settings(self) -> None:
-        if self._devices.status.state is ApplicationState.RUNNING:
-            self._show_error("Futó mérés közben a kalibráció nem módosítható.")
-            return
-        snapshot = self._measurement_settings.snapshot()
-        if self._measurement_settings.exec() != QDialog.DialogCode.Accepted:
-            self._measurement_settings.restore_snapshot(snapshot)
-            return
-        self._apply_measurement_settings()
-        self._save_user_settings()
-        if self._overview_dialog is not None:
-            self._overview_dialog.refresh()
+        self._open_settings_hub("calibration")
 
     def _open_measurement_overview(self) -> None:
         if self._overview_dialog is None:
@@ -5621,9 +5879,7 @@ class DashboardWindow(QMainWindow):
         }
 
     def _open_logging_settings(self) -> None:
-        LoggingSettingsDialog(
-            self._diagnostics, self._user_settings, parent=self
-        ).exec()
+        self._open_settings_hub("logging")
 
     def _open_developer_view(self) -> None:
         DeveloperViewDialog(self._diagnostics, parent=self).exec()
@@ -5638,24 +5894,12 @@ class DashboardWindow(QMainWindow):
                 "Előbb állítsd le a mérést."
             )
             return
-        dialog = ControlCycleSettingsDialog(self._user_settings, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._runtime = self._make_runtime(self._control_loop)
-        self._diagnostics.emit(
-            DiagnosticCategory.RUNTIME,
-            "CONFIG",
-            "control interval and watchdog tolerance updated: "
-            f"interval={dialog.control_interval.value():.3f}s, "
-            f"tolerance={dialog.watchdog_tolerance.value():.3f}s",
-        )
+        self._open_settings_hub("control_cycle")
 
     def _set_developer_mode(self, enabled: bool) -> None:
         self._developer_mode = enabled
         self._set_service_controls_visible(enabled)
         self._simulation_mode_action.setVisible(enabled)
-        self._manual_control_action.setVisible(enabled)
-        self._manual_control_action.setEnabled(enabled)
         self._control_cycle_settings_action.setVisible(enabled)
         self._developer_view_action.setVisible(enabled)
         self._user_settings.setValue("developer/enabled", enabled)
@@ -5762,14 +6006,7 @@ class DashboardWindow(QMainWindow):
             )
 
     def _refresh_mode_label(self) -> None:
-        if self._run_mode is RunMode.HARDWARE and self._partial_hardware_mode:
-            self.setWindowTitle("AFKI EOR mérőrendszer — részleges hardver tesztmód")
-            message = (
-                "RÉSZLEGES HARDVER TESZTMÓD – egyenkénti eszközkezelés; "
-                "normál mérés nem indítható"
-            )
-            title = "Részleges hardver tesztmód"
-        elif self._run_mode is RunMode.HARDWARE:
+        if self._run_mode is RunMode.HARDWARE:
             self.setWindowTitle("AFKI EOR mérőrendszer — éles mérés")
             message = "HARDVER – fizikai berendezés vezérlése és mérési adatmentés"
             title = "Éles mérési mód"
@@ -5853,12 +6090,36 @@ class DashboardWindow(QMainWindow):
         self._alarm_label.show()
 
     def _open_device_settings(self) -> None:
-        if (
-            self._devices.status.state is not ApplicationState.IDLE
-            or self._runtime.running
-        ):
-            self._show_error("Eszközmód csak leválasztott, IDLE állapotban módosítható.")
-            return
+        self._open_settings_hub("devices")
+
+    def _create_device_settings_page(
+        self,
+        hub: SettingsHubDialog,
+        reconnect_state: dict[str, bool],
+    ) -> QWidget:
+        if self._runtime.running:
+            return QLabel(
+                "Az eszközbeállítások futó vagy szüneteltetett mérés közben "
+                "nem módosíthatók."
+            )
+        reconnect_state["required"] = (
+            self._devices.status.state is ApplicationState.READY
+        )
+        if self._devices.status.state is ApplicationState.READY:
+            try:
+                self._devices.disconnect()
+                if self._pump_control is not None:
+                    self._pump_control.observe_disconnected(*tuple(PumpRole))
+            except Exception as error:
+                self._show_error(
+                    "Az eszközbeállítások előtt a meglévő kapcsolat nem "
+                    f"zárható le biztonságosan: {error}"
+                )
+                return QLabel(f"A hardverkapcsolat nem zárható le: {error}")
+        elif self._devices.status.state is not ApplicationState.IDLE:
+            return QLabel(
+                "Az eszközbeállítások csak leállított mérésből nyithatók meg."
+            )
         dialog = DeviceSettingsDialog(
             PhysicalHardwareConnectionTester(diagnostics=self._diagnostics),
             settings=self._user_settings,
@@ -5875,86 +6136,183 @@ class DashboardWindow(QMainWindow):
                 self._delta_voltage_max.value(),
             ),
             functional_test_opener=self._open_functional_device_test,
-            parent=self,
+            direct_control_opener=self._open_direct_device_control,
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.configuration is None:
-            return
-        self._save_active_project_device_profile(dialog.configuration)
-        try:
-            self._activate_hardware(
-                dialog.configuration,
-                dialog.connection_result,
-                partial=dialog.partial_activation,
-            )
-        except Exception as error:
-            self._show_error(f"A hardvermód aktiválása sikertelen: {error}")
+        self._embedded_settings_dialog(dialog)
 
-    def _open_pump_control(self) -> None:
-        if not self._developer_mode:
-            self._show_error("A manuális hardvervezérléshez Developer mód szükséges.")
-            return
-        if self._run_mode is not RunMode.HARDWARE or self._pump_control is None:
+        def activate() -> None:
+            if dialog.configuration is None:
+                QTimer.singleShot(0, dialog.show)
+                return
+            self._save_active_project_device_profile(dialog.configuration)
+            try:
+                self._activate_hardware(
+                    dialog.configuration,
+                    dialog.connection_result,
+                )
+            except Exception as error:
+                self._show_error(f"A hardvermód aktiválása sikertelen: {error}")
+                QTimer.singleShot(0, dialog.show)
+                return
+            reconnect_state["activated"] = True
+            hub.accept()
+
+        dialog.accepted.connect(activate)
+        dialog.rejected.connect(hub.reject)
+        return dialog
+
+    def _reconnect_active_mode(self) -> None:
+        try:
+            if self._devices.status.mode is RunMode.HARDWARE:
+                self._devices.authorize_hardware(
+                    DeviceControlService.HARDWARE_CONFIRMATION
+                )
+                if self._pump_control is not None:
+                    self._pump_control.authorize(PumpControlService.AUTHORIZATION)
+            self._devices.connect()
+            if self._pump_control is not None:
+                observe_connected = getattr(
+                    self._pump_control, "observe_connected", None
+                )
+                if callable(observe_connected):
+                    observe_connected(*tuple(PumpRole))
+            self._set_all_connections("KAPCSOLÓDVA", ok=True)
+        except Exception as error:
             self._show_error(
-                "A manuális hardvervezérlés csak sikeresen aktivált hardvermódban érhető el."
+                "A korábbi hardverkapcsolat nem állítható vissza: "
+                f"{error}. Nyisd meg újra az Eszközbeállításokat."
             )
-            return
-        if self._runtime.running or self._devices.status.state is ApplicationState.RUNNING:
-            self._show_error(
-                "A manuális hardvervezérlés futó mérés közben nem nyitható meg."
-            )
-            return
-        if self._devices.status.state is ApplicationState.FAULT:
-            self._show_error(
-                "A manuális hardvervezérlés reteszelt hiba mellett nem nyitható meg. "
-                "Ellenőrizd a fizikai rendszert, majd nyugtázd a hibát."
-            )
-            return
-        hardware = self._active_hardware_configuration
+        self._refresh_state()
+
+    def _open_direct_device_control(
+        self, hardware: HardwareConfiguration
+    ) -> None:
         enabled_pumps = frozenset(
             role
             for role, enabled in (
-                (PumpRole.JACKET, hardware.jacket_pump_enabled if hardware else True),
-                (
-                    PumpRole.INJECTION,
-                    hardware.injection_pump_enabled if hardware else True,
-                ),
+                (PumpRole.JACKET, hardware.jacket_pump_enabled),
+                (PumpRole.INJECTION, hardware.injection_pump_enabled),
             )
             if enabled
         )
         enabled_pressure_inputs = frozenset(
             key
             for key, enabled in (
-                ("line_pressure", hardware.line_pressure_enabled if hardware else True),
-                (
-                    "differential_pressure",
-                    hardware.differential_pressure_enabled if hardware else True,
-                ),
+                ("line_pressure", hardware.line_pressure_enabled),
+                ("differential_pressure", hardware.differential_pressure_enabled),
             )
             if enabled
         )
-        PumpControlDialog(
-            self._pump_control,
-            self._control_loop,
-            lambda: self._stage.currentText(),
-            enabled_pumps=enabled_pumps,
-            enabled_pressure_inputs=enabled_pressure_inputs,
-            valve_enabled=hardware.valve_output_enabled if hardware else True,
-            parent=self,
-        ).exec()
-        try:
-            self._devices.disconnect()
-        except Exception as error:
-            self._show_error(
-                "A manuális vezérlés bezárult, de a kapcsolatállapot lezárása "
-                f"hibát jelzett: {error}"
+
+        jacket = (
+            PollingPump(
+                open_isco_pump(
+                    hardware.jacket_config(),
+                    diagnostics=self._diagnostics,
+                    diagnostic_category=DiagnosticCategory.JACKET_PUMP,
+                ),
+                name="jacket-direct",
             )
-        observe_disconnected = getattr(
-            self._pump_control, "observe_disconnected", None
+            if hardware.jacket_pump_enabled
+            else DisabledPump("jacket")
         )
-        if callable(observe_disconnected):
-            observe_disconnected(*tuple(PumpRole))
-        self._set_all_connections("LEVÁLASZTVA", ok=None)
-        self._refresh_state()
+        try:
+            injection = (
+                PollingPump(
+                    open_isco_pump(
+                        hardware.injection_config(),
+                        diagnostics=self._diagnostics,
+                        diagnostic_category=DiagnosticCategory.INJECTION_PUMP,
+                    ),
+                    name="injection-direct",
+                )
+                if hardware.injection_pump_enabled
+                else DisabledPump("injection")
+            )
+        except Exception:
+            jacket.disconnect()
+            raise
+
+        daq = NidaqmxDataAcquisition(
+            NidaqmxBackend(hardware.ni_terminal_configuration),
+            hardware.ni_config(),
+            self._diagnostics,
+        )
+        if hardware.valve_output_enabled:
+            daq.authorize_output(NidaqmxDataAcquisition.HARDWARE_CONFIRMATION)
+        actuator = AnalogValveActuator(
+            daq,
+            voltage_at_zero_percent=hardware.valve_zero_percent_voltage,
+            voltage_at_hundred_percent=hardware.valve_hundred_percent_voltage,
+        )
+        writer = ProjectMeasurementWriter(
+            self._data_directory, self._nas_sync, enabled=False
+        )
+        measurement = MeasurementService(
+            jacket_pump=jacket,
+            injection_pump=injection,
+            daq=daq,
+            line_calibration=LinearCalibration(*self._line_calibration_values()),
+            differential_calibration=LinearCalibration(
+                *self._delta_calibration_values()
+            ),
+            safety_monitor=SafetyMonitor(
+                SafetyLimits(
+                    self._max_jacket.value(),
+                    self._max_injection.value(),
+                    self._max_delta.value(),
+                    self._minimum_margin.value(),
+                    self._max_overshoot.value(),
+                    self._max_line.value(),
+                )
+            ),
+            writer=writer,
+            channels=MeasurementChannels(
+                line_pressure=(
+                    "line_pressure" if hardware.line_pressure_enabled else None
+                ),
+                differential_pressure=(
+                    "differential_pressure"
+                    if hardware.differential_pressure_enabled
+                    else None
+                ),
+            ),
+            persistence_enabled=False,
+        )
+        direct_loop = ControlLoop(
+            measurement=measurement,
+            controller=ValveController(PidController(self._pid_parameters())),
+            actuator=actuator,
+        )
+        direct_service = PumpControlService(
+            jacket_pump=jacket,
+            injection_pump=injection,
+            minimum_jacket_margin_bar=self._minimum_margin.value(),
+            diagnostics=self._diagnostics,
+            manual_safety_check=lambda role, status: ManualSafetyMonitor.evaluate_pump(
+                status,
+                maximum_pressure_bar=(
+                    self._max_jacket.value()
+                    if role is PumpRole.JACKET
+                    else self._max_injection.value()
+                ),
+            ).reasons,
+            enforce_injection_margin=False,
+        )
+        direct_service.authorize(PumpControlService.AUTHORIZATION)
+        try:
+            PumpControlDialog(
+                direct_service,
+                direct_loop,
+                lambda: self._stage.currentText(),
+                enabled_pumps=enabled_pumps,
+                enabled_pressure_inputs=enabled_pressure_inputs,
+                valve_enabled=hardware.valve_output_enabled,
+                parent=self,
+            ).exec()
+        finally:
+            direct_service.shutdown_connections()
+            direct_loop.close()
 
     def _open_functional_device_test(
         self,
@@ -6146,15 +6504,12 @@ class DashboardWindow(QMainWindow):
         self,
         configuration: HardwareConfiguration,
         connection_result: ConnectionTestResult | None = None,
-        *,
-        partial: bool = False,
     ) -> None:
-        partial = partial or not configuration.measurement_ready
         if self._pump_control is not None:
             cleanup_errors = self._pump_control.shutdown_connections()
             if cleanup_errors:
                 raise RuntimeError(
-                    "A korábbi részleges hardverkapcsolatok lezárása sikertelen: "
+                    "A korábbi hardverkapcsolatok lezárása sikertelen: "
                     + "; ".join(cleanup_errors)
                 )
         jacket = (
@@ -6273,6 +6628,15 @@ class DashboardWindow(QMainWindow):
             enforce_injection_margin=False,
         )
         pump_control.authorize(PumpControlService.AUTHORIZATION)
+        try:
+            new_devices.connect()
+            pump_control.observe_connected(*tuple(PumpRole))
+        except Exception:
+            with suppress(Exception):
+                new_devices.disconnect()
+            pump_control.shutdown_connections()
+            new_loop.close()
+            raise
         self._control_loop.close()
         self._control_loop = new_loop
         self._measurement_writer = writer
@@ -6286,41 +6650,54 @@ class DashboardWindow(QMainWindow):
         self._run_mode = RunMode.HARDWARE
         self._remember_run_mode(RunMode.HARDWARE)
         self._set_line_pressure_source_available(configuration.line_pressure_enabled)
-        self._partial_hardware_mode = partial
         self._sync_simulation_mode_action()
         self._diagnostics.emit(
             DiagnosticCategory.SYSTEM,
             "MODE",
-            "partial hardware test mode activated"
-            if partial
-            else "hardware mode activated",
+            "hardware mode activated",
         )
         self._user_settings.setValue(
             "hardware/last_test_succeeded",
-            not partial
-            and connection_result is not None
+            connection_result is not None
             and connection_result.successful_for(
                 configuration.enabled_test_devices()
             ),
         )
+        self._clear_active_alarm()
         self._refresh_mode_label()
+        self._set_all_connections("KAPCSOLÓDVA", ok=True)
         self._refresh_state()
 
-    def _activate_simulation(self) -> None:
+    def _activate_simulation(
+        self,
+        *,
+        preserve_preferred_mode: bool = False,
+        ignore_cleanup_errors: bool = False,
+    ) -> None:
         if self._run_mode is RunMode.SIMULATION:
             return
         self._set_line_pressure_source_available(True)
-        if self._devices.status.state is not ApplicationState.IDLE:
+        if self._devices.status.state is ApplicationState.READY:
+            try:
+                self._devices.disconnect()
+                if self._pump_control is not None:
+                    self._pump_control.observe_disconnected(*tuple(PumpRole))
+            except Exception as error:
+                self._show_error(
+                    f"A hardverkapcsolat nem zárható le a módváltáshoz: {error}"
+                )
+                return
+        elif self._devices.status.state is not ApplicationState.IDLE:
             self._show_error(
-                "Szimulációs módra csak leválasztott, IDLE állapotban lehet váltani."
+                "Szimulációs módra futó mérés vagy aktív hiba mellett nem lehet váltani."
             )
             return
 
         if self._pump_control is not None:
             cleanup_errors = self._pump_control.shutdown_connections()
-            if cleanup_errors:
+            if cleanup_errors and not ignore_cleanup_errors:
                 self._show_error(
-                    "A szimuláció nem aktiválható, mert a részleges "
+                    "A szimuláció nem aktiválható, mert a "
                     "hardverkapcsolatok biztonságos lezárása sikertelen: "
                     + "; ".join(cleanup_errors)
                 )
@@ -6375,6 +6752,7 @@ class DashboardWindow(QMainWindow):
         self._devices = DeviceControlService(
             jacket_pump=jacket, injection_pump=injection, daq=daq
         )
+        self._devices.connect()
         self._pump_control = None
         self._active_hardware_configuration = None
         self._hardware_connection_result = None
@@ -6382,8 +6760,10 @@ class DashboardWindow(QMainWindow):
         self._hardware_actuator = None
         self._runtime = self._make_runtime(new_loop)
         self._run_mode = RunMode.SIMULATION
-        self._remember_run_mode(RunMode.SIMULATION)
-        self._partial_hardware_mode = False
+        if preserve_preferred_mode:
+            self._remember_run_mode(RunMode.HARDWARE)
+        else:
+            self._remember_run_mode(RunMode.SIMULATION)
         self._sync_simulation_mode_action()
         self._diagnostics.emit(
             DiagnosticCategory.SYSTEM, "MODE", "simulation mode activated"
@@ -6559,6 +6939,9 @@ class DashboardWindow(QMainWindow):
         self._user_settings.sync()
 
     def _connect_devices(self) -> None:
+        if self._devices.status.state is ApplicationState.READY:
+            self._refresh_state()
+            return
         try:
             if (
                 self._run_mode is RunMode.HARDWARE
@@ -7237,19 +7620,38 @@ class DashboardWindow(QMainWindow):
         self._injection_pressures.clear()
         self._injection_flows.clear()
         self._line_pressures.clear()
+        self._alarm_points.clear()
+        self._alarm_scatter.setData([])
         self._runtime.start(settings)
 
     def _measurement_pump_startup_completed(self) -> None:
+        if (
+            not self._preflight_active
+            or self._devices.status.state is not ApplicationState.RUNNING
+        ):
+            return
         self._preflight_active = False
         try:
             self._complete_measurement_start(self._runtime_settings())
         except Exception as error:
+            if self._run_mode is RunMode.HARDWARE:
+                self._handle_critical_hardware_fault(
+                    f"a mérési runtime indítása sikertelen: {error}"
+                )
+                return
             self._devices.emergency_stop(f"runtime startup failed: {error}")
             self._show_error(f"A mérés nem indítható: {error}")
         self._refresh_state()
 
     def _measurement_pump_startup_failed(self, message: str) -> None:
+        if not self._preflight_active:
+            return
         self._preflight_active = False
+        if self._run_mode is RunMode.HARDWARE:
+            self._handle_critical_hardware_fault(
+                f"a pumpák indítása sikertelen: {message}"
+            )
+            return
         if self._devices.status.state is ApplicationState.RUNNING:
             try:
                 self._devices.emergency_stop(f"pump startup failed: {message}")
@@ -7600,24 +8002,80 @@ class DashboardWindow(QMainWindow):
                 self._pump_control.observe_safe_stop()
         except Exception as error:
             self._show_error(str(error))
+        if self._devices.status.state is ApplicationState.FAULT:
+            self._handle_critical_hardware_fault(
+                self._devices.status.fault_reason
+                or "a mérés biztonságos leállítása sikertelen"
+            )
+            return
         self._start_pending_stage_exports()
+        self._reset_measurement_dashboard()
         self._refresh_state()
+
+    def _pause_measurement(self) -> None:
+        try:
+            if self._runtime.paused:
+                self._runtime.resume()
+            else:
+                self._runtime.pause()
+        except RuntimeError as error:
+            self._show_error(str(error))
+        self._refresh_state()
+
+    def _reset_measurement_dashboard(self) -> None:
+        self._measurement_time_origin = None
+        self._last_cycle_result = None
+        self._times.clear()
+        self._jacket_pressures.clear()
+        self._injection_pressures.clear()
+        self._injection_flows.clear()
+        self._line_pressures.clear()
+        self._alarm_points.clear()
+        self._alarm_scatter.setData([])
+        for curve in (
+            self._jacket_curve,
+            self._injection_curve,
+            self._line_curve,
+            self._flow_curve,
+        ):
+            curve.setData([], [])
+        self._plot.setXRange(0.0, 1.0, padding=0.0)
+        self._flow_plot.setXRange(0.0, 1.0, padding=0.0)
+        self._jacket_label.setText("— bar")
+        self._injection_label.setText("— bar")
+        self._jacket_remaining_label.setText("Maradék folyadék: — ml")
+        self._jacket_net_volume_label.setText(
+            "Indítás óta nettó köpenytérfogat: — ml"
+        )
+        self._injection_remaining_label.setText("Maradék folyadék: — ml")
+        self._injection_flow_label.setText("Besajtolási sebesség: — ml/h")
+        self._injected_volume_label.setText(
+            "Indítás óta nettó besajtolt: — ml"
+        )
+        self._line_label.setText("— bar")
+        self._delta_label.setText("— bar")
+        self._pressure_margin_label.setText("— bar")
+        self._valve_label.setText("— %")
+        self._history_view.set_sources(())
+        self._refresh_recording_status()
 
     def _emergency_stop(self) -> None:
         if self._runtime.running:
             self._runtime.stop()
         self._measurement_writer.complete_current_phase()
-        self._devices.emergency_stop()
-        if self._pump_control is not None:
-            self._pump_control.revoke()
-            self._pump_control = None
         self._set_active_alarm("RETESSZELT HIBA: kézi vészleállítás")
-        self._start_pending_stage_exports()
-        self._refresh_state()
+        if self._run_mode is RunMode.HARDWARE:
+            self._handle_critical_hardware_fault("kézi vészleállítás")
+        else:
+            self._devices.emergency_stop()
+            self._start_pending_stage_exports()
+            self._refresh_state()
 
     def _handle_cycle(self, result: object) -> None:
         if not isinstance(result, ControlCycleResult):
             self._handle_runtime_fault("invalid result from control thread")
+            return
+        if self._runtime.paused and not result.record.safety_reasons:
             return
         self._last_cycle_result = result
         snapshot = result.record.snapshot
@@ -7716,23 +8174,178 @@ class DashboardWindow(QMainWindow):
         self._plot.setXRange(x_minimum, x_maximum, padding=0.0)
         self._flow_plot.setXRange(x_minimum, x_maximum, padding=0.0)
         if result.record.safety_reasons:
-            self._set_active_alarm("; ".join(result.record.safety_reasons))
+            reason = "; ".join(result.record.safety_reasons)
+            self._add_alarm_point(latest, result, "critical", reason)
+            self._set_active_alarm(f"RETESSZELT BIZTONSÁGI HIBA: {reason}")
+            if self._run_mode is RunMode.HARDWARE:
+                self._handle_critical_hardware_fault(reason)
+                return
+        elif snapshot.quality is not DataQuality.GOOD:
+            self._add_alarm_point(
+                latest,
+                result,
+                "warning",
+                f"Adatminőség: {snapshot.quality.value}",
+            )
         self._refresh_recording_status(snapshot.recorded_at)
+
+    def _add_alarm_point(
+        self,
+        elapsed_seconds: float,
+        result: ControlCycleResult,
+        severity: str,
+        reason: str,
+    ) -> None:
+        snapshot = result.record.snapshot
+        finite_values = [
+            value
+            for value in (
+                snapshot.jacket_pump.pressure_bar,
+                snapshot.injection_pump.pressure_bar,
+                snapshot.line_pressure_bar,
+                snapshot.differential_pressure_bar,
+            )
+            if value is not None and isfinite(value)
+        ]
+        y_value = max(finite_values, default=0.0)
+        level = "KRITIKUS" if severity == "critical" else "FIGYELMEZTETÉS"
+        tooltip = (
+            f"{level}\n"
+            f"Idő: {format_hungarian_time(snapshot.recorded_at, '%Y-%m-%d %H:%M:%S %Z')}\n"
+            f"Szakasz: {result.record.active_stage}\n"
+            f"Ok: {reason}\n"
+            f"Köpeny: {snapshot.jacket_pump.pressure_bar:.2f} bar\n"
+            f"Besajtolás: {snapshot.injection_pump.pressure_bar:.2f} bar"
+        )
+        self._alarm_points.append(
+            {
+                "pos": (elapsed_seconds, y_value),
+                "brush": pg.mkBrush(
+                    "#d50000" if severity == "critical" else "#f9a825"
+                ),
+                "data": tooltip,
+            }
+        )
+        if len(self._alarm_points) > 500:
+            del self._alarm_points[:-500]
+        self._alarm_scatter.setData(self._alarm_points)
+
+    def _alarm_points_hovered(
+        self, _item: object, points: list[object], event: object
+    ) -> None:
+        if not points:
+            QToolTip.hideText()
+            return
+        data_reader = getattr(points[0], "data", None)
+        screen_position_reader = getattr(event, "screenPos", None)
+        if not callable(data_reader) or not callable(screen_position_reader):
+            return
+        screen_position = screen_position_reader()
+        to_point = getattr(screen_position, "toPoint", None)
+        if callable(to_point):
+            screen_position = to_point()
+        QToolTip.showText(screen_position, str(data_reader()), self._plot)
 
     def _handle_runtime_fault(self, message: str) -> None:
         self._diagnostics.emit(
             DiagnosticCategory.RUNTIME, "FAULT", message, level="ERROR"
         )
+        elapsed = (
+            self._times[-1] - self._measurement_time_origin
+            if self._times and self._measurement_time_origin is not None
+            else 0.0
+        )
+        visible_pressures = [
+            values[-1]
+            for values in (
+                self._jacket_pressures,
+                self._injection_pressures,
+                self._line_pressures,
+            )
+            if values and isfinite(values[-1])
+        ]
+        self._alarm_points.append(
+            {
+                "pos": (elapsed, max(visible_pressures, default=0.0)),
+                "brush": pg.mkBrush("#d50000"),
+                "data": (
+                    "KRITIKUS VEZÉRLÉSI HIBA\n"
+                    f"Idő: {format_hungarian_time(datetime.now(UTC), '%Y-%m-%d %H:%M:%S %Z')}\n"
+                    f"Ok: {message}"
+                ),
+            }
+        )
+        self._alarm_scatter.setData(self._alarm_points)
+        self._set_active_alarm(f"RETESSZELT VEZÉRLÉSI HIBA: {message}")
+        if self._run_mode is RunMode.HARDWARE:
+            self._handle_critical_hardware_fault(message)
+            return
         if self._devices.status.state is not ApplicationState.FAULT:
             self._devices.emergency_stop(f"control runtime failed: {message}")
-        if self._pump_control is not None:
-            self._pump_control.revoke()
-            self._pump_control = None
         self._measurement_writer.complete_current_phase()
         self._start_pending_stage_exports()
-        self._set_active_alarm(f"RETESSZELT VEZÉRLÉSI HIBA: {message}")
         self._set_all_connections("HIBA", ok=False)
         self._refresh_state()
+
+    def _handle_critical_hardware_fault(self, message: str) -> None:
+        if self._critical_hardware_recovery_active:
+            return
+        self._critical_hardware_recovery_active = True
+        self._preflight_active = False
+        release_errors: list[str] = []
+        try:
+            if self._runtime.running:
+                try:
+                    self._runtime.stop()
+                except Exception as error:
+                    release_errors.append(f"vezérlési ciklus: {error}")
+            self._measurement_writer.complete_current_phase()
+            if self._devices.status.state is not ApplicationState.FAULT:
+                try:
+                    self._devices.emergency_stop(
+                        f"critical hardware fault: {message}"
+                    )
+                except Exception as error:
+                    release_errors.append(f"biztonsági leállítás: {error}")
+            try:
+                self._devices.disconnect()
+            except Exception as error:
+                release_errors.append(f"portok lezárása: {error}")
+            if self._pump_control is not None:
+                self._pump_control.observe_disconnected(*tuple(PumpRole))
+            if self._devices.status.state is ApplicationState.FAULT:
+                try:
+                    self._devices.acknowledge_fault()
+                except Exception as error:
+                    release_errors.append(f"belső hibaállapot lezárása: {error}")
+            try:
+                self._activate_simulation(
+                    preserve_preferred_mode=True,
+                    ignore_cleanup_errors=True,
+                )
+            except Exception as error:
+                release_errors.append(f"hardvermód eldobása: {error}")
+                self._remember_run_mode(RunMode.HARDWARE)
+            self._start_pending_stage_exports()
+            self._set_all_connections("LEVÁLASZTVA — KRITIKUS HIBA", ok=False)
+            details = (
+                "\n\nA portlezárás közben észlelt további hibák:\n- "
+                + "\n- ".join(release_errors)
+                if release_errors
+                else ""
+            )
+            self._show_error(
+                "Kritikus hardverhiba történt, ezért a program biztonsági "
+                "állapotot kért és elengedte a hardverkapcsolatokat.\n\n"
+                f"Hiba: {message}\n\n"
+                "Ellenőrizd a berendezést és a kábeleket. Az üzenet bezárása "
+                "után megnyílik az Eszközbeállítások ablaka."
+                f"{details}"
+            )
+        finally:
+            self._critical_hardware_recovery_active = False
+            self._refresh_state()
+        QTimer.singleShot(0, self._open_device_settings)
 
     def _set_connection(self, key: str, connected: bool) -> None:
         label = self._connection_labels[key]
@@ -7753,14 +8366,11 @@ class DashboardWindow(QMainWindow):
 
     def _refresh_state(self) -> None:
         state = self._devices.status.state
-        self._state_label.setText(state.value.upper())
-        self._connect_button.setEnabled(
-            state is ApplicationState.IDLE and not self._preflight_active
+        self._state_label.setText(
+            "SZÜNETEL" if self._runtime.paused else state.value.upper()
         )
-        self._disconnect_button.setEnabled(
-            state in (ApplicationState.READY, ApplicationState.RUNNING)
-            and not self._preflight_active
-        )
+        self._connect_button.setEnabled(False)
+        self._disconnect_button.setEnabled(False)
         project_selected = (
             isinstance(self._project.currentData(), int)
             and bool(self._stage.currentText().strip())
@@ -7802,36 +8412,36 @@ class DashboardWindow(QMainWindow):
                 "Futtassa le sikeresen minden konfigurált eszköz kapcsolati tesztjét."
             )
         elif state is not ApplicationState.READY:
-            self._start_button.setToolTip("Csatlakoztassa az eszközöket.")
+            self._start_button.setToolTip(
+                "Aktiválja a hardvermódot; ez egyben létrehozza az élő "
+                "hardverkapcsolatot."
+            )
         elif self._preflight_active:
             self._start_button.setToolTip("A mérés előtti ellenőrzés folyamatban van.")
         else:
             self._start_button.setToolTip(
                 "Tételes biztonsági előellenőrzés után indítja a mérést."
             )
-        self._stop_button.setEnabled(
-            state in (ApplicationState.READY, ApplicationState.RUNNING)
+        self._pause_button.setEnabled(
+            state is ApplicationState.RUNNING
+            and self._runtime.running
             and not self._preflight_active
         )
+        self._pause_button.setText(
+            "Mérés folytatása"
+            if self._runtime.paused
+            else "Mérés szüneteltetése"
+        )
+        self._pause_button.setToolTip(
+            "Folytatja a PID- és adatrögzítési ciklust."
+            if self._runtime.paused
+            else "Megállítja a PID-et és az adatmentést, miközben a "
+            "biztonsági felügyelet és a jelenlegi fizikai kimenet megmarad."
+        )
+        self._stop_button.setEnabled(
+            state is ApplicationState.RUNNING and not self._preflight_active
+        )
         self._acknowledge_button.setEnabled(state is ApplicationState.FAULT)
-        self._manual_control_action.setEnabled(self._developer_mode)
-        if self._run_mode is not RunMode.HARDWARE:
-            self._manual_control_action.setToolTip(
-                "Előbb aktiváld a hardvermódot az Eszközök ablakban."
-            )
-        elif state is ApplicationState.RUNNING:
-            self._manual_control_action.setToolTip(
-                "Futó mérés közben a manuális hardvervezérlés nem nyitható meg."
-            )
-        elif state is ApplicationState.FAULT:
-            self._manual_control_action.setToolTip(
-                "Reteszelt hiba: fizikai ellenőrzés és hibanyugtázás szükséges."
-            )
-        else:
-            self._manual_control_action.setToolTip(
-                "Felügyelt, eszközönkénti pumpa- és szelepvezérlés megnyitása. "
-                "A nem biztonságos RUN és szelepírás teljes biztonsági telemetriát igényel."
-            )
         self._measurement_settings_action.setEnabled(
             state is not ApplicationState.RUNNING
         )
@@ -7872,10 +8482,16 @@ class DashboardWindow(QMainWindow):
                 if recorded_at is not None
                 else "első ciklusra vár"
             )
-            self._recording_status_label.setText("● RÖGZÍTÉS AKTÍV")
-            self._recording_status_label.setStyleSheet(
-                "color:#1b7f3a;font-weight:800"
-            )
+            if self._runtime.paused:
+                self._recording_status_label.setText("Ⅱ RÖGZÍTÉS SZÜNETEL")
+                self._recording_status_label.setStyleSheet(
+                    "color:#9a6700;font-weight:800"
+                )
+            else:
+                self._recording_status_label.setText("● RÖGZÍTÉS AKTÍV")
+                self._recording_status_label.setStyleSheet(
+                    "color:#1b7f3a;font-weight:800"
+                )
             self._recording_details_label.setText(
                 f"Fájl: {path}\nMéret: {size / 1024:.1f} KiB; "
                 f"utolsó rögzítési ciklus: {updated}"

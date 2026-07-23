@@ -132,3 +132,26 @@ def test_separate_manual_output_safety_does_not_require_measurement_snapshot() -
     assert result == 35.0
     assert actuator.output_percent == 35.0
     assert writer.records == []
+
+
+def test_paused_supervision_holds_output_without_persisting() -> None:
+    control_loop, actuator, writer = loop()
+    control_loop.execute_once(
+        active_stage="water",
+        mode=ControlMode.MANUAL,
+        dt_seconds=0.1,
+        manual_output_percent=35.0,
+    )
+    writer.records.clear()
+
+    result = control_loop.supervise_hold_once(
+        active_stage="water",
+        mode=ControlMode.MANUAL,
+        source=PressureSource.INJECTION_PUMP,
+        setpoint_bar=100.0,
+    )
+
+    assert result.command.reason == "measurement paused; physical output held"
+    assert result.command.output_percent == 35.0
+    assert actuator.output_percent == 35.0
+    assert writer.records == []

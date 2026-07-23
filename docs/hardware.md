@@ -74,11 +74,12 @@ vagy vezetett funkcionális teszt. Ha az aktív hardverösszeállítás eltér a
 kiválasztott projekt profiljától, normál mérés csak az eszközök újraaktiválása
 után indítható.
 
-Developer részleges hardvermódban minden szerepkör önállóan próbálható. A két
-pumpa és a két NI-bemenet saját, a többi eszköztől független kapcsolatpróbával
-engedélyezhető. A csak szelepet tartalmazó profil olvasási próba nélkül is
-aktiválható részleges manuális tesztmódba, mert AO-kapcsolat olvasással nem
-igazolható; a tényleges kimeneti írás továbbra is külön kezelői megerősítést kér.
+A Developer közvetlen eszközkezelőben minden szerepkör önállóan próbálható,
+globális hardvermód aktiválása nélkül. A két pumpa és a két NI-bemenet saját,
+a többi eszköztől független kapcsolatot használ. A csak szelepet tartalmazó
+profil is megnyitható, mert AO-kapcsolat olvasással nem igazolható; a tényleges
+kimeneti írás továbbra is külön kezelői megerősítést kér. A közvetlen
+kezelő bezárásakor minden ideiglenes pumpaport és NI-erőforrás lezárul.
 
 ## NI USB-6001
 

@@ -95,6 +95,23 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 
 ## Vezérlés
 
+- Az utoljára sikeresen választott HARDVER mód minden alkalmazásindításkor
+  maradjon az előnyben részesített mód; a fizikai kimenetek külön kezelői
+  megerősítése ettől még kötelező.
+- Normál kezelői módban a HARDVER mód aktiválása és az élő hardverkapcsolat egy
+  művelet legyen. Sikeres aktiválás után a kapcsolat a mérések között is maradjon
+  `READY` állapotban; külön Csatlakozás és Leválasztás gomb ne jelenjen meg.
+- A mérés kezelői gombjai: **Mérés indítása**, **Mérés
+  szüneteltetése/folytatása** és **Mérés leállítása**. Szünetben a PID és az
+  adatmentés álljon, de a biztonsági felügyelet fusson tovább és a fizikai
+  kimenet maradjon a szünet kezdeti értékén. Leállításkor STOP/safe-state után
+  a kapcsolat maradjon élő, a dashboard élő grafikonja, táblázata és értékei
+  kerüljenek alaphelyzetbe.
+- Kritikus hardverhiba, kapcsolatvesztés, biztonsági interlock, watchdoghiba vagy
+  vészleállítás után a program minden portot best-effort módon zárjon le, dobja
+  el az aktív hardvermódot, mutasson konkrét hibaüzenetet, majd automatikusan
+  nyissa meg az Eszközbeállításokat. Nem kritikus előellenőrzési hiba ne bontsa
+  az élő hardverkapcsolatot.
 - Hardveres módban a mérésindítás külön ablakban kérje be mindkét pumpa elérendő
   kezdőnyomását, a köpeny nyomásfelépítési térfogatáramát és a besajtoló
   térfogatáramát, majd külön kezelői megerősítés után indítsa el a pumpákat.
@@ -131,10 +148,15 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   szelep 0–100%-os tartományát ellenőrizze. Nem kapcsolódó, ki nem épített
   érzékelő hiánya nem tilthatja a manuális parancsot. A fizikai kimenet
   megerősítése, a STOP/safe-state elsőbbsége és a véges kommunikációs timeout megmarad.
-- Developer részleges hardvermódban minden hozzáadott eszköz a többi eszköz
-  kapcsolati eredményétől függetlenül legyen tesztelhető. A csak szelepet
-  tartalmazó profil olvasási kapcsolatpróba nélkül is megnyithassa a manuális
-  tesztmódot; minden tényleges AO-írás külön megerősítést igényeljen.
+- Developer közvetlen eszközkezelésben minden hozzáadott eszköz a többi eszköz
+  kapcsolati eredményétől és a globális hardvermódtól függetlenül legyen
+  kezelhető. A csak szelepet tartalmazó profil is megnyithassa ezt a felületet;
+  minden tényleges AO-írás külön megerősítést igényeljen.
+- Minden beállítási menüpont egy közös, átméretezhető, bal oldali
+  kategórianavigációs ablak megfelelő oldalát nyissa meg.
+- A diagnosztikai napló alapértelmezetten legyen engedélyezve.
+- Az élő grafikon a figyelmeztetést sárga, a kritikus riasztást piros ponttal
+  jelölje; hover esetén jelenjen meg a magyar idő, szakasz és hibarészlet.
 - Automatikus nyomásfelépítés közben a köpeny- és besajtolási nyomás megengedett különbségének betartása.
 - A szelep automata és kézi módban működhet.
 - Automata módban a szabályozási forrás választható legyen: besajtoló pumpa nyomása vagy vonali nyomásmérő.

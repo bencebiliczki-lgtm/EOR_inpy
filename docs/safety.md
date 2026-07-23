@@ -40,6 +40,18 @@ A pontos fizikai reakció még helyszíni kockázatelemzést igényel. Addig a k
 - Újraindítás csak megszűnt ok, kezelői nyugtázás és előfeltétel-ellenőrzés után lehetséges.
 - A konfiguráció változtatása ne törölje automatikusan az aktív hibát.
 
+A mérés szüneteltetése nem biztonsági leállítás. A PID és a mérési adatmentés
+szünetel, az utolsó kimenet változatlan marad, de a teljes pumpa-, NI-,
+adatminőség- és nyomásfelügyelet a vezérlési ciklus időzítésével tovább fut.
+Bármely interlock a szünetből is ugyanarra a kritikus safe-state útvonalra kerül.
+
+Kritikus hardverhibánál a safe-state után a kapcsolat megtartása tilos: minden
+pumpaworkert le kell állítani és minden soros/DAQ erőforrást best-effort módon
+fel kell szabadítani. A rendszer nem kapcsolódhat vissza automatikusan; konkrét
+hibaüzenet és az Eszközbeállítások kezelői kapcsolatpróbája szükséges. Egy
+egyszerű, mérésindítás előtti validációs hiba ezzel szemben nem indokol
+portbontást.
+
 A fizikai pumpaadapter a safe-state `STOP` kérést élvezérelten reteszeli. Egy
 hibaeseményben pumpánként legfeljebb egy `STOP` kerül a soros vonalra akkor is, ha
 a pumpa `PROBLEM=LOCAL MODE` választ ad vagy több felügyeleti réteg ugyanazt a

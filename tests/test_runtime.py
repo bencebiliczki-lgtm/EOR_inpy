@@ -9,6 +9,7 @@ from eor_control.runtime import BackgroundControlRunner, RuntimeSettings
 class FakeControlLoop:
     delay_seconds: float = 0.0
     persist_flags: list[bool] = field(default_factory=list)
+    hold_cycles: int = 0
     safe_state_count: int = 0
 
     def execute_once(self, **arguments: object) -> object:
@@ -19,6 +20,19 @@ class FakeControlLoop:
 
     def request_safe_state(self) -> None:
         self.safe_state_count += 1
+
+    def supervise_hold_once(self, **_arguments: object) -> object:
+        self.hold_cycles += 1
+
+        @dataclass(frozen=True)
+        class Record:
+            safety_reasons: tuple[str, ...] = ()
+
+        @dataclass(frozen=True)
+        class Result:
+            record: Record = Record()
+
+        return Result()
 
 
 def settings(recording_interval: float = 1.0) -> RuntimeSettings:
@@ -61,3 +75,29 @@ def test_slow_control_cycle_triggers_watchdog_and_safe_state() -> None:
     assert loop.safe_state_count == 1
     assert len(faults) == 1
     assert "deadline missed" in faults[0]
+
+
+def test_pause_holds_control_and_persistence_while_supervision_continues() -> None:
+    loop = FakeControlLoop()
+    runner = BackgroundControlRunner(
+        loop,  # type: ignore[arg-type]
+        control_interval_seconds=0.02,
+    )
+    runner.start(settings())
+    sleep(0.06)
+
+    runner.pause()
+    sleep(0.04)
+    persisted_at_pause = len(loop.persist_flags)
+    sleep(0.08)
+
+    assert runner.paused
+    assert len(loop.persist_flags) == persisted_at_pause
+    assert loop.hold_cycles >= 3
+
+    runner.resume()
+    sleep(0.06)
+    runner.stop()
+
+    assert not runner.paused
+    assert len(loop.persist_flags) > persisted_at_pause

@@ -1,4 +1,5 @@
 import os
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import sleep
@@ -36,16 +37,24 @@ from eor_control.application import (  # noqa: E402
     DeviceControlService,
     RunMode,
 )
+from eor_control.control import ControlMode, PressureSource, ValveCommand  # noqa: E402
+from eor_control.control_loop import ControlCycleResult  # noqa: E402
 from eor_control.data_management import MeasurementTable  # noqa: E402
 from eor_control.device_testing import (  # noqa: E402
     DeviceTestReport,
     FunctionalDeviceTestSession,
 )
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger  # noqa: E402
-from eor_control.domain import PumpStatus  # noqa: E402
+from eor_control.domain import (  # noqa: E402
+    DataQuality,
+    MeasurementRecord,
+    MeasurementSnapshot,
+    PumpStatus,
+)
 from eor_control.hardware import (  # noqa: E402
     ConnectionTestResult,
     DeviceConnectionResult,
+    HardwareConfiguration,
     HardwareDiscovery,
     HardwareTestDevice,
     NiPhysicalChannelInfo,
@@ -81,6 +90,7 @@ from eor_control.ui import (  # noqa: E402
     ProjectSettingsDialog,
     PumpControlDialog,
     ResizableDialog,
+    SettingsHubDialog,
     StageSettingsDialog,
     application_icon,
     application_icon_path,
@@ -142,9 +152,86 @@ def test_application_dialogs_are_resizable() -> None:
         CalibrationSettingsDialog,
         MeasurementOverviewDialog,
         PreflightDialog,
+        SettingsHubDialog,
     ):
         assert issubclass(dialog_type, ResizableDialog)
     dialog.close()
+
+
+def test_settings_hub_uses_resizable_left_navigation() -> None:
+    application()
+    opened: list[str] = []
+
+    def page(key: str) -> QWidget:
+        opened.append(key)
+        editor = QWidget()
+        editor.setObjectName(f"embedded_{key}")
+        return editor
+
+    dialog = SettingsHubDialog(
+        (
+            ("devices", "Eszközök", "Eszközleírás", lambda: page("devices")),
+            ("logging", "Naplózás", "Naplóleírás", lambda: page("logging")),
+        ),
+    )
+    dialog.select_page("logging")
+
+    assert dialog.isSizeGripEnabled()
+    assert dialog.minimumWidth() >= 720
+    assert dialog.navigation.count() == 2
+    assert dialog.navigation.currentItem().data(Qt.ItemDataRole.UserRole) == "logging"
+    assert dialog.pages.currentIndex() == 1
+    assert dialog.findChild(QWidget, "embedded_logging") is not None
+    assert dialog.findChild(QPushButton, "open_settings_logging") is None
+    assert opened == ["logging"]
+    dialog.navigation.setCurrentRow(0)
+    assert dialog.findChild(QWidget, "embedded_devices") is not None
+    assert opened == ["logging", "devices"]
+    dialog.close()
+
+
+def test_dashboard_settings_hub_embeds_real_editors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        tmp_path / "projects.sqlite3",
+        settings=QSettings(
+            str(tmp_path / "settings.ini"), QSettings.Format.IniFormat
+        ),
+    )
+    window._set_developer_mode(True)
+    hubs: list[SettingsHubDialog] = []
+    monkeypatch.setattr(
+        SettingsHubDialog,
+        "exec",
+        lambda dialog: hubs.append(dialog) or QDialog.DialogCode.Rejected,
+    )
+
+    for key, editor_type in (
+        ("devices", DeviceSettingsDialog),
+        ("logging", LoggingSettingsDialog),
+        ("calibration", CalibrationSettingsDialog),
+        ("control_cycle", ControlCycleSettingsDialog),
+    ):
+        window._open_settings_hub(key)
+        hub = hubs[-1]
+        assert hub.navigation.currentItem().data(Qt.ItemDataRole.UserRole) == key
+        editor = hub.findChild(editor_type)
+        assert editor is not None
+        assert editor.windowType() == Qt.WindowType.Widget
+        assert editor.parentWidget() is not window
+
+    window._open_settings_hub("appearance")
+    appearance_hub = hubs[-1]
+    assert appearance_hub.findChild(QComboBox, "settings_theme") is not None
+    assert not any(
+        button.text().endswith("megnyitása")
+        for hub in hubs
+        for button in hub.findChildren(QPushButton)
+    )
+    window.close()
 
 
 def test_developer_control_cycle_settings_are_persisted(tmp_path: Path) -> None:
@@ -348,35 +435,23 @@ def test_manual_control_retains_partial_pump_status_when_sensor_is_missing() -> 
     dialog.close()
 
 
-def test_manual_control_opens_from_idle_partial_hardware_mode(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_developer_menu_does_not_duplicate_direct_device_control(
+    tmp_path: Path,
 ) -> None:
     application()
     window = build_simulated_dashboard(
         tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
     )
     window._set_developer_mode(True)
-    window._run_mode = RunMode.HARDWARE
-    window._partial_hardware_mode = True
-    window._pump_control = object()  # type: ignore[assignment]
-    opened: list[bool] = []
+    developer_action = next(
+        action for action in window.menuBar().actions() if action.text() == "Developer"
+    )
+    developer_menu = developer_action.menu()
 
-    class FakeManualDialog:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            opened.append(True)
-
-        @staticmethod
-        def exec() -> int:
-            return 0
-
-    monkeypatch.setattr("eor_control.ui.PumpControlDialog", FakeManualDialog)
-
-    window._open_pump_control()
-
-    assert window._devices.status.state is ApplicationState.IDLE
-    assert opened == [True]
-    window._pump_control = None
-    window._run_mode = RunMode.SIMULATION
+    assert developer_menu is not None
+    assert "Közvetlen eszközkezelés…" not in (
+        action.text() for action in developer_menu.actions()
+    )
     window.close()
 
 
@@ -614,12 +689,14 @@ def test_device_settings_discovers_dropdown_choices(
     log_path = tmp_path / "communication.html"
     diagnostics = DiagnosticLogger(log_path)
     diagnostics.configure(enabled=True, categories=[DiagnosticCategory.SYSTEM])
+    direct_configurations: list[HardwareConfiguration] = []
     dialog = DeviceSettingsDialog(
         UnusedTester(),  # type: ignore[arg-type]
         settings=settings,
         current_mode=RunMode.SIMULATION,
         diagnostics=diagnostics,
         developer_mode=True,
+        direct_control_opener=direct_configurations.append,
         discoverer=lambda: HardwareDiscovery(
             serial_ports=(
                 SerialPortInfo("COM8", "USB Serial Port", "FTDI", "FT232R"),
@@ -726,7 +803,7 @@ def test_device_settings_discovers_dropdown_choices(
         )
     )
     assert not dialog._activate_button.isEnabled()
-    assert dialog._partial_activate_button.isEnabled()
+    assert dialog._direct_control_button.isEnabled()
     assert "SIKERTELEN" in dialog._connection_result_labels[
         HardwareTestDevice.JACKET_PUMP
     ].text()
@@ -734,17 +811,9 @@ def test_device_settings_discovers_dropdown_choices(
         HardwareTestDevice.INJECTION_PUMP
     ].text()
     assert "Sikeres kapcsolatok: 3/4" in dialog._result_label.text()
-    monkeypatch.setattr(
-        QInputDialog,
-        "getText",
-        lambda *_args, **_kwargs: (
-            DeviceSettingsDialog.PARTIAL_HARDWARE_CONFIRMATION,
-            True,
-        ),
-    )
-    dialog._activate_partial()
-    assert dialog.partial_activation
-    assert dialog.result() == QDialog.DialogCode.Accepted
+    dialog._open_direct_control()
+    assert direct_configurations == [dialog._read_configuration()]
+    assert dialog.result() != QDialog.DialogCode.Accepted
     dialog.close()
 
 
@@ -824,15 +893,17 @@ def test_device_settings_uses_selected_project_device_profile(tmp_path: Path) ->
     dialog.close()
 
 
-def test_valve_only_profile_can_enter_independent_manual_test_mode(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_valve_only_profile_can_open_independent_direct_control(
+    tmp_path: Path,
 ) -> None:
     application()
+    direct_configurations: list[HardwareConfiguration] = []
     dialog = DeviceSettingsDialog(
         UnusedTester(),  # type: ignore[arg-type]
         settings=QSettings(str(tmp_path / "valve-only.ini"), QSettings.Format.IniFormat),
         current_mode=RunMode.SIMULATION,
         developer_mode=True,
+        direct_control_opener=direct_configurations.append,
         device_profile={
             "jacket_pump_enabled": False,
             "injection_pump_enabled": False,
@@ -844,25 +915,16 @@ def test_valve_only_profile_can_enter_independent_manual_test_mode(
             ni_output_channels=(NiPhysicalChannelInfo("Dev1/ao0", "Dev1"),)
         ),
     )
-    monkeypatch.setattr(
-        QInputDialog,
-        "getText",
-        lambda *_args, **_kwargs: (
-            DeviceSettingsDialog.PARTIAL_HARDWARE_CONFIRMATION,
-            True,
-        ),
-    )
     dialog.ni_device.setCurrentIndex(dialog.ni_device.findData("Dev1"))
 
-    assert dialog._partial_activate_button.isEnabled()
-    assert "ÖNÁLLÓAN TESZTELHETŐ" in dialog._valve_test_status.text()
-    dialog._activate_partial()
+    assert dialog._direct_control_button.isEnabled()
+    assert "ÖNÁLLÓAN KEZELHETŐ" in dialog._valve_test_status.text()
+    dialog._open_direct_control()
 
-    assert dialog.result() == QDialog.DialogCode.Accepted
-    assert dialog.partial_activation
-    assert dialog.configuration is not None
-    assert dialog.configuration.valve_output_enabled
-    assert dialog.configuration.enabled_test_devices() == ()
+    assert dialog.result() != QDialog.DialogCode.Accepted
+    assert len(direct_configurations) == 1
+    assert direct_configurations[0].valve_output_enabled
+    assert direct_configurations[0].enabled_test_devices() == ()
 
 
 def test_device_settings_rejects_successful_ni_read_outside_calibration(
@@ -919,6 +981,8 @@ def test_device_settings_keeps_actions_visible_on_small_screen(tmp_path: Path) -
         settings=QSettings(str(tmp_path / "small-screen.ini"), QSettings.Format.IniFormat),
         current_mode=RunMode.SIMULATION,
         discoverer=HardwareDiscovery,
+        developer_mode=True,
+        direct_control_opener=lambda _configuration: None,
     )
     dialog.resize(480, 420)
     dialog.show()
@@ -930,14 +994,20 @@ def test_device_settings_keeps_actions_visible_on_small_screen(tmp_path: Path) -
     assert dialog._content_widget.sizePolicy().horizontalPolicy() == (
         QSizePolicy.Policy.Ignored
     )
-    for button in (
+    action_buttons = (
         dialog._save_button,
         dialog._test_button,
         dialog._activate_button,
+        dialog._direct_control_button,
         dialog._cancel_button,
-    ):
+    )
+    for button in action_buttons:
         assert button.isVisible()
         assert button.geometry().bottom() <= dialog.contentsRect().bottom()
+    assert len({button.geometry().center().y() for button in action_buttons}) == 1
+    assert [
+        button.geometry().left() for button in action_buttons
+    ] == sorted(button.geometry().left() for button in action_buttons)
 
     dialog.close()
 
@@ -1330,6 +1400,68 @@ def test_hardware_disconnect_releases_and_reconnects_without_settings_dialog(
     window.close()
 
 
+def test_critical_hardware_fault_releases_ports_and_opens_device_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+    )
+    jacket = SimulatedPump()
+    injection = SimulatedPump()
+    devices = DeviceControlService(
+        jacket_pump=jacket,
+        injection_pump=injection,
+        daq=SimulatedDataAcquisition(),
+        mode=RunMode.HARDWARE,
+    )
+    devices.authorize_hardware(DeviceControlService.HARDWARE_CONFIRMATION)
+    devices.connect()
+
+    class PumpControl:
+        disconnected = False
+
+        def observe_disconnected(self, *_roles: PumpRole) -> None:
+            self.disconnected = True
+
+    pump_control = PumpControl()
+    window._devices = devices
+    window._pump_control = pump_control  # type: ignore[assignment]
+    window._run_mode = RunMode.HARDWARE
+    window._preferred_run_mode = RunMode.HARDWARE
+    simulation_calls: list[tuple[bool, bool]] = []
+    errors: list[str] = []
+    opened: list[bool] = []
+    monkeypatch.setattr(
+        window,
+        "_activate_simulation",
+        lambda *, preserve_preferred_mode, ignore_cleanup_errors: (
+            simulation_calls.append(
+                (preserve_preferred_mode, ignore_cleanup_errors)
+            )
+        ),
+    )
+    monkeypatch.setattr(window, "_show_error", errors.append)
+    monkeypatch.setattr(
+        window, "_open_device_settings", lambda: opened.append(True)
+    )
+
+    window._handle_critical_hardware_fault("megszakadt a pumpakapcsolat")
+    application().processEvents()
+
+    assert not jacket.connected
+    assert not injection.connected
+    assert devices.status.state is ApplicationState.IDLE
+    assert not devices.status.hardware_authorized
+    assert pump_control.disconnected
+    assert simulation_calls == [(True, True)]
+    assert errors and "elengedte a hardverkapcsolatokat" in errors[0]
+    assert opened == [True]
+    window._pump_control = None
+    window._run_mode = RunMode.SIMULATION
+    window.close()
+
+
 def test_background_alert_flashes_taskbar_once_per_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1394,7 +1526,6 @@ def test_window_shutdown_requests_safe_state_from_ready_devices(tmp_path: Path) 
     jacket = window._devices._jacket_pump
     injection = window._devices._injection_pump
     daq = window._devices._daq
-    window._devices.connect()
 
     window.close()
 
@@ -1425,7 +1556,6 @@ def test_measurement_start_preflight_rejects_invalid_sensor_voltage(
     window = build_simulated_dashboard(
         tmp_path / "raw.csv", project_path, settings=settings
     )
-    window._devices.connect()
     window._devices._daq.inputs["line_pressure"] = -1.188189
     errors: list[str] = []
     monkeypatch.setattr(window, "_show_error", errors.append)
@@ -1530,14 +1660,6 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     window._set_developer_mode(True)
     assert not window._kp.isHidden()
     assert window._developer_view_action.isVisible()
-    assert window._manual_control_action.isVisible()
-    assert window._manual_control_action.isEnabled()
-    manual_control_errors: list[str] = []
-    monkeypatch.setattr(window, "_show_error", manual_control_errors.append)
-    window._manual_control_action.trigger()
-    assert manual_control_errors == [
-        "A manuális hardvervezérlés csak sikeresen aktivált hardvermódban érhető el."
-    ]
     assert window._simulation_mode_action.isVisible()
     assert window._simulation_mode_action.isChecked()
     assert not any(
@@ -1670,7 +1792,6 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     configuration = window._current_configuration()
     assert configuration["pid"]["direction"] == "direct"
     window._apply_pid()
-    window._devices.connect()
     window._devices.start()
     window._runtime.start(window._runtime_settings())
     sleep(0.15)
@@ -1694,8 +1815,24 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert flow_values is not None
     assert len(flow_values) == len(flow_x_values)
     assert all(value >= 0.0 for value in flow_x_values)
-    window._runtime.stop()
-    window._devices.stop()
+    assert window._connect_button.isHidden()
+    assert window._disconnect_button.isHidden()
+    window._refresh_state()
+    window._pause_measurement()
+    paused_points = len(window._times)
+    sleep(0.12)
+    application().processEvents()
+    assert window._runtime.paused
+    assert len(window._times) == paused_points
+    assert window._pause_button.text() == "Mérés folytatása"
+    window._pause_measurement()
+    assert not window._runtime.paused
+    window._stop()
+    assert window._devices.status.state is ApplicationState.READY
+    assert not window._runtime.running
+    assert len(window._times) == 0
+    assert window._jacket_label.text() == "— bar"
+    assert window._history_view._table.rows == ()
     measurement_path = window._measurement_writer.current_path
     assert measurement_path is None
     assert not tuple((tmp_path / "projects").rglob("*_raw.csv"))
@@ -1762,7 +1899,6 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     persisted_settings = QSettings(str(settings_path), QSettings.Format.IniFormat)
     assert persisted_settings.value("theme") == "dark"
     window.close()
-
     restored = build_simulated_dashboard(
         tmp_path / "restored.csv",
         project_path,
@@ -1907,3 +2043,43 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     )
     developer.close()
     restored.close()
+
+
+def test_dashboard_marks_warning_and_critical_alarms_on_graph(
+    tmp_path: Path,
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+    )
+    snapshot = MeasurementSnapshot(
+        recorded_at=datetime(2026, 7, 23, 10, 30, tzinfo=UTC),
+        monotonic_seconds=15.0,
+        jacket_pump=PumpStatus(120.0, 0.0, 250.0),
+        injection_pump=PumpStatus(90.0, 8.0, 240.0),
+        line_pressure_bar=91.0,
+        differential_pressure_bar=2.0,
+        valve_percent=20.0,
+        quality=DataQuality.STALE,
+    )
+    record = MeasurementRecord(snapshot, 1.0, "Teszt szakasz")
+    command = ValveCommand(
+        True, 20.0, ControlMode.MANUAL, PressureSource.INJECTION_PUMP
+    )
+
+    window._handle_cycle(ControlCycleResult(record, command))
+
+    assert len(window._alarm_points) == 1
+    assert "FIGYELMEZTETÉS" in str(window._alarm_points[0]["data"])
+    assert "Adatminőség: stale" in str(window._alarm_points[0]["data"])
+    assert "Teszt szakasz" in str(window._alarm_points[0]["data"])
+
+    critical_record = replace(record, safety_reasons=("nyomáshatár túllépve",))
+    window._handle_cycle(ControlCycleResult(critical_record, command))
+
+    assert len(window._alarm_points) == 2
+    assert "KRITIKUS" in str(window._alarm_points[-1]["data"])
+    assert "nyomáshatár túllépve" in str(window._alarm_points[-1]["data"])
+    window._reset_measurement_dashboard()
+    assert window._alarm_points == []
+    window.close()
