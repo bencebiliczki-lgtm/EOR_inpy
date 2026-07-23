@@ -148,7 +148,7 @@ szakaszt; szakasz nélkül mérés nem indítható. A felületről projekt hozha
 szakasz adható hozzá vagy nevezhető át, továbbá futás közben is módosíthatók a PID
 erősítések, a hatásirány és a kimeneti korlátok. A PID újrakonfigurálása az aktuális
 kimenetről inicializálja az integrált tagot. A leválasztás és a reteszelt hiba
-nyugtázása kizárólag az alkalmazási állapotgépen keresztül történik.
+biztonságos lezárása kizárólag az alkalmazási állapotgépen keresztül történik.
 Az aktív szakasz egyetlen `QComboBox` példánya az **Aktív projekt** összefoglaló
 kártyán jelenik meg. Ez a runtime, az INI-ben mentett utolsó szakasz és a
 fázisonkénti CSV-író közös kiválasztási forrása; nincs külön, eltérő állapotú
@@ -166,8 +166,8 @@ lineáris kalibrációt és a `SafetyLimits` értékeit, majd a `MeasurementServ
 alkalmazási rétegen keresztül alkalmazza őket. Futó mérés közben az ablak tiltott.
 A köpenynyomás minimális többletének alapértéke 20 bar, az UI-ban pozitív,
 0,1 bar vagy nagyobb értékre konfigurálható. Biztonsági
-újrakonfigurálás nem törli a monitor reteszelt okait; azok továbbra is csak külön
-kezelői nyugtázással oldhatók.
+újrakonfigurálás nem törli a monitor reteszelt okait; azok csak a riasztás
+kezelői bezárásakor futtatott friss, sikeres biztonsági ellenőrzéssel oldhatók.
 
 A nem modális, görgethető `MeasurementOverviewDialog` 250 ms-os UI-időzítővel
 olvassa a főablak aktuális megjelenítési pillanatképét. Egy oldalon részletezi a
@@ -249,8 +249,11 @@ képest eltolva 1,5 másodpercenként kerül lekérdezésre. A gyors mérés–b
 ciklus kizárólag ezt a cache-t olvassa. Az első teljes adatkészletre csak a
 kapcsolatfelépítés vár; a `RSVP` és `IDENTIFY` kizárólag a pumpa `connect()`
 életciklusában fut. Kommunikációs hiba után a worker nem próbál automatikus
-újraazonosítást: a cache `DISCONNECTED`, a határidőn túl frissítetlen adat pedig
-`STALE` minőséget kap, és mindkettő a meglévő biztonsági reteszt aktiválja.
+újraazonosítást. A 400 ms-os nyomáspolling `STALE` határa 2 másodperc, ami
+lefedi a célgépen parancssorozatok közben naplózott 1,0–1,4 másodperces normál
+soros késést; a lassú telemetria határa 3 másodperc. A cache kommunikációs
+hibánál `DISCONNECTED`, a határidőn túl frissítetlen adatnál `STALE` minőséget
+kap, és mindkettő a meglévő biztonsági reteszt aktiválja.
 
 ## Felhasználói beállítások
 
@@ -362,7 +365,12 @@ Eszközbeállításokat, hogy a kezelő azonnal új kapcsolatpróbát végezhess
 
 A `DashboardWindow` állandó, szöveges mód- és riasztássávot tart fenn. A reteszelt
 riasztás időpontot, okot, automatikus safe-state műveletet és kezelői következő
-lépést tartalmaz, és csak sikeres hibanyugtázáskor törlődik. A `QSystemTrayIcon`
+lépést tartalmaz. Külön hibanyugtázó gomb helyett a sáv bezárógombja aktív
+hibaállapotban friss mérési pillanatképet kér és újraértékeli a biztonsági
+feltételeket. A retesz és a sáv csak sikeres ellenőrzéskor törlődik, majd
+szimulációban az eszközállapot automatikusan `READY` lesz. A kritikus
+hardverhiba portfelszabadítása után megmaradt tájékoztató riasztás külön
+bezárható, mert az élő hardverkapcsolat addigra már megszűnt. A `QSystemTrayIcon`
 ezzel párhuzamosan Windows rendszerértesítést jelenít meg; minimalizált vagy
 inaktív ablaknál a `QApplication.alert()` a tálcagombot is figyelemkérésre állítja.
 Az értesítési kulcs megakadályozza, hogy ugyanaz a biztonsági ok minden mérési
@@ -413,7 +421,11 @@ térfogatáramát. Az ablak csak akkor enged indítani, ha a tervezett köpenyny
 legalább a konfigurált biztonsági többlettel nagyobb a besajtoló kezdőnyomásánál.
 Az utoljára elfogadott értékeket a `QSettings` megőrzi, de minden mérés előtt újra
 megjelennek, és csak pontos kezelői megerősítéssel fogadhatók el. A `ml/h` értékeket
-a szolgáltatás a DASNET adapter `ml/min` egységére váltja.
+a teljes alkalmazási és pumpavezérlési réteg változatlanul `ml/h` egységben adja
+tovább. Az explicit indítási parancsnál a DASNET adapter előbb `ML/HR` egységre
+állítja az adott pumpacsatornát, majd az UI-ban megadott számértéket küldi ki.
+A visszaolvasás a pumpa által ténylegesen visszaadott `ML/MIN` vagy `ML/HR`
+egységet felismeri, és a megjelenítéshez egységesen `ml/h` értéket állít elő.
 
 A háttérszálon futó köpenysorrend `REMOTE → CONST FLOW → RUN`; a megadott
 cél-nyomás elérésekor `STOP → CONST PRESS → RUN` váltás következik. Így a pumpa a

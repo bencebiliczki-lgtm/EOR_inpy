@@ -4907,12 +4907,28 @@ class DashboardWindow(QMainWindow):
         self.resize(1100, 720)
         root = QWidget()
         layout = QVBoxLayout(root)
+        self._alarm_container = QWidget()
+        self._alarm_container.setObjectName("dashboard_alarm_container")
+        alarm_layout = QHBoxLayout(self._alarm_container)
+        alarm_layout.setContentsMargins(9, 6, 6, 6)
         self._alarm_label = QLabel()
         self._alarm_label.setObjectName("dashboard_alarm_label")
         self._alarm_label.setWordWrap(True)
         self._alarm_label.setAccessibleName("Aktív biztonsági riasztás")
+        alarm_layout.addWidget(self._alarm_label, 1)
+        self._alarm_close_button = QPushButton("×")
+        self._alarm_close_button.setObjectName("dashboard_alarm_close")
+        self._alarm_close_button.setAccessibleName("Riasztás bezárása")
+        self._alarm_close_button.setToolTip(
+            "Friss biztonsági ellenőrzés után bezárja a riasztást"
+        )
+        self._alarm_close_button.setFixedSize(32, 32)
+        self._alarm_close_button.clicked.connect(self._dismiss_alarm)
+        alarm_layout.addWidget(self._alarm_close_button)
         self._alarm_label.hide()
-        layout.addWidget(self._alarm_label)
+        self._alarm_close_button.hide()
+        self._alarm_container.hide()
+        layout.addWidget(self._alarm_container)
         self._refresh_mode_label()
         self._refresh_alarm_banner()
 
@@ -5028,7 +5044,6 @@ class DashboardWindow(QMainWindow):
         self._start_button = QPushButton("Mérés indítása")
         self._pause_button = QPushButton("Mérés szüneteltetése")
         self._stop_button = QPushButton("Mérés leállítása")
-        self._acknowledge_button = QPushButton("Hiba nyugtázása")
         self._emergency_button = QPushButton("VÉSZLEÁLLÍTÁS")
         self._emergency_button.setStyleSheet(
             "background:#b00020;color:white;font-weight:700;padding:10px"
@@ -5038,13 +5053,11 @@ class DashboardWindow(QMainWindow):
         self._start_button.clicked.connect(self._start)
         self._pause_button.clicked.connect(self._pause_measurement)
         self._stop_button.clicked.connect(self._stop)
-        self._acknowledge_button.clicked.connect(self._acknowledge_fault)
         self._emergency_button.clicked.connect(self._emergency_stop)
         self._primary_control_buttons = (
             self._start_button,
             self._pause_button,
             self._stop_button,
-            self._acknowledge_button,
             self._emergency_button,
         )
         for row, button in enumerate(self._primary_control_buttons):
@@ -6055,8 +6068,8 @@ class DashboardWindow(QMainWindow):
         self._active_alarm_text = (
             f"⛔ LEÁLLÍTÁST OKOZÓ HIBA | {timestamp} | {message} | "
             "Automatikus művelet: pumpa STOP és szelep SAFE megkísérelve. | "
-            "Következő lépés: ellenőrizze a fizikai rendszert, nyugtázza a hibát, "
-            "majd futtassa újra az előellenőrzést."
+            "Következő lépés: ellenőrizze a fizikai rendszert, majd zárja be "
+            "a riasztást. A program előtte friss biztonsági ellenőrzést végez."
         )
         self._refresh_alarm_banner()
         self._notify_user(
@@ -6081,13 +6094,23 @@ class DashboardWindow(QMainWindow):
         if self._active_alarm_text == "Nincs aktív riasztás":
             self._alarm_label.clear()
             self._alarm_label.hide()
+            self._alarm_close_button.hide()
+            self._alarm_container.hide()
             return
         self._alarm_label.setText(self._active_alarm_text)
         self._alarm_label.setStyleSheet(
-            "background:#b00020;color:white;border-radius:6px;"
-            "padding:9px;font-weight:800"
+            "background:transparent;color:white;font-weight:800"
+        )
+        self._alarm_container.setStyleSheet(
+            "background:#b00020;color:white;border-radius:6px"
+        )
+        self._alarm_close_button.setStyleSheet(
+            "background:#7f0016;color:white;border:1px solid white;"
+            "border-radius:5px;font-size:20px;font-weight:800;padding:0"
         )
         self._alarm_label.show()
+        self._alarm_close_button.show()
+        self._alarm_container.show()
 
     def _open_device_settings(self) -> None:
         self._open_settings_hub("devices")
@@ -6979,12 +7002,31 @@ class DashboardWindow(QMainWindow):
         self._set_all_connections("LEVÁLASZTVA", ok=None)
         self._refresh_state()
 
-    def _acknowledge_fault(self) -> None:
+    def _dismiss_alarm(self) -> None:
+        if self._active_alarm_text == "Nincs aktív riasztás":
+            return
         try:
-            self._devices.acknowledge_fault()
+            if self._devices.status.state is ApplicationState.FAULT:
+                decision = self._control_loop.verify_safe_fault_clear(
+                    active_stage=self._stage.currentText() or "Biztonsági ellenőrzés"
+                )
+                if not decision.safe:
+                    self._show_error(
+                        "A riasztás nem zárható be, mert a friss biztonsági "
+                        "ellenőrzés továbbra is hibát jelez:\n- "
+                        + "\n- ".join(decision.reasons)
+                    )
+                    return
+                self._devices.acknowledge_fault()
+                if self._run_mode is RunMode.SIMULATION:
+                    self._devices.connect()
+                    self._set_all_connections("SZIMULÁCIÓ — KÉSZ", ok=True)
             self._clear_active_alarm()
-        except RuntimeError as error:
-            self._show_error(str(error))
+        except Exception as error:
+            self._show_error(
+                "A riasztás nem zárható be biztonságosan: "
+                f"{type(error).__name__}: {error}"
+            )
         self._refresh_state()
 
     @staticmethod
@@ -7941,7 +7983,7 @@ class DashboardWindow(QMainWindow):
                 "Biztonsági kapcsolók és reteszek",
                 PreflightStatus.FAILED,
                 self._active_alarm_text,
-                "Ellenőrzés után nyugtázza a hibát.",
+                "Ellenőrzés után zárja be a riasztást.",
             )
         else:
             add(
@@ -8180,6 +8222,16 @@ class DashboardWindow(QMainWindow):
             if self._run_mode is RunMode.HARDWARE:
                 self._handle_critical_hardware_fault(reason)
                 return
+            if self._runtime.running:
+                self._runtime.stop()
+            if self._devices.status.state is not ApplicationState.FAULT:
+                self._devices.emergency_stop(
+                    f"simulation safety interlock: {reason}"
+                )
+            self._measurement_writer.complete_current_phase()
+            self._start_pending_stage_exports()
+            self._set_all_connections("HIBA", ok=False)
+            self._refresh_state()
         elif snapshot.quality is not DataQuality.GOOD:
             self._add_alarm_point(
                 latest,
@@ -8290,6 +8342,8 @@ class DashboardWindow(QMainWindow):
     def _handle_critical_hardware_fault(self, message: str) -> None:
         if self._critical_hardware_recovery_active:
             return
+        if self._active_alarm_text == "Nincs aktív riasztás":
+            self._set_active_alarm(f"KRITIKUS HARDVERHIBA: {message}")
         self._critical_hardware_recovery_active = True
         self._preflight_active = False
         release_errors: list[str] = []
@@ -8400,7 +8454,7 @@ class DashboardWindow(QMainWindow):
         elif not no_alarm:
             self._start_button.setToolTip(
                 "Aktív riasztás mellett a mérés nem indítható; ellenőrzés után "
-                "nyugtázza a hibát."
+                "zárja be a riasztást."
             )
         elif not project_hardware_matches:
             self._start_button.setToolTip(
@@ -8441,7 +8495,6 @@ class DashboardWindow(QMainWindow):
         self._stop_button.setEnabled(
             state is ApplicationState.RUNNING and not self._preflight_active
         )
-        self._acknowledge_button.setEnabled(state is ApplicationState.FAULT)
         self._measurement_settings_action.setEnabled(
             state is not ApplicationState.RUNNING
         )

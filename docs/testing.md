@@ -111,7 +111,10 @@ szimulációs eszközréteget, a kikapcsolt writert, az üres projektkönyvtára
 felület módjelzését.
 A dashboard értesítési tesztje igazolja az állandó mód- és riasztássáv jelenlétét,
 a háttérben vagy minimalizálva történő tálcagomb-figyelmeztetést, valamint hogy
-azonos eseménykulcs csak egy értesítést válthat ki. Az előellenőrzési tesztek
+azonos eseménykulcs csak egy értesítést válthat ki. A riasztásbezárási tesztek
+ellenőrzik a friss biztonsági mérést, a veszélyes állapotban megmaradó reteszt,
+a szimulációs `READY` visszaállítást és a portfelszabadítás után megmaradt
+kritikus hardverhiba-üzenet bezárhatóságát. Az előellenőrzési tesztek
 lefedik a figyelmeztetések külön jóváhagyását és bármely hibás tétel indítástiltását.
 A tálcamenü tesztje ellenőrzi az ablak-visszaállítási és programbezárási műveletet,
 valamint hogy a kilépési kérés a főablak biztonságos bezárási útvonalát hívja.
@@ -153,7 +156,9 @@ határ alatti és pontos határértékű esetét, valamint a globális safe STOP
 állapotszinkronját. Külön teszt igazolja a B csatorna parancsutótagjait.
 
 A mérési pumpaindítás tesztje ellenőrzi a köpenypumpa `CONST FLOW → RUN`, majd
-`STOP → CONST PRESS → RUN` sorrendjét, a `ml/h`–`ml/min` átváltást, a pontos indítási
+`STOP → CONST PRESS → RUN` sorrendjét, az `ML/HR` pumpaegység explicit beállítását,
+valamint hogy az `1000 ml/h` kezelői célérték `FLOW=1000` parancsként jut el a
+pumpához. Ellenőrzi továbbá a pontos indítási
 megerősítést, a két kezdőnyomás és a tervezett nyomástöbblet kötelező bevitelét,
 a besajtoló kezdőnyomásának kivárását, valamint azt, hogy timeout vagy indulási
 biztonsági hiba esetén egyik pumpa sem marad RUN állapotban.
@@ -170,6 +175,8 @@ Eszközbeállításokat. A Developer manuális ablak élő hardvermódból megny
 a telemetria közben kiadott több parancs veszteség nélkül, sorrendben lefut, majd
 végrehajtás után látható sikerállapotot kap. A DASNET-tesztek külön ellenőrzik,
 hogy a soros timeouttal darabolt válasz a következő olvasási ablakból kiegészül.
+Külön regresszió rögzíti, hogy a 400 ms-os nyomáspolling 2 másodperces `STALE`
+határa lefedi a célgépen mért, legfeljebb 1,4 másodperces normál soros késést.
 Hiányos telemetria mellett a működő szenzor értéke látható,
 miközben a kapcsolatfrissítés nem indít közös biztonsági mérési ciklust, a
 biztonságkritikus RUN külön ellenőrzése pedig változatlan marad.

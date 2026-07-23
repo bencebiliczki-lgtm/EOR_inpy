@@ -99,8 +99,9 @@ def test_documented_control_command_sequences() -> None:
     client.responses.update(
         {
             "REMOTE": [""],
+            "UNITSA=ML/HR": [""],
             "CONST FLOW": [""],
-            "FLOW=1": [""],
+            "FLOW=1000": [""],
             "RUN": [""],
             "STOP": [""],
             "LOCAL": [""],
@@ -108,12 +109,20 @@ def test_documented_control_command_sequences() -> None:
     )
 
     pump.enter_remote()
-    pump.set_constant_flow(1.0)
+    pump.set_constant_flow(1000.0)
     pump.run()
     pump.request_stop()
     pump.return_local()
 
-    assert client.commands[-6:] == ["REMOTE", "CONST FLOW", "FLOW=1", "RUN", "STOP", "LOCAL"]
+    assert client.commands[-7:] == [
+        "REMOTE",
+        "UNITSA=ML/HR",
+        "CONST FLOW",
+        "FLOW=1000",
+        "RUN",
+        "STOP",
+        "LOCAL",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -145,8 +154,9 @@ def test_non_a_channel_control_commands_receive_channel_suffix() -> None:
         {
             "RSVPB": ["READY"],
             "IDENTIFY": ["MODEL 260D PUMP"],
+            "UNITSB=ML/HR": [""],
             "CONST FLOWB": [""],
-            "FLOWB=1": [""],
+            "FLOWB=1000": [""],
             "RUNB": [""],
             "STOPB": [""],
         }
@@ -154,8 +164,14 @@ def test_non_a_channel_control_commands_receive_channel_suffix() -> None:
     pump = IscoPump(client, IscoSerialConfig("COM1", 6, pump_channel="B"))
     pump.connect()
 
-    pump.set_constant_flow(1.0)
+    pump.set_constant_flow(1000.0)
     pump.run()
     pump.request_stop()
 
-    assert client.commands[-4:] == ["CONST FLOWB", "FLOWB=1", "RUNB", "STOPB"]
+    assert client.commands[-5:] == [
+        "UNITSB=ML/HR",
+        "CONST FLOWB",
+        "FLOWB=1000",
+        "RUNB",
+        "STOPB",
+    ]

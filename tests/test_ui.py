@@ -1457,8 +1457,62 @@ def test_critical_hardware_fault_releases_ports_and_opens_device_settings(
     assert simulation_calls == [(True, True)]
     assert errors and "elengedte a hardverkapcsolatokat" in errors[0]
     assert opened == [True]
+    assert not window._alarm_label.isHidden()
+    window._alarm_close_button.click()
+    assert window._alarm_label.isHidden()
     window._pump_control = None
     window._run_mode = RunMode.SIMULATION
+    window.close()
+
+
+def test_alarm_close_restores_simulation_ready_state(tmp_path: Path) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+    )
+
+    assert all(
+        button.text() != "Hiba nyugtázása"
+        for button in window.findChildren(QPushButton)
+    )
+    window._emergency_stop()
+
+    assert window._devices.status.state is ApplicationState.FAULT
+    assert not window._alarm_close_button.isHidden()
+
+    window._alarm_close_button.click()
+
+    assert window._devices.status.state is ApplicationState.READY
+    assert window._alarm_label.isHidden()
+    assert window._active_alarm_text == "Nincs aktív riasztás"
+    window.close()
+
+
+def test_alarm_close_refuses_unsafe_fresh_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+    )
+    injection = window._devices._injection_pump
+    assert isinstance(injection, SimulatedPump)
+    injection.pressure_bar = 500.0
+    errors: list[str] = []
+    monkeypatch.setattr(window, "_show_error", errors.append)
+    window._emergency_stop()
+
+    window._alarm_close_button.click()
+
+    assert window._devices.status.state is ApplicationState.FAULT
+    assert not window._alarm_label.isHidden()
+    assert errors and "továbbra is hibát jelez" in errors[-1]
+
+    injection.pressure_bar = 100.0
+    window._alarm_close_button.click()
+
+    assert window._devices.status.state is ApplicationState.READY
+    assert window._alarm_label.isHidden()
     window.close()
 
 
@@ -1643,16 +1697,18 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert alarm_banner is not None
     assert alarm_banner.isHidden()
     assert alarm_banner.text() == ""
+    assert window._alarm_close_button.isHidden()
     assert window._active_alarm_text == "Nincs aktív riasztás"
     window._set_active_alarm("teszt biztonsági ok")
     retained_alarm = alarm_banner.text()
     assert not alarm_banner.isHidden()
+    assert not window._alarm_close_button.isHidden()
     application().processEvents()
     window._set_active_alarm("teszt biztonsági ok")
     assert alarm_banner.text() == retained_alarm
     assert "Automatikus művelet" in retained_alarm
     assert "Következő lépés" in retained_alarm
-    window._clear_active_alarm()
+    window._alarm_close_button.click()
     assert alarm_banner.isHidden()
     assert alarm_banner.text() == ""
     assert not window._developer_mode

@@ -27,7 +27,7 @@ class ControllablePump(Protocol):
 
     def enter_remote(self) -> None: ...
 
-    def set_constant_flow(self, flow_ml_per_minute: float) -> None: ...
+    def set_constant_flow(self, flow_ml_per_hour: float) -> None: ...
 
     def set_constant_pressure(self, pressure_bar: float) -> None: ...
 
@@ -315,7 +315,7 @@ class PumpControlService:
             self.configure(
                 PumpRole.JACKET,
                 PumpOperatingMode.CONSTANT_FLOW,
-                jacket_buildup_flow_ml_per_hour / 60.0,
+                jacket_buildup_flow_ml_per_hour,
             )
             self.run(PumpRole.JACKET, self.RUN_JACKET_CONFIRMATION)
 
@@ -352,7 +352,7 @@ class PumpControlService:
             self.configure(
                 PumpRole.INJECTION,
                 PumpOperatingMode.CONSTANT_FLOW,
-                injection_target_flow_ml_per_hour / 60.0,
+                injection_target_flow_ml_per_hour,
             )
             require_safe_injection_margin()
             self.run(PumpRole.INJECTION, self.RUN_INJECTION_CONFIRMATION)

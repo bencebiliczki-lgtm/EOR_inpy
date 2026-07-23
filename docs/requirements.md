@@ -180,8 +180,13 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 - A **SZIMULÁCIÓ – nincs fizikai kimenet és nincs mérési adatmentés**, illetve a
   **HARDVER – fizikai berendezés vezérlése és mérési adatmentés** állapot mindig
   látható dashboard-sávban jelenjen meg.
-- A biztonsági hiba reteszelt, állandó dashboard-sávban maradjon meg nyugtázásig,
+- A biztonsági hiba reteszelt, állandó dashboard-sávban maradjon meg biztonságos
+  bezárásig,
   és tartalmazza az időpontot, okot, automatikus műveletet és következő lépést.
+  Külön hibanyugtázó gomb nincs. A riasztás bezárása aktív hibánál friss
+  szenzor- és biztonsági ellenőrzést igényel; sikertelen ellenőrzéskor a retesz
+  és a riasztás megmarad. Biztonságos szimulációban a bezárás után az alkalmazás
+  automatikusan `READY` állapotba tér vissza.
   Minimalizált vagy háttérben lévő alkalmazásnál Windows tálcaértesítés és
   tálcagomb-figyelmeztetés is szükséges; azonos aktív hiba ciklusonként ne
   ismétlődjön.

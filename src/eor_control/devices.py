@@ -53,7 +53,7 @@ class DisabledPump:
     def enter_remote(self) -> None:
         raise ConnectionError(self._message)
 
-    def set_constant_flow(self, flow_ml_per_minute: float) -> None:
+    def set_constant_flow(self, flow_ml_per_hour: float) -> None:
         raise ConnectionError(self._message)
 
     def set_constant_pressure(self, pressure_bar: float) -> None:

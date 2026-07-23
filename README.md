@@ -56,7 +56,9 @@ Szimulációs módban a mért értékek csak élőben jelennek meg: nyers CSV, p
 pillanatkép és NAS-feladat nem készül. A dashboard felső, állandó szöveges sávja
 mindig megkülönbözteti a szimulációt a hardvermódtól; alatta az aktív, reteszelt
 riasztás a kiváltó okkal, automatikus művelettel és következő kezelői lépéssel
-megmarad a nyugtázásig. Minimalizált vagy háttérben lévő ablaknál a Windows
+megmarad a biztonságos bezárásig. A bezárás aktív hibánál friss szenzor- és
+biztonsági ellenőrzést futtat; veszélyes állapotban nem oldja fel a reteszt.
+Minimalizált vagy háttérben lévő ablaknál a Windows
 tálcagomb is figyelmeztet.
 A Developer mód bekapcsolása után a `Developer` → `Szimulációs mód` kapcsolóval
 lehet visszatérni a mentés nélküli szimulációhoz. A váltás leállított mérésnél

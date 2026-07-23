@@ -100,10 +100,19 @@ class IscoPump:
 
     def read_flow_ml_per_hour(self) -> float:
         self._require_connected()
-        flow = self._read_measurement(
-            self._channel_command("FLOW"), expected_unit=self._config.flow_unit
+        command = self._channel_command("FLOW")
+        response = self._client.command(command).message
+        flow, reported_unit = _parse_measurement_parts(
+            response,
+            command=command,
         )
-        return flow * 60.0 if self._config.flow_unit == "ML/MIN" else flow
+        unit = (reported_unit or self._config.flow_unit).upper()
+        if unit not in {"ML/MIN", "ML/HR"}:
+            raise ValueError(
+                f"unexpected ISCO unit {unit!r} for {command}; "
+                "expected ML/MIN or ML/HR"
+            )
+        return flow * 60.0 if unit == "ML/MIN" else flow
 
     def read_remaining_volume_ml(self) -> float:
         self._require_connected()
@@ -122,14 +131,12 @@ class IscoPump:
         self._require_connected()
         self._client.command("REMOTE")
 
-    def set_constant_flow(self, flow_ml_per_minute: float) -> None:
+    def set_constant_flow(self, flow_ml_per_hour: float) -> None:
         self._require_connected()
-        target = (
-            flow_ml_per_minute * 60.0
-            if self._config.flow_unit == "ML/HR"
-            else flow_ml_per_minute
+        value = self._format_nonnegative(flow_ml_per_hour, "flow")
+        self._client.command(
+            f"{self._channel_command('UNITS')}=ML/HR"
         )
-        value = self._format_nonnegative(target, "flow")
         self._client.command(self._channel_command("CONST FLOW", suffix_a=False))
         self._client.command(
             f"{self._channel_command('FLOW', suffix_a=False)}={value}"
@@ -192,21 +199,27 @@ _MEASUREMENT_PATTERN = re.compile(
 
 
 def parse_measurement(response: str, *, command: str, expected_unit: str) -> float:
+    value, unit = _parse_measurement_parts(response, command=command)
+    if unit is not None and unit.upper() != expected_unit.upper():
+        raise ValueError(
+            f"unexpected ISCO unit {unit!r} for {command}; expected {expected_unit}"
+        )
+    return value
+
+
+def _parse_measurement_parts(
+    response: str, *, command: str
+) -> tuple[float, str | None]:
     match = _MEASUREMENT_PATTERN.fullmatch(response)
     if match is None:
         raise ValueError(f"invalid ISCO {command} response: {response!r}")
     key = match.group("key")
     if key is not None and key.upper() != command.upper():
         raise ValueError(f"unexpected ISCO response key {key!r} for {command}")
-    unit = match.group("unit")
-    if unit is not None and unit.upper() != expected_unit.upper():
-        raise ValueError(
-            f"unexpected ISCO unit {unit!r} for {command}; expected {expected_unit}"
-        )
     value = float(match.group("value"))
     if not isfinite(value):
         raise ValueError(f"ISCO {command} response is not finite")
-    return value
+    return value, match.group("unit")
 
 
 def open_isco_pump(

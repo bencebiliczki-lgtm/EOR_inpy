@@ -23,7 +23,7 @@ class PollablePump(Protocol):
 
     def enter_remote(self) -> None: ...
 
-    def set_constant_flow(self, flow_ml_per_minute: float) -> None: ...
+    def set_constant_flow(self, flow_ml_per_hour: float) -> None: ...
 
     def set_constant_pressure(self, pressure_bar: float) -> None: ...
 
@@ -42,7 +42,7 @@ class PollablePump(Protocol):
 class PumpPollingIntervals:
     pressure_seconds: float = 0.4
     slow_telemetry_seconds: float = 1.5
-    pressure_stale_seconds: float = 1.0
+    pressure_stale_seconds: float = 2.0
     slow_telemetry_stale_seconds: float = 3.0
     startup_timeout_seconds: float = 3.0
 
@@ -172,8 +172,8 @@ class PollingPump:
         with self._condition:
             self._stop_latched = False
 
-    def set_constant_flow(self, flow_ml_per_minute: float) -> None:
-        self._execute(lambda: self._pump.set_constant_flow(flow_ml_per_minute))
+    def set_constant_flow(self, flow_ml_per_hour: float) -> None:
+        self._execute(lambda: self._pump.set_constant_flow(flow_ml_per_hour))
 
     def set_constant_pressure(self, pressure_bar: float) -> None:
         self._execute(lambda: self._pump.set_constant_pressure(pressure_bar))

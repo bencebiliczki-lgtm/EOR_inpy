@@ -37,7 +37,8 @@ A pontos fizikai reakció még helyszíni kockázatelemzést igényel. Addig a k
 
 - Vészállapot után az automatikus újraindítás tilos.
 - A hibát naplózni kell a kiváltó adatokkal.
-- Újraindítás csak megszűnt ok, kezelői nyugtázás és előfeltétel-ellenőrzés után lehetséges.
+- Újraindítás csak megszűnt ok, kezelői riasztásbezárás és friss
+  előfeltétel-ellenőrzés után lehetséges.
 - A konfiguráció változtatása ne törölje automatikusan az aktív hibát.
 
 A mérés szüneteltetése nem biztonsági leállítás. A PID és a mérési adatmentés
@@ -55,13 +56,15 @@ portbontást.
 A fizikai pumpaadapter a safe-state `STOP` kérést élvezérelten reteszeli. Egy
 hibaeseményben pumpánként legfeljebb egy `STOP` kerül a soros vonalra akkor is, ha
 a pumpa `PROBLEM=LOCAL MODE` választ ad vagy több felügyeleti réteg ugyanazt a
-safe-state-et kéri. Új STOP csak kezelői hibanyugtázás, sikeres REMOTE módba lépés
+safe-state-et kéri. Új STOP csak sikeres biztonsági hibatörlés, REMOTE módba lépés
 vagy új pumpafutás után engedélyezett. Ez a parancsismétlést korlátozza, a fizikai
 vészleállítás és a pumpa saját védelmei továbbra is elsődlegesek.
 
 A prototípus `SafetyMonitor` komponense reteszeli az észlelt hibákat. A retesz csak
-kezelői nyugtázással és egy aktuálisan biztonságos mérési pillanatkép ismételt
-kiértékelése után oldható. A nem véges (`NaN`, pozitív vagy negatív végtelen)
+kezelői riasztásbezárással és egy frissen beolvasott, aktuálisan biztonságos
+mérési pillanatkép ismételt kiértékelése után oldható. Veszélyes friss adatnál a
+bezárás elutasított, a retesz és a riasztássáv változatlan marad. A nem véges
+(`NaN`, pozitív vagy negatív végtelen)
 mérési érték, a kézi vészleállítás és a vezérlési határidő túllépése reteszelt
 hibát vált ki.
 

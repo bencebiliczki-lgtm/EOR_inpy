@@ -86,26 +86,26 @@ def test_remote_configure_run_stop_and_local_sequence() -> None:
     assert jacket.commands == ["REMOTE", "FLOW=1.0", "RUN", "STOP", "LOCAL"]
 
 
-def test_measurement_start_runs_jacket_then_injection_and_converts_flow() -> None:
+def test_measurement_start_preserves_hourly_flow_targets() -> None:
     control, jacket, injection = service()
 
     control.start_measurement_pumps(
         jacket_target_pressure_bar=120.0,
-        jacket_buildup_flow_ml_per_hour=60.0,
+        jacket_buildup_flow_ml_per_hour=1000.0,
         injection_start_pressure_bar=100.0,
-        injection_target_flow_ml_per_hour=120.0,
+        injection_target_flow_ml_per_hour=1000.0,
         confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
     )
 
     assert jacket.commands == [
         "REMOTE",
-        "FLOW=1.0",
+        "FLOW=1000.0",
         "RUN",
         "STOP",
         "PRESS=120.0",
         "RUN",
     ]
-    assert injection.commands == ["REMOTE", "FLOW=2.0", "RUN"]
+    assert injection.commands == ["REMOTE", "FLOW=1000.0", "RUN"]
     assert control.state(PumpRole.JACKET).running
     assert control.state(PumpRole.INJECTION).running
 
@@ -139,7 +139,7 @@ def test_measurement_start_safety_failure_stops_both_pumps() -> None:
             startup_safety_check=lambda: ("line pressure limit exceeded",),
         )
 
-    assert jacket.commands == ["REMOTE", "FLOW=1.0", "RUN", "STOP"]
+    assert jacket.commands == ["REMOTE", "FLOW=60.0", "RUN", "STOP"]
     assert injection.commands == ["STOP"]
     assert not control.state(PumpRole.JACKET).running
     assert not control.state(PumpRole.INJECTION).running
@@ -159,7 +159,7 @@ def test_measurement_start_pressure_timeout_never_runs_injection() -> None:
             polling_interval_seconds=0.001,
         )
 
-    assert jacket.commands == ["REMOTE", "FLOW=1.0", "RUN", "STOP"]
+    assert jacket.commands == ["REMOTE", "FLOW=60.0", "RUN", "STOP"]
     assert injection.commands == ["STOP"]
     assert "RUN" not in injection.commands
 
@@ -179,7 +179,7 @@ def test_measurement_start_waits_for_injection_start_pressure() -> None:
         )
 
     assert jacket.commands[-1] == "STOP"
-    assert injection.commands == ["REMOTE", "FLOW=1.0", "RUN", "STOP"]
+    assert injection.commands == ["REMOTE", "FLOW=60.0", "RUN", "STOP"]
     assert not control.state(PumpRole.JACKET).running
     assert not control.state(PumpRole.INJECTION).running
 

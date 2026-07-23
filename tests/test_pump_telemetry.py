@@ -37,7 +37,7 @@ class SlowPollablePump:
     def enter_remote(self) -> None:
         self.calls["remote"] += 1
 
-    def set_constant_flow(self, flow_ml_per_minute: float) -> None:
+    def set_constant_flow(self, flow_ml_per_hour: float) -> None:
         self.calls["set_flow"] += 1
 
     def set_constant_pressure(self, pressure_bar: float) -> None:
@@ -69,6 +69,14 @@ def slow_intervals() -> PumpPollingIntervals:
         slow_telemetry_stale_seconds=20.0,
         startup_timeout_seconds=1.0,
     )
+
+
+def test_default_pressure_stale_window_covers_observed_serial_jitter() -> None:
+    intervals = PumpPollingIntervals()
+
+    assert intervals.pressure_seconds == pytest.approx(0.4)
+    assert intervals.pressure_stale_seconds == pytest.approx(2.0)
+    assert intervals.slow_telemetry_stale_seconds == pytest.approx(3.0)
 
 
 def test_control_reads_use_initialized_cache_without_serial_delay() -> None:

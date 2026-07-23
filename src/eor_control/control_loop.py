@@ -92,6 +92,12 @@ class ControlLoop:
             persist=False,
         )
 
+    def verify_safe_fault_clear(self, *, active_stage: str) -> SafetyDecision:
+        """Use fresh telemetry before allowing an operator to close a fault."""
+
+        record = self.observe_once(active_stage=active_stage)
+        return self._measurement.reset_safety_latch(record.snapshot)
+
     def supervise_hold_once(
         self,
         *,

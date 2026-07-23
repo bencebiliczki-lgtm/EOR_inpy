@@ -12,7 +12,7 @@ from eor_control.domain import (
     MeasurementSnapshot,
     PumpStatus,
 )
-from eor_control.safety import SafetyLimits, SafetyMonitor
+from eor_control.safety import SafetyDecision, SafetyLimits, SafetyMonitor
 from eor_control.signal_filter import AnalogFilterConfig, AnalogSignalFilter
 from eor_control.storage import MeasurementWriter
 
@@ -284,6 +284,11 @@ class MeasurementService:
         self._safety_monitor.configure(safety_limits)
         for signal_filter in self._analog_filters.values():
             signal_filter.reset()
+
+    def reset_safety_latch(self, snapshot: MeasurementSnapshot) -> SafetyDecision:
+        """Clear the safety latch only when a fresh snapshot is currently safe."""
+
+        return self._safety_monitor.reset(snapshot, operator_acknowledged=True)
 
     def close(self) -> None:
         try:
