@@ -34,8 +34,10 @@ magyar nyers CSV mellett a régi vesszős fájlok visszafelé kompatibilis megny
 Az adatkezelési tesztek ellenőrzik a projektenként és fázisonként eltérő,
 Windows-biztos fájlútvonalat, a fázisváltáskor létrejövő külön nyers CSV-ket, a
 csak olvasáskor történő időrendi összefűzést, a tizedesvesszős/pontosvesszős
-CSV-exportot, az Excel adat- és
-diagramlapját, valamint a NAS-kiesés után SQLite-ban megmaradó várólista újbóli
+CSV-exportot, az egyetlen projekt-munkafüzet külön fázislapjait és azok beágyazott
+diagramját, egy korábbi fázislap adatvesztés nélküli frissítését, a rekordot
+tartalmazó fázis egyszeri lezárási eseményét, valamint
+a NAS-kiesés után SQLite-ban megmaradó várólista újbóli
 megnyitását és sikeres szinkronját. A Qt-teszt a korábbi projektfájl visszatöltését,
 az indítási projektválasztó szükségességét, a projektenként mentett utolsó mérési
 fázis megjelenítését, a választóból történő projektlétrehozást, az
@@ -74,6 +76,9 @@ konfigurálható minimális köpenytöbbletet, valamint a részletes áttekintő
 biztonsági kijelzéseit.
 A dashboard UI-teszt ellenőrzi az **Élő mérés** és **Teljes mérés** füleket, a
 beágyazott teljes mérési nézetet és azt, hogy a korábbi menüművelet a fülre vált.
+A mérési táblázat tesztje ellenőrzi az Excel-fejléccel azonos oszlopokat, a magyar
+helyi időt, az 1000 soros lapozást, valamint a grafikonnal közös fázis- és
+időtartomány-szűrést.
 A témateszt ellenőrzi, hogy a címkék és szerkeszthető szövegmezők háttere világos,
 sötét és rendszer-témában is megfelelő; a mód- és riasztássáv szándékosan kiemelt.
 A reszponzív dashboard-teszt kis ablakmagasságnál láthatóvá teszi mindkét oldalsáv
@@ -92,8 +97,9 @@ UI-teszt ellenőrzi a személyre szabott mezők mentését, a kézi módosítás
 A mérési és adattárolási tesztek lefedik mindkét pumpa pozitív és negatív nettó
 térfogatváltozását, a számlálók újraindítását, a V1→V2 biztonsági mentéses
 migrációt, a fázisok első előfordulási sorrendjét, a fázisszűrést és a
-`víz → olaj → víz` szegmentálást. Az exporttesztek egyetlen kiválasztott fázis
-adatainak CSV- és Excel-kimenetét ellenőrzik; többfázisú export nem megengedett.
+`víz → olaj → víz` szegmentálást. Az exporttesztek ellenőrzik az egyfázisú
+CSV-kimenetet, valamint azt, hogy a projekt Excel-fájljában minden lezárt fázis
+saját munkalapot kap és egy ismételt fázisfrissítés nem törli a többi lapot.
 A szimulációs mentéstiltási tesztek külön igazolják, hogy sem a szolgáltatási
 perzisztálási kérés, sem a writer közvetlen meghívása nem hoz létre rekordot,
 könyvtárat, üres CSV-t vagy NAS-feladatot. A UI-teszt a „NINCS ADATMENTÉS” jelölést
@@ -143,6 +149,12 @@ A pumpavezérlési tesztek ellenőrzik a REMOTE–konfigurálás–RUN–STOP–
 a pontos RUN-megerősítést, a konfigurálatlan indítás tiltását, a konfigurált interlock
 határ alatti és pontos határértékű esetét, valamint a globális safe STOP
 állapotszinkronját. Külön teszt igazolja a B csatorna parancsutótagjait.
+
+A mérési pumpaindítás tesztje ellenőrzi a köpenypumpa `CONST FLOW → RUN`, majd
+`STOP → CONST PRESS → RUN` sorrendjét, a `ml/h`–`ml/min` átváltást, a pontos indítási
+megerősítést, a két kezdőnyomás és a tervezett nyomástöbblet kötelező bevitelét,
+a besajtoló kezdőnyomásának kivárását, valamint azt, hogy timeout vagy indulási
+biztonsági hiba esetén egyik pumpa sem marad RUN állapotban.
 A részleges kapcsolati tesztek igazolják, hogy az egyik pumpa vagy NI-bemenet hibája
 mellett a többi eszköz sikeres státusza megmarad, a kapcsolódás és REMOTE módba
 lépés egy műveletként fut, REMOTE-hibánál pedig a port bezáródik. Bezáráskor minden

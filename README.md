@@ -179,9 +179,13 @@ megerősítő szöveget kér. Az ablak bezárása minden pumpán megkísérli a 
 bontja a kapcsolatot és lezárja a COM-portokat.
 
 A `Projekt` → `Adatkezelés és export…` ablak pontosvesszős vagy más elválasztójú,
-igény szerint tizedesvesszős CSV-t, továbbá diagramot is tartalmazó Excel-fájlt
-készít az aktív mérési fázis saját nyers CSV-jéből. Nem készül az összes fázist
-egyesítő exportfájl. Ugyanitt kapcsolható be a NAS-mentés. A másolás háttérszálon fut; sikertelen
+igény szerint tizedesvesszős CSV-t készít az aktív mérési fázis saját nyers
+CSV-jéből. A diagramot is tartalmazó Excel-fájl automatikusan, csak a mérési
+fázis lezárásakor készül el; futó fázisból nem indítható kézi Excel-export.
+Projektenként egy munkafüzet készül, amelyben minden lezárt szakasz saját,
+szűrhető adatokkal és beágyazott nyomás-/szelepdiagrammal rendelkező munkalapot
+kap. Ugyanitt kapcsolható be a NAS-mentés. Az elkészült projekt-Excel is a
+háttérben futó NAS-sorba kerül; sikertelen
 hálózati művelet SQLite-várólistán marad, és a program automatikusan újrapróbálja.
 
 A dashboard középső részén az **Élő mérés** és a **Teljes mérés** fülek között lehet
@@ -193,7 +197,10 @@ visszatölti. Az adatsorok külön kapcsolhatók, választható vagy egyéni
 időtartomány adható meg, az Y tengely automatikus vagy kézi lehet, a grafikon pedig
 egérrel szabadon nagyítható és mozgatható. A nézet mérési fázisra szűrhető, az
 összes fázis folytonos szakaszait pedig külön, színes idősáv mutatja. Ehhez a nézet
-a külön fázis-CSV-ket csak memóriában rendezi közös időrendbe.
+a külön fázis-CSV-ket csak memóriában rendezi közös időrendbe. A belső
+**Grafikon/Táblázat** váltó ugyanarra a szűrésre épül. A táblázat az Excel aktuális
+oszlopait és magyar helyi időt mutat, nagy mérésnél pedig 1000 soros lapokkal
+védi a célgépet a túlzott UI-terheléstől.
 A `Megjelenítés` → `Teljes mérés fül` menüpont és a `Ctrl+Shift+G` gyorsbillentyű
 közvetlenül erre a dashboard-fülre vált, külön ablakot nem nyit.
 

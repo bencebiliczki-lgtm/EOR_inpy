@@ -92,6 +92,15 @@ class ControlLoop:
             persist=False,
         )
 
+    def observe_pump_startup_once(self, *, active_stage: str) -> MeasurementRecord:
+        """Supervise jacket pressure buildup before injection is allowed to run."""
+        return self._measurement.sample_once(
+            active_stage=active_stage,
+            valve_percent=self._last_output_percent,
+            persist=False,
+            enforce_minimum_margin=False,
+        )
+
     def write_manual_output(self, output_percent: float) -> float:
         """Apply one confirmed manual output without requiring unrelated sensors."""
         decision = ManualSafetyMonitor.evaluate_valve(output_percent)

@@ -117,6 +117,7 @@ class MeasurementService:
         control_deadline_missed: bool = False,
         pressure_target_bar: float | None = None,
         use_line_pressure_for_control: bool = False,
+        enforce_minimum_margin: bool = True,
     ) -> MeasurementRecord:
         jacket, jacket_quality = self._read_pump(self._jacket_pump)
         injection, injection_quality = self._read_pump(self._injection_pump)
@@ -165,6 +166,7 @@ class MeasurementService:
                 controlled_pressure if pressure_target_bar is not None else None
             ),
             pressure_target_bar=pressure_target_bar,
+            enforce_minimum_margin=enforce_minimum_margin,
         )
         record = MeasurementRecord(
             snapshot=snapshot,

@@ -71,6 +71,11 @@ A mintavételi gyakoriság 1 másodperc és 1 óra között konfigurálható. A 
   külön felugró ablakban jelenjen meg.
 - A teljes mérés diagramja legyen mérési fázisra szűrhető, és külön idővonalon
   mutassa a fázisváltásokat, az ismételt fázisszakaszokat is elkülönítve.
+- A teljes mérés nézetben a grafikon mellett kezelői táblázat is legyen. A két
+  megjelenítés ugyanazt a fázis- és időtartomány-szűrést használja, a táblázat
+  oszlopai egyezzenek az aktuális Excel-export oszlopaival, az időpontok magyar
+  helyi időben jelenjenek meg. Nagy adathalmaznál lapozás korlátozza az egyszerre
+  megjelenített sorok számát.
 - Választható adatsorok és szabadon skálázható tengelyek.
 - A szelep aktuális állásának folyamatos kijelzése.
 - Mindkét pumpánál jelenjen meg a mérés indítása óta számított, előjeles nettó
@@ -90,6 +95,17 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 
 ## Vezérlés
 
+- Hardveres módban a mérésindítás külön ablakban kérje be mindkét pumpa elérendő
+  kezdőnyomását, a köpeny nyomásfelépítési térfogatáramát és a besajtoló
+  térfogatáramát, majd külön kezelői megerősítés után indítsa el a pumpákat.
+  A köpenypumpa először állandó térfogatárammal építse fel a nyomást; a cél
+  elérésekor STOP után váltson állandó nyomástartásra. A besajtolópumpa csak ezután,
+  a minimális köpenynyomás-többlet tényleges ellenőrzése után indulhat a megadott
+  térfogatárammal. A PID- és adatrögzítési ciklus csak a besajtoló kezdőnyomásának
+  elérése után kezdődhet.
+- A köpenynyomás felépülése alatt minden egyéb szenzor-, kapcsolat- és
+  nyomáshatár maradjon aktív. Timeout, kezelői megszakítás vagy bármely hiba
+  mindkét pumpán STOP-ot és a mérési runtime indításának tiltását váltsa ki.
 - Az alkalmazás ugyanabból a onefile EXE-ből `terminal` argumentummal interaktív,
   állapotot megőrző parancssori vezérlést biztosítson.
 - A terminálból elérhető legyen a státusz, csatlakozás, mérésindítás/-leállítás,
@@ -155,9 +171,15 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 - Minden mérési fázis külön nyers CSV-fájlba kerüljön; fázisváltás nem írhatja az
   új fázis rekordjait az előző fázis fájljába.
 - A teljes mérés nézet a külön fázisfájlokat csak megjelenítéskor egyesítheti
-  memóriában. Összesített nyers CSV vagy többfázisú Excel-export nem készülhet.
-- A felhasználói CSV- és Excel-export mindig egy kiválasztott mérési fázisra
-  vonatkozzon.
+  memóriában. Összesített nyers CSV nem készülhet.
+- A felhasználói CSV-export mindig egy kiválasztott mérési fázisra vonatkozzon.
+  Projektenként egy Excel-munkafüzet készüljön, amelyben minden lezárt mérési
+  szakasz saját, a szakasz nevét viselő munkalapot kap. A munkalapon legyenek
+  szűrhető mérési oszlopok és beágyazott nyomás-/szelepdiagram.
+- Az Excel adott szakaszlapja csak a szakasz lezárásakor, háttérben készülhet el
+  vagy frissülhet; futó fázisból kézi Excel-export nem indítható. Az elkészült
+  projekt-munkafüzetet az
+  engedélyezett NAS-szinkron ugyanúgy tartós várólistán kezelje.
 - A NAS-ra írás ne blokkolja az adatgyűjtést; hálózati hiba esetén helyi várólista szükséges.
 - A nyers és felhasználói magyar CSV pontosvesszős, tizedesvesszős formátumot használ;
   a felhasználói exportnál más elválasztó és tizedespont is választható.

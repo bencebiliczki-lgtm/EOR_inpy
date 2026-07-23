@@ -45,6 +45,21 @@ def test_margin_below_twenty_bar_is_unsafe() -> None:
     assert "jacket pressure margin is too low" in decision.reasons
 
 
+def test_jacket_pressure_buildup_can_temporarily_ignore_only_margin() -> None:
+    safety_monitor = monitor()
+
+    decision = safety_monitor.evaluate(
+        snapshot(0.0, 0.0), enforce_minimum_margin=False
+    )
+
+    assert decision.safe
+    overpressure = safety_monitor.evaluate(
+        snapshot(401.0, 0.0), enforce_minimum_margin=False
+    )
+    assert not overpressure.safe
+    assert "jacket pressure limit exceeded" in overpressure.reasons
+
+
 def test_configured_margin_may_be_below_twenty_bar() -> None:
     safety_monitor = SafetyMonitor(SafetyLimits(400.0, 350.0, 50.0, 10.0))
 

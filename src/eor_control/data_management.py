@@ -1,10 +1,11 @@
 import csv
+import hashlib
 import json
 import os
 import re
 import shutil
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -177,19 +178,59 @@ def export_measurement_csv(
             writer.writerow(values)
 
 
-def export_measurement_excel(source: Path, destination: Path) -> None:
+def project_excel_path(source: Path, stage_name: str) -> Path:
+    """Return the single project workbook path for a stage raw-data file."""
+    suffix = f"_{safe_filename(stage_name)}_live_raw.csv"
+    if not source.name.endswith(suffix):
+        raise ValueError(
+            "a mérési szakasz fájlneve nem illeszkedik a projekt-exporthoz"
+        )
+    project_name = source.name[: -len(suffix)]
+    if not project_name:
+        raise ValueError("a projekt Excel-fájlneve nem lehet üres")
+    return source.with_name(f"{project_name}.xlsx")
+
+
+def _excel_sheet_title(stage_name: str) -> str:
+    requested = stage_name.strip() or "Mérés"
+    cleaned = re.sub(r"[\[\]:*?/\\]", "_", requested).strip("'") or "Mérés"
+    if cleaned == requested and len(cleaned) <= 31:
+        return cleaned
+    digest = hashlib.sha256(requested.encode("utf-8")).hexdigest()[:6]
+    return f"{cleaned[:24]}_{digest}"
+
+
+def export_measurement_excel(
+    source: Path,
+    destination: Path,
+    *,
+    stage_name: str,
+) -> None:
+    """Create or update one stage worksheet in a project workbook."""
     try:
         from openpyxl import Workbook  # type: ignore[import-untyped]
         from openpyxl.chart import LineChart, Reference  # type: ignore[import-untyped]
+        from openpyxl.reader.excel import load_workbook  # type: ignore[import-untyped]
     except ImportError as error:
         raise RuntimeError(
             "Az Excel-exporthoz telepítsd az export függőséget: pip install -e \".[export]\""
         ) from error
 
     table = read_measurement_table(source)
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Mérési adatok"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file():
+        workbook = load_workbook(destination)
+    else:
+        workbook = Workbook()
+        workbook.remove(workbook.active)
+
+    sheet_title = _excel_sheet_title(stage_name)
+    sheet_index = len(workbook.worksheets)
+    if sheet_title in workbook.sheetnames:
+        existing = workbook[sheet_title]
+        sheet_index = workbook.index(existing)
+        workbook.remove(existing)
+    sheet = workbook.create_sheet(sheet_title, sheet_index)
     sheet.freeze_panes = "A2"
     sheet.append(list(table.header))
     numeric_columns = set(range(1, table.header.index("active_stage")))
@@ -207,8 +248,8 @@ def export_measurement_excel(source: Path, destination: Path) -> None:
 
     if table.rows:
         chart = LineChart()
-        chart.title = "Nyomások"
-        chart.y_axis.title = "bar"
+        chart.title = f"{stage_name} — nyomás- és szelepdiagram"
+        chart.y_axis.title = "bar / %"
         chart.x_axis.title = "Minta"
         categories = Reference(sheet, min_col=1, min_row=2, max_row=len(table.rows) + 1)
         for column_name in (
@@ -230,11 +271,11 @@ def export_measurement_excel(source: Path, destination: Path) -> None:
         chart.set_categories(categories)
         chart.height = 10
         chart.width = 24
-        chart_sheet = workbook.create_sheet("Diagram")
-        chart_sheet.add_chart(chart, "A1")
+        sheet.add_chart(chart, "T2")
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    workbook.save(destination)
+    temporary = destination.with_suffix(f"{destination.suffix}.tmp")
+    workbook.save(temporary)
+    os.replace(temporary, destination)
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,16 +484,19 @@ class ProjectMeasurementWriter:
         nas_sync: BackgroundNasSynchronizer | None = None,
         *,
         enabled: bool = True,
+        phase_completed: Callable[[Path, str], None] | None = None,
     ) -> None:
         self._data_root = data_root
         self._nas_sync = nas_sync
         self._enabled = enabled
+        self._phase_completed = phase_completed
         self._writer: CsvMeasurementWriter | None = None
         self._path: Path | None = None
         self._relative_path: Path | None = None
         self._relative_folder: Path | None = None
         self._project_file_prefix: str | None = None
         self._stage_name: str | None = None
+        self._phase_has_records = False
         self._lock = Lock()
 
     @property
@@ -505,17 +549,27 @@ class ProjectMeasurementWriter:
             f"{project_file_prefix}_{safe_filename(stage_name)}_live_raw.csv"
         )
         path = self._data_root / relative_path
+        completed_phase: tuple[Path, str] | None = None
         with self._lock:
             if path == self._path and (self._writer is not None or not self._enabled):
                 return path
             if self._writer is not None:
                 self._writer.close()
+                if (
+                    self._phase_has_records
+                    and self._path is not None
+                    and self._stage_name is not None
+                ):
+                    completed_phase = (self._path, self._stage_name)
             self._writer = CsvMeasurementWriter(path) if self._enabled else None
             self._path = path
             self._relative_path = relative_path
             self._relative_folder = relative_folder
             self._project_file_prefix = project_file_prefix
             self._stage_name = stage_name
+            self._phase_has_records = False
+        if completed_phase is not None and self._phase_completed is not None:
+            self._phase_completed(*completed_phase)
         if not self._enabled:
             return path
         self._write_project_snapshots(
@@ -572,23 +626,36 @@ class ProjectMeasurementWriter:
     def write(self, record: MeasurementRecord) -> None:
         if not self._enabled:
             return
+        completed_phase: tuple[Path, str] | None = None
         with self._lock:
             if self._writer is None or self._path is None or self._relative_path is None:
                 raise RuntimeError("a mérés előtt projektet kell kiválasztani")
             if record.active_stage != self._stage_name:
-                self._open_phase_locked(record.active_stage)
+                completed_phase = self._open_phase_locked(record.active_stage)
             assert self._writer is not None
             assert self._path is not None
             assert self._relative_path is not None
             self._writer.write(record)
+            self._phase_has_records = True
             path = self._path
             relative_path = self._relative_path
+        if completed_phase is not None and self._phase_completed is not None:
+            self._phase_completed(*completed_phase)
         if self._nas_sync is not None:
             self._nas_sync.enqueue(path, Path(*relative_path.parts[1:]))
 
-    def _open_phase_locked(self, stage_name: str) -> None:
+    def _open_phase_locked(self, stage_name: str) -> tuple[Path, str] | None:
         if self._relative_folder is None or self._project_file_prefix is None:
             raise RuntimeError("a mérés előtt projektet kell kiválasztani")
+        completed_phase = (
+            (self._path, self._stage_name)
+            if (
+                self._phase_has_records
+                and self._path is not None
+                and self._stage_name is not None
+            )
+            else None
+        )
         relative_path = self._relative_folder / (
             f"{self._project_file_prefix}_{safe_filename(stage_name)}_live_raw.csv"
         )
@@ -599,12 +666,32 @@ class ProjectMeasurementWriter:
         self._path = path
         self._relative_path = relative_path
         self._stage_name = stage_name
+        self._phase_has_records = False
+        return completed_phase
+
+    def complete_current_phase(self) -> Path | None:
+        completed_phase: tuple[Path, str] | None = None
+        with self._lock:
+            if self._writer is not None:
+                self._writer.close()
+                self._writer = None
+            if (
+                self._phase_has_records
+                and self._path is not None
+                and self._stage_name is not None
+            ):
+                completed_phase = (self._path, self._stage_name)
+            self._phase_has_records = False
+        if completed_phase is not None and self._phase_completed is not None:
+            self._phase_completed(*completed_phase)
+        return completed_phase[0] if completed_phase is not None else None
 
     def close(self) -> None:
         with self._lock:
             if self._writer is not None:
                 self._writer.close()
             self._writer = None
+            self._phase_has_records = False
 
 
 def numeric_series(

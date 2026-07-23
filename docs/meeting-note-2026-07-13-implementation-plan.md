@@ -19,8 +19,9 @@ előjelesen legyen követhető az indítás óta bekövetkezett nettó térfogat
 - A fázis „haladása” első körben időbeli lefutást és fázishatárokat jelent.
   Százalékos készültséghez később tervezett időtartam vagy céltérfogat szükséges.
 - A régi nyers CSV-k változatlanul megőrzendők és megnyithatók maradnak.
-- Minden mérési fázis külön nyers CSV-fájlt kap. Nem készül olyan tartós CSV- vagy
-  Excel-fájl, amely egy projekt összes fázisát egyesíti.
+- Minden mérési fázis külön nyers CSV-fájlt kap. Összesített nyers CSV nem
+  készül; a projekt Excel-munkafüzete a lezárt fázisokat külön munkalapokon
+  tartalmazza.
 - A **Teljes mérés** nézet a különálló fázis-CSV-ket kizárólag beolvasáskor,
   memóriában rendezi közös időrendbe.
 
@@ -37,7 +38,7 @@ előjelesen legyen követhető az indítás óta bekövetkezett nettó térfogat
 | CSV-formátum | Régi térfogatmező | V2 mezők és V1 kompatibilitás | Elkészült |
 | Fázisonkénti nyers fájl | Projektenként egy CSV | Minden fázishoz külön CSV | Elkészült |
 | Teljes mérés adatforrása | Egy projekt-CSV | Fázis-CSV-k memóriabeli összefűzése | Elkészült |
-| Felhasználói export | Projektfájl exportja | Csak a kiválasztott fázis exportja | Elkészült |
+| Felhasználói export | Projektfájl exportja | Fázis-CSV és projekt-Excel külön fázislapokkal | Elkészült |
 | UI-szövegek | „Mérés óta…” | „Indítás óta nettó…” | Elkészült |
 
 ## Megvalósítás állapota
@@ -47,8 +48,9 @@ fázis-idővonalat rajzol. Mindkét pumpa nettó térfogatváltozása előjelese
 mérési rekordba és a V2 CSV-be. A V1 fájl írásra történő megnyitásakor
 `_v1_backup.csv` biztonsági másolat készül, majd a munkafájl atomikusan V2
 formátumra frissül. A nyers adatrögzítés projekten és fázison belül külön CSV-be
-történik. A teljes mérés nézet ezeket csak memóriában egyesíti, míg a CSV- és
-Excel-export az aktív fázis saját fájljára korlátozódik.
+történik. A teljes mérés nézet ezeket csak memóriában egyesíti. A CSV-export az
+aktív fázisra korlátozódik, a projekt Excel-fájlja pedig a lezárt fázisokat külön
+munkalapokon tartja.
 
 ## Megvalósítási lépések
 
@@ -93,9 +95,10 @@ Excel-export az aktív fázis saját fájljára korlátozódik.
 - Régi mérési CSV adatvesztés nélkül megnyílik.
 - Egy mérési fázis rekordjai csak az adott fázis nyers CSV-jébe kerülnek.
 - Fázisváltás után új fázis-CSV jön létre, a korábbi fájl változatlanul megmarad.
-- A CSV- és Excel-export kizárólag a kiválasztott fázis adatait tartalmazza.
+- A CSV-export kizárólag a kiválasztott fázis adatait tartalmazza; a projekt
+  Excel-fájljában minden lezárt fázis külön munkalapon szerepel.
 - A teljes mérés nézet több fázis-CSV-t meg tud jeleníteni, de nem hoz létre
-  összesített nyers vagy exportfájlt.
+  összesített nyers CSV-t.
 - Egy korábbi fázis önállóan visszanézhető.
 - A teljes nézetben minden fázis és minden fázisváltás látható.
 - A nettó térfogat negatív lehet, és ezt a UI nem rejti el.

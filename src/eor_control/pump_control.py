@@ -3,6 +3,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
+from time import monotonic, sleep
 from typing import Protocol
 
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
@@ -54,6 +55,7 @@ class PumpControlService:
     AUTHORIZATION = "ENABLE PHYSICAL EOR HARDWARE"
     RUN_JACKET_CONFIRMATION = "RUN JACKET PUMP"
     RUN_INJECTION_CONFIRMATION = "RUN INJECTION PUMP"
+    START_MEASUREMENT_CONFIRMATION = "START MEASUREMENT PUMPS"
 
     def __init__(
         self,
@@ -259,6 +261,139 @@ class PumpControlService:
             target=state.target,
         )
         self._log(role.value, "RUN", level="WARNING")
+
+    def start_measurement_pumps(
+        self,
+        *,
+        jacket_target_pressure_bar: float,
+        jacket_buildup_flow_ml_per_hour: float,
+        injection_start_pressure_bar: float,
+        injection_target_flow_ml_per_hour: float,
+        confirmation: str,
+        startup_safety_check: Callable[[], tuple[str, ...]] | None = None,
+        pressure_buildup_timeout_seconds: float = 120.0,
+        polling_interval_seconds: float = 0.25,
+    ) -> None:
+        """Start both pumps in a supervised jacket-first sequence."""
+        self._require_authorized()
+        if confirmation != self.START_MEASUREMENT_CONFIRMATION:
+            raise PermissionError("measurement pump-start confirmation did not match")
+        values = (
+            jacket_target_pressure_bar,
+            jacket_buildup_flow_ml_per_hour,
+            injection_start_pressure_bar,
+            injection_target_flow_ml_per_hour,
+            pressure_buildup_timeout_seconds,
+            polling_interval_seconds,
+        )
+        if not all(isfinite(value) and value > 0.0 for value in values):
+            raise ValueError("measurement pump targets and timings must be positive and finite")
+        for role in PumpRole:
+            self._require_connected(role)
+
+        def require_safe_injection_margin() -> None:
+            if startup_safety_check is not None:
+                reasons = startup_safety_check()
+                if reasons:
+                    raise PermissionError(
+                        "pump startup safety interlock active: "
+                        + "; ".join(reasons)
+                    )
+            statuses = self.statuses()
+            margin = (
+                statuses[PumpRole.JACKET].pressure_bar
+                - statuses[PumpRole.INJECTION].pressure_bar
+            )
+            if margin < self._minimum_margin:
+                raise PermissionError(
+                    f"jacket pressure margin is {margin:.2f} bar; "
+                    f"at least {self._minimum_margin:.2f} bar is required"
+                )
+
+        try:
+            self.enter_remote(PumpRole.JACKET)
+            self.configure(
+                PumpRole.JACKET,
+                PumpOperatingMode.CONSTANT_FLOW,
+                jacket_buildup_flow_ml_per_hour / 60.0,
+            )
+            self.run(PumpRole.JACKET, self.RUN_JACKET_CONFIRMATION)
+
+            deadline = monotonic() + pressure_buildup_timeout_seconds
+            while True:
+                if startup_safety_check is not None:
+                    reasons = startup_safety_check()
+                    if reasons:
+                        raise PermissionError(
+                            "pump startup safety interlock active: "
+                            + "; ".join(reasons)
+                        )
+                statuses = self.statuses()
+                jacket_pressure = statuses[PumpRole.JACKET].pressure_bar
+                if jacket_pressure >= jacket_target_pressure_bar:
+                    break
+                if monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"jacket pressure remained {jacket_pressure:.2f} bar; "
+                        f"target is {jacket_target_pressure_bar:.2f} bar"
+                    )
+                sleep(polling_interval_seconds)
+
+            self.stop(PumpRole.JACKET)
+            self.configure(
+                PumpRole.JACKET,
+                PumpOperatingMode.CONSTANT_PRESSURE,
+                jacket_target_pressure_bar,
+            )
+            self.run(PumpRole.JACKET, self.RUN_JACKET_CONFIRMATION)
+            require_safe_injection_margin()
+
+            self.enter_remote(PumpRole.INJECTION)
+            self.configure(
+                PumpRole.INJECTION,
+                PumpOperatingMode.CONSTANT_FLOW,
+                injection_target_flow_ml_per_hour / 60.0,
+            )
+            require_safe_injection_margin()
+            self.run(PumpRole.INJECTION, self.RUN_INJECTION_CONFIRMATION)
+
+            injection_deadline = monotonic() + pressure_buildup_timeout_seconds
+            while True:
+                if startup_safety_check is not None:
+                    reasons = startup_safety_check()
+                    if reasons:
+                        raise PermissionError(
+                            "pump startup safety interlock active: "
+                            + "; ".join(reasons)
+                        )
+                statuses = self.statuses()
+                margin = (
+                    statuses[PumpRole.JACKET].pressure_bar
+                    - statuses[PumpRole.INJECTION].pressure_bar
+                )
+                if margin < self._minimum_margin:
+                    raise PermissionError(
+                        f"jacket pressure margin fell to {margin:.2f} bar; "
+                        f"at least {self._minimum_margin:.2f} bar is required"
+                    )
+                injection_pressure = statuses[PumpRole.INJECTION].pressure_bar
+                if injection_pressure >= injection_start_pressure_bar:
+                    break
+                if monotonic() >= injection_deadline:
+                    raise TimeoutError(
+                        f"injection pressure remained {injection_pressure:.2f} bar; "
+                        f"target is {injection_start_pressure_bar:.2f} bar"
+                    )
+                sleep(polling_interval_seconds)
+
+            require_safe_injection_margin()
+        except Exception as error:
+            stop_errors = self.stop_all()
+            if stop_errors:
+                raise RuntimeError(
+                    f"{error}; pump startup rollback errors: {'; '.join(stop_errors)}"
+                ) from error
+            raise
 
     def stop(self, role: PumpRole) -> None:
         self._require_authorized()

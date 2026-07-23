@@ -9,11 +9,21 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from math import isfinite
 from pathlib import Path
+from queue import Empty, Queue
 from threading import Thread
 from typing import cast
 
 import pyqtgraph as pg  # type: ignore[import-untyped]
-from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QModelIndex,
+    QObject,
+    QPersistentModelIndex,
+    QSettings,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QColor, QIcon, QShowEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -41,6 +51,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QSystemTrayIcon,
+    QTableView,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -67,10 +78,10 @@ from eor_control.data_management import (
     ProjectMeasurementWriter,
     export_measurement_csv,
     export_measurement_excel,
-    filter_measurement_table_by_stage,
     measurement_stage_segments,
     measurement_stages,
     numeric_series,
+    project_excel_path,
     read_measurement_tables,
     safe_filename,
 )
@@ -1107,6 +1118,9 @@ class RuntimeBridge(QObject):
     fault_raised = Signal(str)
     preflight_completed = Signal(object)
     preflight_failed = Signal(str)
+    pump_startup_completed = Signal()
+    pump_startup_failed = Signal(str)
+    stage_export_batch_finished = Signal()
 
 
 class DeviceTestBridge(QObject):
@@ -2692,6 +2706,14 @@ class ManualTelemetryResult:
     pressure_errors: dict[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class MeasurementPumpPlan:
+    jacket_target_pressure_bar: float
+    jacket_buildup_flow_ml_per_hour: float
+    injection_start_pressure_bar: float
+    injection_target_flow_ml_per_hour: float
+
+
 class PumpControlDialog(ResizableDialog):
     VALVE_CONFIRMATION = "SET VALVE OUTPUT"
     _CLOSE_OPERATION = "manual-control-close"
@@ -3589,16 +3611,20 @@ class DataManagementDialog(ResizableDialog):
         self.delimiter.addItem("Vessző (,)", ",")
         self.delimiter.addItem("Tabulátor", "\t")
         csv_button = QPushButton("CSV exportálása…")
-        excel_button = QPushButton("Excel exportálása…")
         csv_button.clicked.connect(self._export_csv)
-        excel_button.clicked.connect(self._export_excel)
         export_layout.addWidget(self.decimal_comma, 0, 0)
         export_layout.addWidget(
             input_field_label("Oszlopelválasztó", self.delimiter), 0, 1
         )
         export_layout.addWidget(self.delimiter, 0, 2)
         export_layout.addWidget(csv_button, 1, 0, 1, 2)
-        export_layout.addWidget(excel_button, 1, 2)
+        excel_notice = QLabel(
+            "A projekt Excel-munkafüzetében a mérési szakasz saját munkalapja "
+            "a szakasz lezárásakor automatikusan készül el vagy frissül, így "
+            "futó szakaszból nem jön létre félkész Excel."
+        )
+        excel_notice.setWordWrap(True)
+        export_layout.addWidget(excel_notice, 2, 0, 1, 3)
         layout.addWidget(export_box)
 
         nas_box = QGroupBox("Háttérben futó NAS-mentés")
@@ -3660,19 +3686,6 @@ class DataManagementDialog(ResizableDialog):
             f"CSV export elkészült: {destination}",
         )
 
-    def _export_excel(self) -> None:
-        default = str(
-            self._source_path.parent / f"{safe_filename(self._export_name)}.xlsx"
-        )
-        destination, _ = QFileDialog.getSaveFileName(
-            self, "Excel export", default, "Excel munkafüzet (*.xlsx)"
-        )
-        if destination:
-            self._run_background(
-                lambda: export_measurement_excel(self._source_path, Path(destination)),
-                f"Excel export elkészült: {destination}",
-            )
-
     def _browse_nas(self) -> None:
         directory = QFileDialog.getExistingDirectory(
             self, "NAS célmappa", self.nas_path.text()
@@ -3720,7 +3733,76 @@ class DataManagementDialog(ResizableDialog):
         )
 
 
+class MeasurementTableModel(QAbstractTableModel):
+    """Lazy Qt adapter over one bounded page of the measurement table."""
+
+    ROOT_INDEX = QModelIndex()
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._table = MeasurementTable((), ())
+        self._row_indices: tuple[int, ...] = ()
+
+    def set_page(
+        self, table: MeasurementTable, row_indices: Iterable[int]
+    ) -> None:
+        self.beginResetModel()
+        self._table = table
+        self._row_indices = tuple(row_indices)
+        self.endResetModel()
+
+    def rowCount(
+        self, parent: QModelIndex | QPersistentModelIndex = ROOT_INDEX
+    ) -> int:
+        return 0 if parent.isValid() else len(self._row_indices)
+
+    def columnCount(
+        self, parent: QModelIndex | QPersistentModelIndex = ROOT_INDEX
+    ) -> int:
+        return 0 if parent.isValid() else len(self._table.header)
+
+    def data(
+        self,
+        index: QModelIndex | QPersistentModelIndex,
+        role: int = int(Qt.ItemDataRole.DisplayRole),
+    ) -> object | None:
+        if (
+            role != int(Qt.ItemDataRole.DisplayRole)
+            or not index.isValid()
+            or not 0 <= index.row() < len(self._row_indices)
+            or not 0 <= index.column() < len(self._table.header)
+        ):
+            return None
+        source_row = self._table.rows[self._row_indices[index.row()]]
+        value = source_row[index.column()]
+        if self._table.header[index.column()] == "recorded_at_utc":
+            try:
+                timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                local_value = format_hungarian_time(
+                    timestamp, "%Y-%m-%d %H:%M:%S.%f"
+                )
+                return f"{local_value[:-3]} {format_hungarian_time(timestamp, '%Z')}"
+            except ValueError:
+                return value
+        return value
+
+    def headerData(
+        self,
+        section: int,
+        orientation: Qt.Orientation,
+        role: int = int(Qt.ItemDataRole.DisplayRole),
+    ) -> object | None:
+        if role != int(Qt.ItemDataRole.DisplayRole):
+            return None
+        if orientation is Qt.Orientation.Horizontal:
+            if 0 <= section < len(self._table.header):
+                return self._table.header[section]
+            return None
+        return section + 1
+
+
 class MeasurementHistoryView(QWidget):
+    TABLE_PAGE_SIZE = 1000
     SERIES = (
         ("jacket_pressure_bar", "Köpenynyomás", "#1565c0"),
         ("injection_pressure_bar", "Besajtolási nyomás", "#c62828"),
@@ -3835,12 +3917,17 @@ class MeasurementHistoryView(QWidget):
         layout.addWidget(self._settings_panel)
         self._settings_toggle.toggled.connect(self._toggle_settings)
 
+        self._content_tabs = QTabWidget()
+        self._content_tabs.setObjectName("measurement_history_content_tabs")
+        graph_page = QWidget()
+        graph_layout = QVBoxLayout(graph_page)
+        graph_layout.setContentsMargins(0, 0, 0, 0)
         self._plot = pg.PlotWidget(title="Teljes rögzített mérés")
         self._plot.setLabel("left", "Érték")
         self._plot.setLabel("bottom", "Eltelt idő", units="s")
         self._plot.showGrid(x=True, y=True, alpha=0.25)
         self._plot.setMouseEnabled(x=True, y=True)
-        layout.addWidget(self._plot, stretch=1)
+        graph_layout.addWidget(self._plot, stretch=1)
         self._stage_plot = pg.PlotWidget(title="Mérési fázisok idővonala")
         self._stage_plot.setObjectName("measurement_stage_timeline")
         self._stage_plot.setMaximumHeight(130)
@@ -3849,10 +3936,45 @@ class MeasurementHistoryView(QWidget):
         self._stage_plot.hideAxis("left")
         self._stage_plot.setLabel("bottom", "Eltelt idő", units="s")
         self._stage_plot.setXLink(self._plot)
-        layout.addWidget(self._stage_plot)
+        graph_layout.addWidget(self._stage_plot)
+        self._content_tabs.addTab(graph_page, "Grafikon")
+
+        table_page = QWidget()
+        table_layout = QVBoxLayout(table_page)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        self._table_model = MeasurementTableModel(self)
+        self._table_view = QTableView()
+        self._table_view.setObjectName("measurement_results_table")
+        self._table_view.setModel(self._table_model)
+        self._table_view.setAlternatingRowColors(True)
+        self._table_view.setSortingEnabled(False)
+        self._table_view.setWordWrap(False)
+        self._table_view.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self._table_view.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self._table_view.verticalHeader().setDefaultSectionSize(22)
+        table_layout.addWidget(self._table_view, 1)
+        paging = QHBoxLayout()
+        self._previous_page = QPushButton("← Előző oldal")
+        self._next_page = QPushButton("Következő oldal →")
+        self._page_status = QLabel()
+        self._previous_page.clicked.connect(self._show_previous_table_page)
+        self._next_page.clicked.connect(self._show_next_table_page)
+        paging.addWidget(self._previous_page)
+        paging.addWidget(self._page_status)
+        paging.addStretch()
+        paging.addWidget(self._next_page)
+        table_layout.addLayout(paging)
+        self._content_tabs.addTab(table_page, "Táblázat")
+        layout.addWidget(self._content_tabs, stretch=1)
         self._status = QLabel()
         layout.addWidget(self._status)
         self._table = MeasurementTable((), ())
+        self._filtered_row_indices: tuple[int, ...] = ()
+        self._table_page_index = 0
         self._load()
 
     def _toggle_settings(self, expanded: bool) -> None:
@@ -3909,6 +4031,9 @@ class MeasurementHistoryView(QWidget):
         self._plot.clear()
         self._stage_plot.clear()
         if not self._table.rows:
+            self._filtered_row_indices = ()
+            self._table_page_index = 0
+            self._refresh_table_page()
             self._status.setText(
                 f"Nincs rögzített minta — {len(self._source_paths)} fázisfájl"
             )
@@ -3916,9 +4041,8 @@ class MeasurementHistoryView(QWidget):
         times = self._elapsed_times()
         selected_stage = self._stage_filter.currentData()
         stage = selected_stage if isinstance(selected_stage, str) else None
-        filtered_table = filter_measurement_table_by_stage(self._table, stage)
         stage_index = self._table.header.index("active_stage")
-        selected_indices = [
+        stage_indices = [
             index
             for index, row in enumerate(self._table.rows)
             if stage is None or row[stage_index] == stage
@@ -3928,8 +4052,19 @@ class MeasurementHistoryView(QWidget):
             seconds = self._custom_minutes.value() * 60.0
         minimum_time = times[-1] - float(seconds) if isinstance(seconds, float) else times[0]
         selected_indices = [
-            index for index in selected_indices if times[index] >= minimum_time
+            index for index in stage_indices if times[index] >= minimum_time
         ]
+        self._filtered_row_indices = tuple(selected_indices)
+        self._table_page_index = 0
+        self._refresh_table_page()
+        self._draw_stage_timeline(times, stage)
+        stage_label = stage or "Összes mérési fázis"
+        if not selected_indices:
+            self._status.setText(
+                f"{stage_label}: a kiválasztott időtartományban nincs minta — "
+                f"{len(self._source_paths)} fázisfájl"
+            )
+            return
         series = numeric_series(self._table, (item[0] for item in self.SERIES))
         self._plot.addLegend()
         for key, label, color in self.SERIES:
@@ -3940,15 +4075,14 @@ class MeasurementHistoryView(QWidget):
                     pen=color,
                     name=label,
                 )
-        self._draw_stage_timeline(times, stage)
         duration = (
             times[selected_indices[-1]] - times[selected_indices[0]]
             if len(selected_indices) > 1
             else 0.0
         )
-        stage_label = stage or "Összes mérési fázis"
         self._status.setText(
-            f"{stage_label}: {len(filtered_table.rows)} rögzített minta, "
+            f"{stage_label}: {len(stage_indices)} rögzített minta, "
+            f"{len(selected_indices)} megjelenítve, "
             f"{duration:.1f} s megjelenített időtartam — "
             f"{len(self._source_paths)} fázisfájl"
         )
@@ -3960,6 +4094,44 @@ class MeasurementHistoryView(QWidget):
             self._plot.setXRange(max(times[0], minimum_time), times[-1], padding=0.0)
         else:
             self._plot.enableAutoRange(axis="x")
+
+    def _refresh_table_page(self) -> None:
+        total_rows = len(self._filtered_row_indices)
+        page_count = max(1, (total_rows + self.TABLE_PAGE_SIZE - 1) // self.TABLE_PAGE_SIZE)
+        self._table_page_index = min(self._table_page_index, page_count - 1)
+        start = self._table_page_index * self.TABLE_PAGE_SIZE
+        end = min(total_rows, start + self.TABLE_PAGE_SIZE)
+        page_indices = self._filtered_row_indices[start:end]
+        self._table_model.set_page(self._table, page_indices)
+        self._page_status.setText(
+            f"{self._table_page_index + 1}/{page_count}. oldal — "
+            f"{total_rows} sor; oldalanként legfeljebb {self.TABLE_PAGE_SIZE}"
+        )
+        self._previous_page.setEnabled(self._table_page_index > 0)
+        self._next_page.setEnabled(self._table_page_index + 1 < page_count)
+        if self._table.header:
+            self._table_view.resizeColumnToContents(0)
+
+    def _show_previous_table_page(self) -> None:
+        if self._table_page_index <= 0:
+            return
+        self._table_page_index -= 1
+        self._refresh_table_page()
+
+    def _show_next_table_page(self) -> None:
+        page_count = max(
+            1,
+            (
+                len(self._filtered_row_indices)
+                + self.TABLE_PAGE_SIZE
+                - 1
+            )
+            // self.TABLE_PAGE_SIZE,
+        )
+        if self._table_page_index + 1 >= page_count:
+            return
+        self._table_page_index += 1
+        self._refresh_table_page()
 
     def _draw_stage_timeline(
         self, times: tuple[float, ...], selected_stage: str | None
@@ -4298,6 +4470,153 @@ class MeasurementOverviewDialog(ResizableDialog):
         super().closeEvent(event)
 
 
+class MeasurementPumpStartupDialog(ResizableDialog):
+    """Collect and explicitly confirm the physical pump startup targets."""
+
+    def __init__(
+        self,
+        defaults: MeasurementPumpPlan,
+        *,
+        maximum_jacket_pressure_bar: float,
+        maximum_injection_pressure_bar: float,
+        minimum_jacket_margin_bar: float,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._minimum_jacket_margin_bar = minimum_jacket_margin_bar
+        self.setWindowTitle("Mérésindítási pumpabeállítások")
+        self.resize(620, 390)
+        layout = QVBoxLayout(self)
+        explanation = QLabel(
+            "A köpenypumpa a megadott térfogatárammal építi fel a nyomást. "
+            "A cél-nyomás elérésekor a program STOP után állandó nyomástartásra "
+            "kapcsol. Ezután a besajtolópumpa a megadott térfogatárammal építi "
+            "fel a saját kezdőnyomását. A mérési ciklus csak mindkét kezdőnyomás "
+            "elérése után indul."
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+
+        form = QFormLayout()
+        self.jacket_target_pressure = QDoubleSpinBox()
+        self.jacket_target_pressure.setObjectName("startup_jacket_target_pressure")
+        self.jacket_target_pressure.setRange(0.0, maximum_jacket_pressure_bar)
+        self.jacket_target_pressure.setDecimals(2)
+        self.jacket_target_pressure.setSuffix(" bar")
+        self.jacket_target_pressure.setValue(defaults.jacket_target_pressure_bar)
+
+        self.jacket_buildup_flow = QDoubleSpinBox()
+        self.jacket_buildup_flow.setObjectName("startup_jacket_buildup_flow")
+        self.jacket_buildup_flow.setRange(0.0, 600000.0)
+        self.jacket_buildup_flow.setDecimals(3)
+        self.jacket_buildup_flow.setSuffix(" ml/h")
+        self.jacket_buildup_flow.setValue(
+            defaults.jacket_buildup_flow_ml_per_hour
+        )
+
+        self.injection_start_pressure = QDoubleSpinBox()
+        self.injection_start_pressure.setObjectName(
+            "startup_injection_start_pressure"
+        )
+        self.injection_start_pressure.setRange(0.0, maximum_injection_pressure_bar)
+        self.injection_start_pressure.setDecimals(2)
+        self.injection_start_pressure.setSuffix(" bar")
+        self.injection_start_pressure.setValue(
+            defaults.injection_start_pressure_bar
+        )
+
+        self.injection_flow = QDoubleSpinBox()
+        self.injection_flow.setObjectName("startup_injection_flow")
+        self.injection_flow.setRange(0.0, 600000.0)
+        self.injection_flow.setDecimals(3)
+        self.injection_flow.setSuffix(" ml/h")
+        self.injection_flow.setValue(defaults.injection_target_flow_ml_per_hour)
+
+        self.confirmation = QLineEdit()
+        self.confirmation.setObjectName("startup_confirmation")
+        self.confirmation.setPlaceholderText(
+            PumpControlService.START_MEASUREMENT_CONFIRMATION
+        )
+        form.addRow("Köpeny elérendő kezdőnyomása", self.jacket_target_pressure)
+        form.addRow("Köpeny nyomásfelépítési árama", self.jacket_buildup_flow)
+        form.addRow(
+            "Besajtoló elérendő kezdőnyomása", self.injection_start_pressure
+        )
+        form.addRow("Besajtoló térfogatárama", self.injection_flow)
+        form.addRow(
+            f"Megerősítés: {PumpControlService.START_MEASUREMENT_CONFIRMATION}",
+            self.confirmation,
+        )
+        layout.addLayout(form)
+
+        warning = QLabel(
+            "A megadott értékek valódi pumpákra kerülnek. Nullás vagy hiányzó "
+            "értékkel a mérés nem indítható."
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet("color:#b00020;font-weight:700")
+        layout.addWidget(warning)
+        self.margin_status = QLabel()
+        self.margin_status.setObjectName("startup_pressure_margin_status")
+        self.margin_status.setWordWrap(True)
+        layout.addWidget(self.margin_status)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        self.start_button = buttons.addButton(
+            "Pumpák és mérés indítása", QDialogButtonBox.ButtonRole.AcceptRole
+        )
+        self.start_button.setObjectName("startup_accept")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        for field in (
+            self.jacket_target_pressure,
+            self.jacket_buildup_flow,
+            self.injection_start_pressure,
+            self.injection_flow,
+        ):
+            field.valueChanged.connect(self._refresh_start_enabled)
+        self.confirmation.textChanged.connect(self._refresh_start_enabled)
+        self._refresh_start_enabled()
+
+    def plan(self) -> MeasurementPumpPlan:
+        return MeasurementPumpPlan(
+            jacket_target_pressure_bar=self.jacket_target_pressure.value(),
+            jacket_buildup_flow_ml_per_hour=self.jacket_buildup_flow.value(),
+            injection_start_pressure_bar=self.injection_start_pressure.value(),
+            injection_target_flow_ml_per_hour=self.injection_flow.value(),
+        )
+
+    def confirmation_text(self) -> str:
+        return self.confirmation.text()
+
+    def _refresh_start_enabled(self) -> None:
+        plan = self.plan()
+        margin = (
+            plan.jacket_target_pressure_bar
+            - plan.injection_start_pressure_bar
+        )
+        margin_ok = margin >= self._minimum_jacket_margin_bar
+        self.margin_status.setText(
+            f"Tervezett köpenynyomás-többlet: {margin:g} bar; "
+            f"szükséges: legalább {self._minimum_jacket_margin_bar:g} bar."
+        )
+        self.margin_status.setStyleSheet(
+            "color:#1b7f3a;font-weight:700"
+            if margin_ok
+            else "color:#b00020;font-weight:700"
+        )
+        self.start_button.setEnabled(
+            plan.jacket_target_pressure_bar > 0.0
+            and plan.jacket_buildup_flow_ml_per_hour > 0.0
+            and plan.injection_start_pressure_bar > 0.0
+            and plan.injection_target_flow_ml_per_hour > 0.0
+            and margin_ok
+            and self.confirmation_text()
+            == PumpControlService.START_MEASUREMENT_CONFIRMATION
+        )
+
+
 class PreflightDialog(ResizableDialog):
     """Operator-facing, itemized gate shown before every measurement start."""
 
@@ -4388,6 +4707,9 @@ class DashboardWindow(QMainWindow):
         self._data_directory = data_directory
         self._measurement_writer = measurement_writer
         self._nas_sync = nas_sync
+        self._pending_stage_exports: Queue[tuple[Path, str]] = Queue()
+        self._stage_export_active = False
+        self._stage_export_thread: Thread | None = None
         self._run_mode = RunMode.SIMULATION
         self._preferred_run_mode = self._stored_run_mode()
         self._startup_mode_restore_started = False
@@ -4428,6 +4750,15 @@ class DashboardWindow(QMainWindow):
         )
         self._runtime_bridge.preflight_failed.connect(
             self._measurement_preflight_failed
+        )
+        self._runtime_bridge.pump_startup_completed.connect(
+            self._measurement_pump_startup_completed
+        )
+        self._runtime_bridge.pump_startup_failed.connect(
+            self._measurement_pump_startup_failed
+        )
+        self._runtime_bridge.stage_export_batch_finished.connect(
+            self._stage_export_batch_finished
         )
         self._runtime = self._make_runtime(control_loop)
         self._build_ui()
@@ -5094,6 +5425,80 @@ class DashboardWindow(QMainWindow):
             stages=stage_snapshots(project),
             stage_name=stage_name,
         )
+
+    def _queue_completed_stage_export(
+        self, source_path: Path, stage_name: str
+    ) -> None:
+        """Receive stage completion from either the UI or the control thread."""
+        self._pending_stage_exports.put((source_path, stage_name))
+        self._diagnostics.emit(
+            DiagnosticCategory.SYSTEM,
+            "EXPORT",
+            f"completed stage queued for Excel export: {stage_name}; {source_path}",
+        )
+
+    def _start_pending_stage_exports(self) -> None:
+        if (
+            self._stage_export_active
+            or self._runtime.running
+            or self._pending_stage_exports.empty()
+        ):
+            return
+        self._stage_export_active = True
+
+        def execute() -> None:
+            pending: dict[Path, str] = {}
+            try:
+                while True:
+                    try:
+                        source_path, stage_name = (
+                            self._pending_stage_exports.get_nowait()
+                        )
+                    except Empty:
+                        break
+                    pending[source_path] = stage_name
+                for source_path, stage_name in pending.items():
+                    destination = project_excel_path(source_path, stage_name)
+                    try:
+                        export_measurement_excel(
+                            source_path,
+                            destination,
+                            stage_name=stage_name,
+                        )
+                        relative = destination.relative_to(self._data_directory)
+                        nas_relative = (
+                            Path(*relative.parts[1:])
+                            if relative.parts and relative.parts[0] == "projects"
+                            else relative
+                        )
+                        self._nas_sync.enqueue(destination, nas_relative)
+                    except Exception as error:
+                        self._diagnostics.emit(
+                            DiagnosticCategory.SYSTEM,
+                            "EXPORT",
+                            f"Excel export failed for stage {stage_name}: {error}",
+                            level="ERROR",
+                        )
+                    else:
+                        self._diagnostics.emit(
+                            DiagnosticCategory.SYSTEM,
+                            "EXPORT",
+                            f"Excel export completed for stage {stage_name}: "
+                            f"{destination}",
+                        )
+            finally:
+                self._runtime_bridge.stage_export_batch_finished.emit()
+
+        self._stage_export_thread = Thread(
+            target=execute,
+            name="eor-stage-excel-export",
+            daemon=True,
+        )
+        self._stage_export_thread.start()
+
+    def _stage_export_batch_finished(self) -> None:
+        self._stage_export_active = False
+        self._start_pending_stage_exports()
 
     def _open_data_management(self) -> None:
         source_path = self._current_project_file()
@@ -5792,7 +6197,11 @@ class DashboardWindow(QMainWindow):
             voltage_at_zero_percent=configuration.valve_zero_percent_voltage,
             voltage_at_hundred_percent=configuration.valve_hundred_percent_voltage,
         )
-        writer = ProjectMeasurementWriter(self._data_directory, self._nas_sync)
+        writer = ProjectMeasurementWriter(
+            self._data_directory,
+            self._nas_sync,
+            phase_completed=self._queue_completed_stage_export,
+        )
         project_id = self._project.currentData()
         if isinstance(project_id, int):
             project = self._projects.get_project(project_id)
@@ -6278,6 +6687,7 @@ class DashboardWindow(QMainWindow):
         if isinstance(stage_id, int):
             self._last_selected_stage_id = stage_id
             self._current_project_file()
+            self._start_pending_stage_exports()
             stage = self._projects.get_stage(stage_id)
             details: list[str] = []
             if stage.fluid:
@@ -6717,7 +7127,13 @@ class DashboardWindow(QMainWindow):
 
         def execute() -> None:
             try:
-                result = self._control_loop.observe_once(active_stage=active_stage)
+                result = (
+                    self._control_loop.observe_pump_startup_once(
+                        active_stage=active_stage
+                    )
+                    if self._run_mode is RunMode.HARDWARE
+                    else self._control_loop.observe_once(active_stage=active_stage)
+                )
             except Exception as error:
                 with suppress(Exception):
                     self._control_loop.request_safe_state()
@@ -6745,21 +7161,165 @@ class DashboardWindow(QMainWindow):
         self._begin_measurement_after_preflight()
 
     def _begin_measurement_after_preflight(self) -> None:
+        plan: MeasurementPumpPlan | None = None
+        confirmation = ""
+        if self._run_mode is RunMode.HARDWARE:
+            dialog = MeasurementPumpStartupDialog(
+                self._default_measurement_pump_plan(),
+                maximum_jacket_pressure_bar=self._max_jacket.value(),
+                maximum_injection_pressure_bar=self._max_injection.value(),
+                minimum_jacket_margin_bar=self._minimum_margin.value(),
+                parent=self,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                self._refresh_state()
+                return
+            plan = dialog.plan()
+            confirmation = dialog.confirmation_text()
+            self._remember_measurement_pump_plan(plan)
         try:
             runtime_settings = self._runtime_settings()
             self._devices.start()
-            self._control_loop.reset_injected_volume_tracking()
-            self._measurement_time_origin = None
-            self._last_cycle_result = None
-            self._times.clear()
-            self._jacket_pressures.clear()
-            self._injection_pressures.clear()
-            self._injection_flows.clear()
-            self._line_pressures.clear()
-            self._runtime.start(runtime_settings)
+            if plan is None:
+                self._complete_measurement_start(runtime_settings)
+            else:
+                pump_control = self._pump_control
+                if pump_control is None:
+                    raise RuntimeError("a fizikai pumpavezérlés nem érhető el")
+                self._preflight_active = True
+                active_stage = runtime_settings.active_stage
+
+                def execute() -> None:
+                    try:
+                        pump_control.start_measurement_pumps(
+                            jacket_target_pressure_bar=(
+                                plan.jacket_target_pressure_bar
+                            ),
+                            jacket_buildup_flow_ml_per_hour=(
+                                plan.jacket_buildup_flow_ml_per_hour
+                            ),
+                            injection_start_pressure_bar=(
+                                plan.injection_start_pressure_bar
+                            ),
+                            injection_target_flow_ml_per_hour=(
+                                plan.injection_target_flow_ml_per_hour
+                            ),
+                            confirmation=confirmation,
+                            startup_safety_check=lambda: (
+                                ("measurement pump startup was cancelled",)
+                                if self._devices.status.state
+                                is not ApplicationState.RUNNING
+                                else self._control_loop.observe_pump_startup_once(
+                                    active_stage=active_stage
+                                ).safety_reasons
+                            ),
+                        )
+                    except Exception as error:
+                        self._runtime_bridge.pump_startup_failed.emit(str(error))
+                    else:
+                        self._runtime_bridge.pump_startup_completed.emit()
+
+                Thread(
+                    target=execute,
+                    name="eor-measurement-pump-startup",
+                    daemon=True,
+                ).start()
         except Exception as error:
             self._show_error(f"A mérés nem indítható: {error}")
         self._refresh_state()
+
+    def _complete_measurement_start(self, settings: RuntimeSettings) -> None:
+        self._control_loop.reset_injected_volume_tracking()
+        self._measurement_time_origin = None
+        self._last_cycle_result = None
+        self._times.clear()
+        self._jacket_pressures.clear()
+        self._injection_pressures.clear()
+        self._injection_flows.clear()
+        self._line_pressures.clear()
+        self._runtime.start(settings)
+
+    def _measurement_pump_startup_completed(self) -> None:
+        self._preflight_active = False
+        try:
+            self._complete_measurement_start(self._runtime_settings())
+        except Exception as error:
+            self._devices.emergency_stop(f"runtime startup failed: {error}")
+            self._show_error(f"A mérés nem indítható: {error}")
+        self._refresh_state()
+
+    def _measurement_pump_startup_failed(self, message: str) -> None:
+        self._preflight_active = False
+        if self._devices.status.state is ApplicationState.RUNNING:
+            try:
+                self._devices.emergency_stop(f"pump startup failed: {message}")
+            except Exception as stop_error:
+                message = f"{message}; biztonsági leállítási hiba: {stop_error}"
+        self._show_error(f"A pumpák indítása sikertelen: {message}")
+        self._refresh_state()
+
+    def _default_measurement_pump_plan(self) -> MeasurementPumpPlan:
+        stage_id = self._stage.currentData()
+        stage_flow = 0.0
+        if isinstance(stage_id, int):
+            stored_stage_flow = self._projects.get_stage(
+                stage_id
+            ).target_flow_ml_per_hour
+            if stored_stage_flow is not None and stored_stage_flow > 0.0:
+                stage_flow = stored_stage_flow
+
+        def stored_float(key: str, fallback: float) -> float:
+            try:
+                value = float(str(self._user_settings.value(key, fallback)))
+            except (TypeError, ValueError):
+                return fallback
+            return value if isfinite(value) and value >= 0.0 else fallback
+
+        default_jacket_pressure = min(
+            self._setpoint.value() + self._minimum_margin.value(),
+            self._max_jacket.value(),
+        )
+        default_injection_pressure = min(
+            self._setpoint.value(),
+            self._max_injection.value(),
+        )
+        return MeasurementPumpPlan(
+            jacket_target_pressure_bar=stored_float(
+                "pump_startup/jacket_target_pressure_bar",
+                default_jacket_pressure,
+            ),
+            jacket_buildup_flow_ml_per_hour=stored_float(
+                "pump_startup/jacket_buildup_flow_ml_per_hour",
+                0.0,
+            ),
+            injection_start_pressure_bar=stored_float(
+                "pump_startup/injection_start_pressure_bar",
+                default_injection_pressure,
+            ),
+            injection_target_flow_ml_per_hour=stored_float(
+                "pump_startup/injection_target_flow_ml_per_hour",
+                stage_flow,
+            ),
+        )
+
+    def _remember_measurement_pump_plan(self, plan: MeasurementPumpPlan) -> None:
+        values = {
+            "pump_startup/jacket_target_pressure_bar": (
+                plan.jacket_target_pressure_bar
+            ),
+            "pump_startup/jacket_buildup_flow_ml_per_hour": (
+                plan.jacket_buildup_flow_ml_per_hour
+            ),
+            "pump_startup/injection_start_pressure_bar": (
+                plan.injection_start_pressure_bar
+            ),
+            "pump_startup/injection_target_flow_ml_per_hour": (
+                plan.injection_target_flow_ml_per_hour
+            ),
+        }
+        for key, value in values.items():
+            self._user_settings.setValue(key, value)
+        self._user_settings.sync()
 
     def _build_preflight_report(self, record: MeasurementRecord) -> PreflightReport:
         items: list[PreflightItem] = []
@@ -6888,6 +7448,16 @@ class DashboardWindow(QMainWindow):
             )
 
         if self._run_mode is RunMode.HARDWARE:
+            add(
+                "pump_startup",
+                "Mérésindítási pumpaértékek",
+                PreflightStatus.PASSED,
+                "Mindkét pumpa kezdőnyomását, a köpeny nyomásfelépítési "
+                "térfogatáramát és a besajtoló térfogatáramát a következő "
+                "kötelező ablakban kell megadni és külön megerősíteni.",
+            )
+
+        if self._run_mode is RunMode.HARDWARE:
             hardware = self._active_hardware_configuration
             if hardware is None:
                 add(
@@ -6931,16 +7501,28 @@ class DashboardWindow(QMainWindow):
             - snapshot.injection_pump.pressure_bar
         )
         margin_ok = actual_margin >= required_margin
+        margin_status = (
+            PreflightStatus.PASSED
+            if margin_ok
+            else PreflightStatus.WARNING
+            if self._run_mode is RunMode.HARDWARE
+            else PreflightStatus.FAILED
+        )
         add(
             "pressure_margin",
             "Köpeny–besajtolás nyomáskülönbség",
-            PreflightStatus.PASSED if margin_ok else PreflightStatus.FAILED,
+            margin_status,
             f"Aktuális: {actual_margin:.1f} bar; szükséges: legalább "
             f"{required_margin:.1f} bar.",
-            "Növelje biztonságosan a köpenynyomást vagy csökkentse a "
-            "besajtolási nyomást."
-            if not margin_ok
-            else "",
+            (
+                "A program először csak a köpenypumpát indítja el, és a "
+                "besajtolópumpát a szükséges különbség eléréséig tiltja."
+                if not margin_ok and self._run_mode is RunMode.HARDWARE
+                else "Növelje biztonságosan a köpenynyomást vagy csökkentse a "
+                "besajtolási nyomást."
+                if not margin_ok
+                else ""
+            ),
         )
 
         if record.safety_reasons:
@@ -7012,21 +7594,25 @@ class DashboardWindow(QMainWindow):
     def _stop(self) -> None:
         try:
             self._runtime.stop()
+            self._measurement_writer.complete_current_phase()
             self._devices.stop()
             if self._pump_control is not None:
                 self._pump_control.observe_safe_stop()
         except Exception as error:
             self._show_error(str(error))
+        self._start_pending_stage_exports()
         self._refresh_state()
 
     def _emergency_stop(self) -> None:
         if self._runtime.running:
             self._runtime.stop()
+        self._measurement_writer.complete_current_phase()
         self._devices.emergency_stop()
         if self._pump_control is not None:
             self._pump_control.revoke()
             self._pump_control = None
         self._set_active_alarm("RETESSZELT HIBA: kézi vészleállítás")
+        self._start_pending_stage_exports()
         self._refresh_state()
 
     def _handle_cycle(self, result: object) -> None:
@@ -7142,6 +7728,8 @@ class DashboardWindow(QMainWindow):
         if self._pump_control is not None:
             self._pump_control.revoke()
             self._pump_control = None
+        self._measurement_writer.complete_current_phase()
+        self._start_pending_stage_exports()
         self._set_active_alarm(f"RETESSZELT VEZÉRLÉSI HIBA: {message}")
         self._set_all_connections("HIBA", ok=False)
         self._refresh_state()
@@ -7322,6 +7910,11 @@ class DashboardWindow(QMainWindow):
             ApplicationState.RUNNING,
         ):
             self._devices.stop()
+        self._measurement_writer.complete_current_phase()
+        self._start_pending_stage_exports()
+        export_thread = self._stage_export_thread
+        if export_thread is not None and export_thread.is_alive():
+            export_thread.join(timeout=30.0)
         if self._devices.status.state is not ApplicationState.IDLE:
             self._devices.disconnect()
         if self._pump_control is not None:

@@ -86,6 +86,130 @@ def test_remote_configure_run_stop_and_local_sequence() -> None:
     assert jacket.commands == ["REMOTE", "FLOW=1.0", "RUN", "STOP", "LOCAL"]
 
 
+def test_measurement_start_runs_jacket_then_injection_and_converts_flow() -> None:
+    control, jacket, injection = service()
+
+    control.start_measurement_pumps(
+        jacket_target_pressure_bar=120.0,
+        jacket_buildup_flow_ml_per_hour=60.0,
+        injection_start_pressure_bar=100.0,
+        injection_target_flow_ml_per_hour=120.0,
+        confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+    )
+
+    assert jacket.commands == [
+        "REMOTE",
+        "FLOW=1.0",
+        "RUN",
+        "STOP",
+        "PRESS=120.0",
+        "RUN",
+    ]
+    assert injection.commands == ["REMOTE", "FLOW=2.0", "RUN"]
+    assert control.state(PumpRole.JACKET).running
+    assert control.state(PumpRole.INJECTION).running
+
+
+def test_measurement_start_requires_exact_confirmation() -> None:
+    control, jacket, injection = service()
+
+    with pytest.raises(PermissionError, match="confirmation"):
+        control.start_measurement_pumps(
+            jacket_target_pressure_bar=120.0,
+            jacket_buildup_flow_ml_per_hour=60.0,
+            injection_start_pressure_bar=100.0,
+            injection_target_flow_ml_per_hour=60.0,
+            confirmation="yes",
+        )
+
+    assert jacket.commands == []
+    assert injection.commands == []
+
+
+def test_measurement_start_safety_failure_stops_both_pumps() -> None:
+    control, jacket, injection = service()
+
+    with pytest.raises(PermissionError, match="line pressure limit"):
+        control.start_measurement_pumps(
+            jacket_target_pressure_bar=120.0,
+            jacket_buildup_flow_ml_per_hour=60.0,
+            injection_start_pressure_bar=100.0,
+            injection_target_flow_ml_per_hour=60.0,
+            confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+            startup_safety_check=lambda: ("line pressure limit exceeded",),
+        )
+
+    assert jacket.commands == ["REMOTE", "FLOW=1.0", "RUN", "STOP"]
+    assert injection.commands == ["STOP"]
+    assert not control.state(PumpRole.JACKET).running
+    assert not control.state(PumpRole.INJECTION).running
+
+
+def test_measurement_start_pressure_timeout_never_runs_injection() -> None:
+    control, jacket, injection = service(jacket_pressure=119.0)
+
+    with pytest.raises(TimeoutError, match="target is 120.00 bar"):
+        control.start_measurement_pumps(
+            jacket_target_pressure_bar=120.0,
+            jacket_buildup_flow_ml_per_hour=60.0,
+            injection_start_pressure_bar=100.0,
+            injection_target_flow_ml_per_hour=60.0,
+            confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+            pressure_buildup_timeout_seconds=0.001,
+            polling_interval_seconds=0.001,
+        )
+
+    assert jacket.commands == ["REMOTE", "FLOW=1.0", "RUN", "STOP"]
+    assert injection.commands == ["STOP"]
+    assert "RUN" not in injection.commands
+
+
+def test_measurement_start_waits_for_injection_start_pressure() -> None:
+    control, jacket, injection = service(injection_pressure=99.0)
+
+    with pytest.raises(TimeoutError, match="injection pressure remained 99.00 bar"):
+        control.start_measurement_pumps(
+            jacket_target_pressure_bar=120.0,
+            jacket_buildup_flow_ml_per_hour=60.0,
+            injection_start_pressure_bar=100.0,
+            injection_target_flow_ml_per_hour=60.0,
+            confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+            pressure_buildup_timeout_seconds=0.001,
+            polling_interval_seconds=0.001,
+        )
+
+    assert jacket.commands[-1] == "STOP"
+    assert injection.commands == ["REMOTE", "FLOW=1.0", "RUN", "STOP"]
+    assert not control.state(PumpRole.JACKET).running
+    assert not control.state(PumpRole.INJECTION).running
+
+
+def test_measurement_start_rechecks_margin_immediately_before_injection_run() -> None:
+    control, jacket, injection = service()
+    checks = 0
+
+    def safety_check() -> tuple[str, ...]:
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            jacket.pressure = 119.0
+        return ()
+
+    with pytest.raises(PermissionError, match="is 19.00 bar"):
+        control.start_measurement_pumps(
+            jacket_target_pressure_bar=120.0,
+            jacket_buildup_flow_ml_per_hour=60.0,
+            injection_start_pressure_bar=100.0,
+            injection_target_flow_ml_per_hour=60.0,
+            confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+            startup_safety_check=safety_check,
+        )
+
+    assert "RUN" not in injection.commands
+    assert jacket.commands[-1] == "STOP"
+    assert injection.commands[-1] == "STOP"
+
+
 def test_injection_run_requires_twenty_bar_jacket_margin() -> None:
     control, _, injection = service(jacket_pressure=119.9)
     prepare(control, PumpRole.INJECTION)

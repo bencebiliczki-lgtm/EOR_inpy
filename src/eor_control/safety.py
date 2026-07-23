@@ -49,6 +49,7 @@ class SafetyMonitor:
         control_deadline_missed: bool = False,
         controlled_pressure_bar: float | None = None,
         pressure_target_bar: float | None = None,
+        enforce_minimum_margin: bool = True,
     ) -> SafetyDecision:
         reasons: list[str] = []
         if snapshot.quality is not DataQuality.GOOD:
@@ -114,7 +115,7 @@ class SafetyMonitor:
         ):
             reasons.append("line pressure limit exceeded")
         margin = snapshot.jacket_pump.pressure_bar - snapshot.injection_pump.pressure_bar
-        if margin < self._limits.minimum_jacket_margin_bar:
+        if enforce_minimum_margin and margin < self._limits.minimum_jacket_margin_bar:
             reasons.append("jacket pressure margin is too low")
         if reasons:
             self._latched_reasons = tuple(dict.fromkeys((*self._latched_reasons, *reasons)))

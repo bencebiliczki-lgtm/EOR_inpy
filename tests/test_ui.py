@@ -1,4 +1,5 @@
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import sleep
 
@@ -35,6 +36,7 @@ from eor_control.application import (  # noqa: E402
     DeviceControlService,
     RunMode,
 )
+from eor_control.data_management import MeasurementTable  # noqa: E402
 from eor_control.device_testing import (  # noqa: E402
     DeviceTestReport,
     FunctionalDeviceTestSession,
@@ -55,6 +57,7 @@ from eor_control.simulators import (  # noqa: E402
     SimulatedDataAcquisition,
     SimulatedPump,
 )
+from eor_control.storage import CsvMeasurementWriter  # noqa: E402
 from eor_control.ui import (  # noqa: E402
     ADD_STAGE_ACTION_DATA,
     DARK_STYLESHEET,
@@ -70,6 +73,9 @@ from eor_control.ui import (  # noqa: E402
     LoggingSettingsDialog,
     MeasurementHistoryView,
     MeasurementOverviewDialog,
+    MeasurementPumpPlan,
+    MeasurementPumpStartupDialog,
+    MeasurementTableModel,
     PreflightDialog,
     ProjectSelectionDialog,
     ProjectSettingsDialog,
@@ -419,6 +425,121 @@ def test_text_labels_have_no_theme_background_fill() -> None:
         assert transparent_rule in stylesheet
         assert "QLineEdit, QTextEdit, QPlainTextEdit" in stylesheet
         assert "background: transparent" in stylesheet
+
+
+def test_measurement_pump_startup_dialog_requires_all_values_and_confirmation() -> None:
+    application()
+    dialog = MeasurementPumpStartupDialog(
+        MeasurementPumpPlan(120.0, 0.0, 100.0, 10.0),
+        maximum_jacket_pressure_bar=400.0,
+        maximum_injection_pressure_bar=350.0,
+        minimum_jacket_margin_bar=20.0,
+    )
+
+    assert not dialog.start_button.isEnabled()
+    dialog.jacket_buildup_flow.setValue(60.0)
+    assert not dialog.start_button.isEnabled()
+    dialog.confirmation.setText("START MEASUREMENT PUMPS")
+
+    assert dialog.start_button.isEnabled()
+    assert dialog.plan() == MeasurementPumpPlan(120.0, 60.0, 100.0, 10.0)
+    dialog.injection_start_pressure.setValue(101.0)
+    assert not dialog.start_button.isEnabled()
+
+
+def test_measurement_table_model_uses_excel_columns_and_hungarian_time() -> None:
+    application()
+    header = CsvMeasurementWriter.HEADER
+    values = ["1"] * len(header)
+    values[0] = "2026-07-13T10:30:00+00:00"
+    values[header.index("active_stage")] = "víz"
+    table = MeasurementTable(header, (tuple(values),))
+    model = MeasurementTableModel()
+
+    model.set_page(table, (0,))
+
+    assert model.columnCount() == len(header)
+    assert tuple(
+        model.headerData(index, Qt.Orientation.Horizontal)
+        for index in range(model.columnCount())
+    ) == header
+    assert model.data(model.index(0, 0)) == "2026-07-13 12:30:00.000 CEST"
+
+
+def test_measurement_history_table_shares_stage_and_time_filters() -> None:
+    application()
+    header = CsvMeasurementWriter.HEADER
+    stage_index = header.index("active_stage")
+    start = datetime(2026, 7, 13, 10, 0, tzinfo=UTC)
+    rows: list[tuple[str, ...]] = []
+    for index in range(1001):
+        values = ["1"] * len(header)
+        values[0] = (start + timedelta(seconds=index)).isoformat()
+        values[stage_index] = "víz" if index % 2 == 0 else "olaj"
+        rows.append(tuple(values))
+    view = MeasurementHistoryView()
+    view._table = MeasurementTable(header, tuple(rows))
+    view._stage_filter.addItem("víz", "víz")
+    view._stage_filter.addItem("olaj", "olaj")
+
+    view._refresh_plot()
+
+    assert view._content_tabs.tabText(0) == "Grafikon"
+    assert view._content_tabs.tabText(1) == "Táblázat"
+    assert view._table_model.rowCount() == view.TABLE_PAGE_SIZE
+    assert view._next_page.isEnabled()
+    assert view._table_model.columnCount() == len(CsvMeasurementWriter.HEADER)
+
+    view._stage_filter.setCurrentIndex(view._stage_filter.findData("olaj"))
+
+    assert len(view._filtered_row_indices) == 500
+    assert view._table_model.rowCount() == 500
+    assert not view._next_page.isEnabled()
+
+    view._time_range.setCurrentIndex(view._time_range.findData(600.0))
+
+    assert len(view._filtered_row_indices) == 300
+    assert view._table_model.rowCount() == 300
+
+
+def test_completed_stage_excel_export_runs_in_background(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "data" / "measurement.csv",
+        tmp_path / "projects.sqlite3",
+    )
+    source = (
+        window._data_directory
+        / "projects"
+        / "2026"
+        / "project"
+        / "Projekt_víz_live_raw.csv"
+    )
+    source.parent.mkdir(parents=True)
+    source.write_text("raw", encoding="utf-8")
+    calls: list[tuple[Path, Path, str]] = []
+
+    def export(
+        source_path: Path, destination: Path, *, stage_name: str
+    ) -> None:
+        calls.append((source_path, destination, stage_name))
+        destination.write_text("excel", encoding="utf-8")
+
+    monkeypatch.setattr("eor_control.ui.export_measurement_excel", export)
+    window._queue_completed_stage_export(source, "víz")
+    window._start_pending_stage_exports()
+    destination = source.with_name("Projekt.xlsx")
+    for _ in range(100):
+        application().processEvents()
+        if destination.is_file() and not window._stage_export_active:
+            break
+        sleep(0.01)
+
+    assert calls == [(source, destination, "víz")]
+    assert destination.read_text(encoding="utf-8") == "excel"
+    window.close()
 
 
 def test_windows_application_identity_is_set_for_taskbar_icon(
@@ -1375,6 +1496,14 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     stage_selector.setCurrentIndex(stage_selector.findData(stage.id))
     assert window._active_project_label.text() == "UI project"
     assert window._active_stage_label.text() == "Water stage"
+    pump_plan = window._default_measurement_pump_plan()
+    assert pump_plan.jacket_target_pressure_bar == 108.0
+    assert pump_plan.jacket_buildup_flow_ml_per_hour == 0.0
+    assert pump_plan.injection_start_pressure_bar == 88.0
+    assert pump_plan.injection_target_flow_ml_per_hour == 10.0
+    remembered_plan = MeasurementPumpPlan(115.0, 45.0, 90.0, 8.0)
+    window._remember_measurement_pump_plan(remembered_plan)
+    assert window._default_measurement_pump_plan() == remembered_plan
     assert not window._project_selector_required
     assert "SZIMULÁCIÓ" in window._current_mode_message
     assert "nincs mérési adatmentés" in window._current_mode_message

@@ -13,6 +13,7 @@ from eor_control.data_management import (
     filter_measurement_table_by_stage,
     measurement_stage_segments,
     measurement_stages,
+    project_excel_path,
     read_measurement_table,
     read_measurement_tables,
     safe_filename,
@@ -174,21 +175,39 @@ def test_measurement_table_filters_stages_and_keeps_repeated_segments() -> None:
     )
 
 
-def test_excel_export_contains_data_and_chart_sheet(tmp_path: Path) -> None:
+def test_project_excel_uses_one_charted_worksheet_per_stage(tmp_path: Path) -> None:
     from openpyxl import load_workbook
 
     writer = ProjectMeasurementWriter(tmp_path)
-    source = writer.select_project(1, "Excel", stage_name="víz")
-    writer.write(record())
-    writer.close()
-    destination = tmp_path / "export.xlsx"
+    water_source = writer.select_project(1, "Excel", stage_name="víz")
+    writer.write(record("víz"))
+    oil_source = writer.select_project(1, "Excel", stage_name="olaj")
+    writer.write(record("olaj"))
+    writer.complete_current_phase()
+    destination = project_excel_path(water_source, "víz")
 
-    export_measurement_excel(source, destination)
+    export_measurement_excel(water_source, destination, stage_name="víz")
+    export_measurement_excel(oil_source, destination, stage_name="olaj")
 
     workbook = load_workbook(destination, read_only=False)
-    assert workbook.sheetnames == ["Mérési adatok", "Diagram"]
-    assert workbook["Mérési adatok"]["C2"].value == 120.5
-    assert len(workbook["Diagram"]._charts) == 1
+    assert destination.name == "Excel.xlsx"
+    assert workbook.sheetnames == ["víz", "olaj"]
+    assert workbook["víz"]["C2"].value == 120.5
+    assert workbook["olaj"]["C2"].value == 120.5
+    assert len(workbook["víz"]._charts) == 1
+    assert len(workbook["olaj"]._charts) == 1
+
+    writer.select_project(1, "Excel", stage_name="víz")
+    writer.write(
+        record("víz", recorded_at=datetime(2026, 7, 13, 12, 31, tzinfo=UTC))
+    )
+    writer.complete_current_phase()
+    export_measurement_excel(water_source, destination, stage_name="víz")
+
+    refreshed = load_workbook(destination, read_only=False)
+    assert refreshed.sheetnames == ["víz", "olaj"]
+    assert refreshed["víz"].max_row == 3
+    assert len(refreshed["víz"]._charts) == 1
 
 
 def test_project_writer_creates_one_raw_csv_per_measurement_stage(
@@ -207,6 +226,27 @@ def test_project_writer_creates_one_raw_csv_per_measurement_stage(
     ]
     assert read_measurement_table(water_path).column("active_stage") == ("víz",)
     assert read_measurement_table(phase_paths[0]).column("active_stage") == ("olaj",)
+
+
+def test_project_writer_reports_each_completed_measurement_stage_once(
+    tmp_path: Path,
+) -> None:
+    completed: list[tuple[Path, str]] = []
+    writer = ProjectMeasurementWriter(
+        tmp_path,
+        phase_completed=lambda path, stage: completed.append((path, stage)),
+    )
+    water_path = writer.select_project(1, "Projekt", stage_name="víz")
+    writer.write(record("víz"))
+
+    oil_path = writer.select_project(1, "Projekt", stage_name="olaj")
+
+    assert completed == [(water_path, "víz")]
+    writer.write(record("olaj"))
+    assert writer.complete_current_phase() == oil_path
+    assert completed == [(water_path, "víz"), (oil_path, "olaj")]
+    assert writer.complete_current_phase() is None
+    assert completed == [(water_path, "víz"), (oil_path, "olaj")]
 
 
 def test_multiple_phase_files_are_combined_only_for_reading(tmp_path: Path) -> None:
