@@ -26,6 +26,13 @@ szelepaktuátor safe-state műveletét és nullázza a belső vezérlőkimenetet
 
 A rendszer magas nyomáson működik, ezért a szoftver hibája nem eredményezhet korlátlan vezérlőkimenetet. A fizikai nyomáshatárok, relief megoldások és vészleállítás elsődlegesek; a szoftver kiegészítő védelmi réteg.
 
+A fizikai hardver és az NI analóg szelepkimenet külön engedélyt használ. A
+hardvermód kezelői megerősítésének kell megelőznie az NI-kimenet
+engedélyezését, és mindkettőnek meg kell lennie a hardverkapcsolódás és a mérés
+indítása előtt. Az NI `set_safe_state()` visszavonja a kimeneti engedélyt; a
+felső szint ilyenkor a hardvermód-engedélyt is érvényteleníti, ezért fél-
+engedélyezett `READY` állapotból nem indulhat új mérés.
+
 ## Minimális interlockok
 
 - konfigurált maximális pumpanyomás túllépése;

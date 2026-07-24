@@ -101,6 +101,12 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 - Normál kezelői módban a HARDVER mód aktiválása és az élő hardverkapcsolat egy
   művelet legyen. Sikeres aktiválás után a kapcsolat a mérések között is maradjon
   `READY` állapotban; külön Csatlakozás és Leválasztás gomb ne jelenjen meg.
+- A HARDVER mód kezelői engedélyezése és az NI fizikai analóg kimenetének
+  engedélyezése két egymást követő biztonsági lépés legyen. Előbb az
+  alkalmazásszintű hardverengedély, utána – csak konfigurált szelepkimenetnél –
+  az NI-kimenet engedélye jöjjön létre, és csak ezután indulhat az
+  eszközkapcsolódás. Safe-state vagy normál mérésleállítás mindkét engedélyt
+  érvénytelenítse; új méréshez ismételt, explicit hardvermód-aktiválás szükséges.
 - Aktív HARDVER + `READY` állapotban a dashboard mérésindítás nélkül is
   folyamatosan jelenítse meg a két pumpa cache-elt nyomását, térfogatáramát,
   maradék térfogatát és telemetriaállapotát, valamint az engedélyezett NI

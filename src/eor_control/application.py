@@ -80,6 +80,7 @@ class DeviceControlService:
         if self._state is not ApplicationState.IDLE:
             raise RuntimeError("devices can only be connected from idle state")
         self._require_hardware_authorization()
+        self._require_physical_output_authorization()
         try:
             self._jacket_pump.connect()
             self._injection_pump.connect()
@@ -92,6 +93,7 @@ class DeviceControlService:
         if self._state is not ApplicationState.READY:
             raise RuntimeError("measurement can only start from ready state")
         self._require_hardware_authorization()
+        self._require_physical_output_authorization()
         for pump in (self._jacket_pump, self._injection_pump):
             acknowledge = getattr(pump, "acknowledge_stop_latch", None)
             if callable(acknowledge):
@@ -111,6 +113,11 @@ class DeviceControlService:
             self._state = ApplicationState.FAULT
         else:
             self._state = ApplicationState.READY
+            if self._mode is RunMode.HARDWARE:
+                # The DAQ safe-state revokes its independent physical-output
+                # authorization. Do not leave the application-level hardware
+                # authorization looking valid after that point.
+                self._hardware_authorized = False
 
     def emergency_stop(self, reason: str = "manual emergency stop") -> None:
         self._enter_fault(reason)
@@ -150,6 +157,20 @@ class DeviceControlService:
     def _require_hardware_authorization(self) -> None:
         if self._mode is RunMode.HARDWARE and not self._hardware_authorized:
             raise PermissionError("physical hardware mode requires explicit operator confirmation")
+
+    def _require_physical_output_authorization(self) -> None:
+        if self._mode is not RunMode.HARDWARE:
+            return
+        output_required = bool(
+            getattr(self._daq, "physical_output_required", False)
+        )
+        output_authorized = bool(
+            getattr(self._daq, "output_authorized", False)
+        )
+        if output_required and not output_authorized:
+            raise PermissionError(
+                "NI physical output requires separate hardware-mode authorization"
+            )
 
     def _enter_fault(self, reason: str) -> None:
         errors = self._request_safe_state()

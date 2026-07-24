@@ -166,6 +166,14 @@ class NidaqmxDataAcquisition:
             raise PermissionError("NI physical output confirmation did not match")
         self._output_authorized = True
 
+    @property
+    def output_authorized(self) -> bool:
+        return self._output_authorized
+
+    @property
+    def physical_output_required(self) -> bool:
+        return self._config.valve_output_channel is not None
+
     def read_voltage(self, channel: str) -> float:
         return self.read_voltages(channel, 1)[0]
 

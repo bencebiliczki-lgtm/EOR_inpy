@@ -60,6 +60,7 @@ from eor_control.hardware import (  # noqa: E402
     NiPhysicalChannelInfo,
     SerialPortInfo,
 )
+from eor_control.ni import NidaqmxDataAcquisition  # noqa: E402
 from eor_control.projects import ProjectRepository  # noqa: E402
 from eor_control.pump_control import PumpRole  # noqa: E402
 from eor_control.simulators import (  # noqa: E402
@@ -95,6 +96,7 @@ from eor_control.ui import (  # noqa: E402
     SettingsHubDialog,
     SimulationSettingsPage,
     StageSettingsDialog,
+    _authorize_physical_hardware,
     application_icon,
     application_icon_path,
     build_simulated_dashboard,
@@ -160,6 +162,29 @@ def test_application_dialogs_are_resizable() -> None:
     ):
         assert issubclass(dialog_type, ResizableDialog)
     dialog.close()
+
+
+def test_hardware_authorization_precedes_ni_output_authorization() -> None:
+    calls: list[str] = []
+
+    class Devices:
+        def authorize_hardware(self, confirmation: str) -> None:
+            assert confirmation == DeviceControlService.HARDWARE_CONFIRMATION
+            calls.append("hardware")
+
+    class Daq:
+        def authorize_output(self, confirmation: str) -> None:
+            assert confirmation == NidaqmxDataAcquisition.HARDWARE_CONFIRMATION
+            calls.append("ni_output")
+
+    _authorize_physical_hardware(
+        Devices(),  # type: ignore[arg-type]
+        Daq(),  # type: ignore[arg-type]
+        valve_output_enabled=True,
+        hardware_confirmation=DeviceControlService.HARDWARE_CONFIRMATION,
+    )
+
+    assert calls == ["hardware", "ni_output"]
 
 
 def test_settings_hub_uses_resizable_left_navigation() -> None:

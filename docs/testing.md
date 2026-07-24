@@ -159,6 +159,9 @@ A pumpavezérlési tesztek ellenőrzik a REMOTE–konfigurálás–RUN–STOP–
 a pontos RUN-megerősítést, a konfigurálatlan indítás tiltását, a konfigurált interlock
 határ alatti és pontos határértékű esetét, valamint a globális safe STOP
 állapotszinkronját. Külön teszt igazolja a B csatorna parancsutótagjait.
+Az NI-engedélyezési regresszió ellenőrzi a kezelői hardverengedély → NI fizikai
+kimenet engedély → eszközkapcsolódás sorrendet, valamint azt, hogy safe-state és
+normál hardveres leállítás után egyik engedély sem marad érvényes.
 
 A mérési pumpaindítás tesztje ellenőrzi a köpenypumpa `CONST FLOW → RUN`, a stabil
 20 bar többletnél még a teljes köpenycél előtt engedett besajtoló `RUN`, majd a

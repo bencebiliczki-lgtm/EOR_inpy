@@ -146,6 +146,20 @@ from eor_control.simulators import (
 )
 from eor_control.timezone import format_hungarian_time
 
+
+def _authorize_physical_hardware(
+    devices: DeviceControlService,
+    daq: NidaqmxDataAcquisition,
+    *,
+    valve_output_enabled: bool,
+    hardware_confirmation: str,
+) -> None:
+    """Preserve the two-step operator then NI-output authorization order."""
+    devices.authorize_hardware(hardware_confirmation)
+    if valve_output_enabled:
+        daq.authorize_output(NidaqmxDataAcquisition.HARDWARE_CONFIRMATION)
+
+
 LIGHT_STYLESHEET = """
 QMainWindow, QWidget { background: #f5f7fa; color: #1f2933; }
 QLabel { background: transparent; }
@@ -6947,8 +6961,32 @@ class DashboardWindow(QMainWindow):
     def _reconnect_active_mode(self) -> None:
         try:
             if self._devices.status.mode is RunMode.HARDWARE:
-                self._devices.authorize_hardware(
-                    DeviceControlService.HARDWARE_CONFIRMATION
+                confirmation, accepted = QInputDialog.getText(
+                    self,
+                    "Fizikai hardver újraaktiválása",
+                    "A hardvermód és az NI fizikai kimenet ismételt "
+                    "engedélyezéséhez írd be pontosan:\n\n"
+                    f"{DeviceControlService.HARDWARE_CONFIRMATION}",
+                )
+                if not accepted:
+                    self._set_all_connections(
+                        "LEVÁLASZTVA — ÚJRAAKTIVÁLÁS SZÜKSÉGES",
+                        ok=None,
+                    )
+                    self._refresh_state()
+                    return
+                if (
+                    self._active_hardware_configuration is None
+                    or self._hardware_daq is None
+                ):
+                    raise RuntimeError("az aktív NI hardverkonfiguráció hiányzik")
+                _authorize_physical_hardware(
+                    self._devices,
+                    self._hardware_daq,
+                    valve_output_enabled=(
+                        self._active_hardware_configuration.valve_output_enabled
+                    ),
+                    hardware_confirmation=confirmation,
                 )
                 if self._pump_control is not None:
                     self._pump_control.authorize(PumpControlService.AUTHORIZATION)
@@ -7344,8 +7382,6 @@ class DashboardWindow(QMainWindow):
             configuration.ni_config(),
             self._diagnostics,
         )
-        if configuration.valve_output_enabled:
-            daq.authorize_output(NidaqmxDataAcquisition.HARDWARE_CONFIRMATION)
         actuator = AnalogValveActuator(
             daq,
             voltage_at_zero_percent=configuration.valve_zero_percent_voltage,
@@ -7411,7 +7447,12 @@ class DashboardWindow(QMainWindow):
             mode=RunMode.HARDWARE,
             diagnostics=self._diagnostics,
         )
-        new_devices.authorize_hardware(DeviceControlService.HARDWARE_CONFIRMATION)
+        _authorize_physical_hardware(
+            new_devices,
+            daq,
+            valve_output_enabled=configuration.valve_output_enabled,
+            hardware_confirmation=DeviceControlService.HARDWARE_CONFIRMATION,
+        )
         pump_control = PumpControlService(
             jacket_pump=jacket,
             injection_pump=injection,
@@ -7767,7 +7808,20 @@ class DashboardWindow(QMainWindow):
                 )
                 if not accepted:
                     return
-                self._devices.authorize_hardware(confirmation)
+                if (
+                    self._active_hardware_configuration is not None
+                    and self._hardware_daq is not None
+                ):
+                    _authorize_physical_hardware(
+                        self._devices,
+                        self._hardware_daq,
+                        valve_output_enabled=(
+                            self._active_hardware_configuration.valve_output_enabled
+                        ),
+                        hardware_confirmation=confirmation,
+                    )
+                else:
+                    self._devices.authorize_hardware(confirmation)
                 if self._pump_control is not None:
                     self._pump_control.authorize(confirmation)
             self._devices.connect()
@@ -8614,7 +8668,13 @@ class DashboardWindow(QMainWindow):
             "Válasszon projektet és mérési szakaszt." if not project_ok else "",
         )
 
-        ready = self._devices.status.state is ApplicationState.READY
+        ready = (
+            self._devices.status.state is ApplicationState.READY
+            and (
+                self._run_mode is RunMode.SIMULATION
+                or self._devices.status.hardware_authorized
+            )
+        )
         add(
             "state",
             "Rendszerállapot",
@@ -9269,6 +9329,7 @@ class DashboardWindow(QMainWindow):
                 self._hardware_connection_result is not None
                 and self._hardware_connection_result.all_successful
                 and project_hardware_matches
+                and self._devices.status.hardware_authorized
             )
         )
         can_start = (
@@ -9292,6 +9353,15 @@ class DashboardWindow(QMainWindow):
             self._start_button.setToolTip(
                 "A projekt eszközprofilja megváltozott. Aktiválja újra a "
                 "projekthez hozzáadott hardvereket."
+            )
+        elif (
+            self._run_mode is RunMode.HARDWARE
+            and not self._devices.status.hardware_authorized
+        ):
+            self._start_button.setToolTip(
+                "A biztonságos leállítás visszavonta az NI fizikai kimenet "
+                "engedélyét. Aktiválja újra a hardvermódot az "
+                "Eszközbeállításokban."
             )
         elif not connections_ready:
             self._start_button.setToolTip(

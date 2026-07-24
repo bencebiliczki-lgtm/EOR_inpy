@@ -51,6 +51,45 @@ def test_hardware_mode_requires_exact_confirmation() -> None:
     assert control.status.hardware_authorized
 
 
+class OutputAuthorizationAwareDaq(SimulatedDataAcquisition):
+    physical_output_required = True
+    output_authorized = False
+
+    def authorize_output(self) -> None:
+        self.output_authorized = True
+
+    def set_safe_state(self) -> None:
+        super().set_safe_state()
+        self.output_authorized = False
+
+
+def test_hardware_connect_requires_ni_output_authorization_and_stop_revokes_both() -> None:
+    jacket = SimulatedPump()
+    injection = SimulatedPump()
+    daq = OutputAuthorizationAwareDaq()
+    control = DeviceControlService(
+        jacket_pump=jacket,
+        injection_pump=injection,
+        daq=daq,
+        mode=RunMode.HARDWARE,
+    )
+    control.authorize_hardware(DeviceControlService.HARDWARE_CONFIRMATION)
+
+    with pytest.raises(PermissionError, match="NI physical output"):
+        control.connect()
+
+    daq.authorize_output()
+    control.connect()
+    control.start()
+    control.stop()
+
+    assert control.status.state is ApplicationState.READY
+    assert not control.status.hardware_authorized
+    assert not daq.output_authorized
+    with pytest.raises(PermissionError, match="explicit operator"):
+        control.start()
+
+
 def test_emergency_stop_is_latched_until_acknowledged() -> None:
     control, jacket, injection, daq = service()
     control.connect()
