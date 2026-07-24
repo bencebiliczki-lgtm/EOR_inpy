@@ -118,6 +118,17 @@ túllépést. A szűrt érték a PID, kijelzés, grafikon és céltúllövési f
 bemenete. A túl gyakori irányváltás `VALVE_OSCILLATION`
 runtime hibát és reteszelt safe-state útvonalat vált ki.
 
+A szelep fizikai skálája `0% = zárt`, `100% = nyitott`; a nagyobb nyitás
+csökkenti a besajtolási nyomást. Emiatt az alkalmazás alapértelmezett PID
+hatásiránya `REVERSE`. A korábban tárolt `DIRECT` alapértéket a beállításmigráció
+egyszer `REVERSE` értékre állítja, miközben a névvel mentett PID-profilokat nem
+módosítja. A kalibrációs végpontokat ezzel együtt nem szabad megfordítani.
+
+A 20 baros köpeny–besajtolási különbség csak az indítási felfutás feltétele.
+Ettől független, folyamatos interlock, hogy a besajtolónyomás nem lehet magasabb
+a köpenynyomásnál; megsértése `INJECTION_PRESSURE_ABOVE_JACKET` hibakóddal
+reteszelt teljes safe-state-et kér.
+
 ## Kötelező tesztek
 
 Minden interlockhoz tartozzon határérték alatti, pontosan határértékű, határérték feletti, hibás adat és kapcsolatvesztési teszt. Biztonsági teszt hibája blokkolja a kiadást.

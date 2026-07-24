@@ -201,6 +201,10 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   köpeny–besajtolási nyomáskülönbség stabil meglétének ellenőrzése.
 - A szelep automata és kézi módban működhet.
 - Automata módban a szabályozási forrás választható legyen: besajtoló pumpa nyomása vagy vonali nyomásmérő.
+- A fizikai szelepskála jelentése `0% = teljesen zárt`, `100% = teljesen nyitott`.
+  Mivel a nagyobb szelepnyitás csökkenti a besajtolási nyomást, az automatikus
+  nyomásszabályozás alapértelmezett hatásiránya `REVERSE`: a célérték alatti
+  nyomás záró, a célérték feletti nyomás nyitó beavatkozást kér.
 - A PID paraméterei módosíthatók és névvel menthető profilokba rendezhetők.
 - A részletes PID-hangolás és a felügyelt manuális hardvervezérlés csak Developer
   módban jelenhet meg; a normál kezelői nézet az üzemi műveletekre korlátozódjon.

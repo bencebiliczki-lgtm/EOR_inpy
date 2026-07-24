@@ -30,7 +30,17 @@ def snapshot(
 
 
 def controller(parameters: PidParameters | None = None) -> ValveController:
-    return ValveController(PidController(parameters or PidParameters(1.0, 0.0, 0.0)))
+    return ValveController(
+        PidController(
+            parameters
+            or PidParameters(
+                1.0,
+                0.0,
+                0.0,
+                direction=ControlDirection.DIRECT,
+            )
+        )
+    )
 
 
 def test_manual_mode_passes_validated_percentage() -> None:
@@ -93,9 +103,32 @@ def test_reverse_direction_inverts_control_action() -> None:
     assert command.output_percent == pytest.approx(20.0)
 
 
+def test_default_pid_direction_matches_opening_valve_pressure_response() -> None:
+    pid = PidController(PidParameters(1.0, 0.0, 0.0))
+    pid.reset(output_percent=50.0)
+
+    below_setpoint = pid.calculate(
+        setpoint=100.0, measurement=90.0, dt_seconds=1.0
+    )
+    pid.reset(output_percent=50.0)
+    above_setpoint = pid.calculate(
+        setpoint=100.0, measurement=110.0, dt_seconds=1.0
+    )
+
+    assert below_setpoint < 50.0  # close the valve to raise pressure
+    assert above_setpoint > 50.0  # open the valve to lower pressure
+
+
 def test_output_is_limited_and_integral_does_not_wind_up() -> None:
     pid = PidController(
-        PidParameters(10.0, 5.0, 0.0, output_min_percent=0.0, output_max_percent=50.0)
+        PidParameters(
+            10.0,
+            5.0,
+            0.0,
+            output_min_percent=0.0,
+            output_max_percent=50.0,
+            direction=ControlDirection.DIRECT,
+        )
     )
 
     for _ in range(100):
@@ -155,7 +188,13 @@ def test_pid_deadband_holds_output_and_integrator() -> None:
 
 def test_pid_output_rate_limit_is_time_based() -> None:
     pid = PidController(
-        PidParameters(10.0, 0.0, 0.0, maximum_output_rate_percent_per_second=5.0)
+        PidParameters(
+            10.0,
+            0.0,
+            0.0,
+            maximum_output_rate_percent_per_second=5.0,
+            direction=ControlDirection.DIRECT,
+        )
     )
 
     assert pid.calculate(setpoint=100.0, measurement=0.0, dt_seconds=0.2) == 1.0
@@ -163,7 +202,15 @@ def test_pid_output_rate_limit_is_time_based() -> None:
 
 
 def test_pid_filters_control_measurement() -> None:
-    pid = PidController(PidParameters(1.0, 0.0, 0.0, measurement_filter_alpha=0.5))
+    pid = PidController(
+        PidParameters(
+            1.0,
+            0.0,
+            0.0,
+            measurement_filter_alpha=0.5,
+            direction=ControlDirection.DIRECT,
+        )
+    )
 
     assert pid.calculate(setpoint=100.0, measurement=100.0, dt_seconds=1.0) == 0.0
     assert pid.calculate(setpoint=100.0, measurement=80.0, dt_seconds=1.0) == 10.0
@@ -179,6 +226,7 @@ def test_pid_raises_latched_style_oscillation_fault_after_repeated_reversals() -
             reversal_deadband_percent=0.0,
             maximum_reversals=2,
             reversal_window_seconds=10.0,
+            direction=ControlDirection.DIRECT,
         )
     )
     pid.calculate(setpoint=50.0, measurement=40.0, dt_seconds=1.0)

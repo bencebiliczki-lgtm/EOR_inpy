@@ -1459,6 +1459,27 @@ def test_pid_profile_can_be_saved_loaded_overwritten_and_deleted(
     restored.close()
 
 
+def test_legacy_direct_pid_default_is_migrated_to_reverse_once(
+    tmp_path: Path,
+) -> None:
+    application()
+    settings = QSettings(
+        str(tmp_path / "legacy-pid.ini"), QSettings.Format.IniFormat
+    )
+    settings.setValue("pid/direction", "direct")
+
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        tmp_path / "projects.sqlite3",
+        settings=settings,
+    )
+
+    assert window._direction.currentData() == "reverse"
+    assert settings.value("pid/direction") == "reverse"
+    assert int(settings.value("pid/valve_direction_model_version")) == 1
+    window.close()
+
+
 def test_developer_can_switch_back_to_non_persistent_simulation(tmp_path: Path) -> None:
     application()
     settings = QSettings(str(tmp_path / "simulation.ini"), QSettings.Format.IniFormat)
@@ -2045,7 +2066,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert measurement_tabs.tabText(1) == "Teljes mérés"
     assert isinstance(measurement_tabs.widget(1), MeasurementHistoryView)
     configuration = window._current_configuration()
-    assert configuration["pid"]["direction"] == "direct"
+    assert configuration["pid"]["direction"] == "reverse"
     window._apply_pid()
     window._devices.start()
     window._runtime.start(window._runtime_settings())
@@ -2335,6 +2356,14 @@ def test_dashboard_marks_warning_and_critical_alarms_on_graph(
     assert len(window._alarm_points) == 2
     assert "KRITIKUS" in str(window._alarm_points[-1]["data"])
     assert "nyomáshatár túllépve" in str(window._alarm_points[-1]["data"])
+    inverted_pressure_record = replace(
+        record,
+        safety_reasons=("injection pressure exceeds jacket pressure",),
+    )
+    window._handle_cycle(ControlCycleResult(inverted_pressure_record, command))
+    assert "INJECTION_PRESSURE_ABOVE_JACKET" in str(
+        window._alarm_points[-1]["data"]
+    )
     window._reset_measurement_dashboard()
     assert window._alarm_points == []
     window.close()

@@ -5741,8 +5741,8 @@ class DashboardWindow(QMainWindow):
         self._pid_max_reversals.setRange(1, 100)
         self._pid_max_reversals.setValue(6)
         self._direction = QComboBox()
-        self._direction.addItem("Közvetlen", ControlDirection.DIRECT)
         self._direction.addItem("Fordított", ControlDirection.REVERSE)
+        self._direction.addItem("Közvetlen", ControlDirection.DIRECT)
         self._loading_pid_profile = False
         self._pid_profile = QComboBox()
         self._pid_profile.setObjectName("pid_profile_selector")
@@ -7795,6 +7795,16 @@ class DashboardWindow(QMainWindow):
         )
 
     def _restore_control_settings(self) -> None:
+        # Version 1 records the verified physical relationship:
+        # 0% = closed, 100% = open, therefore the pressure PID is reverse acting.
+        # Migrate the previously shipped DIRECT default once without modifying
+        # separately saved PID profiles.
+        if self._user_settings.value("pid/valve_direction_model_version") is None:
+            self._user_settings.setValue(
+                "pid/direction", ControlDirection.REVERSE.value
+            )
+            self._user_settings.setValue("pid/valve_direction_model_version", 1)
+            self._user_settings.sync()
         combo_settings = (
             (self._mode, "control/mode"),
             (self._source, "control/source"),

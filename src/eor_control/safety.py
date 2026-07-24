@@ -117,7 +117,10 @@ class SafetyMonitor:
         margin = snapshot.jacket_pump.pressure_bar - snapshot.injection_pump.pressure_bar
         if margin < 0.0:
             reasons.append("injection pressure exceeds jacket pressure")
-        if enforce_minimum_margin and margin < self._limits.minimum_jacket_margin_bar:
+        elif (
+            enforce_minimum_margin
+            and margin < self._limits.minimum_jacket_margin_bar
+        ):
             reasons.append("jacket pressure margin is too low")
         if reasons:
             self._latched_reasons = tuple(dict.fromkeys((*self._latched_reasons, *reasons)))

@@ -60,6 +60,21 @@ def test_jacket_pressure_buildup_can_temporarily_ignore_only_margin() -> None:
     assert "jacket pressure limit exceeded" in overpressure.reasons
 
 
+def test_injection_pressure_must_never_exceed_jacket_pressure() -> None:
+    decision = monitor().evaluate(
+        snapshot(99.9, 100.0), enforce_minimum_margin=False
+    )
+
+    assert not decision.safe
+    assert decision.reasons == ("injection pressure exceeds jacket pressure",)
+
+
+def test_equal_pump_pressures_are_safe_when_startup_margin_is_not_enforced() -> None:
+    assert monitor().evaluate(
+        snapshot(100.0, 100.0), enforce_minimum_margin=False
+    ).safe
+
+
 def test_configured_margin_may_be_below_twenty_bar() -> None:
     safety_monitor = SafetyMonitor(SafetyLimits(400.0, 350.0, 50.0, 10.0))
 

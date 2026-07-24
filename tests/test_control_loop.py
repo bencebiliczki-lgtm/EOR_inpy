@@ -105,7 +105,7 @@ def test_automatic_cycle_uses_calibrated_line_pressure() -> None:
     )
 
     assert result.record.snapshot.line_pressure_bar == pytest.approx(100.0)
-    assert actuator.output_percent == pytest.approx(20.0)
+    assert actuator.output_percent == pytest.approx(0.0)
 
 
 def test_runtime_allows_fixed_jacket_hold_below_startup_margin() -> None:

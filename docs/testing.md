@@ -7,7 +7,8 @@
 - DASNET keretképzés és válaszfeldolgozás rögzített mintákból;
 - pumpa- és NI-szimulátorok;
 - összes biztonsági interlock;
-- PID korlátozás, anti-windup és kézi/automata váltás;
+- PID korlátozás, anti-windup, kézi/automata váltás és a fizikai szelephez
+  tartozó fordított hatásirány (alacsony nyomásnál zárás, magas nyomásnál nyitás);
 - CSV séma, időbélyeg és tizedesformátum;
 - NAS-kiesés és helyi várólista;
 - konfiguráció migrációja.

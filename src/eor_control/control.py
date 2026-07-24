@@ -29,7 +29,10 @@ class PidParameters:
     derivative_gain: float
     output_min_percent: float = 0.0
     output_max_percent: float = 100.0
-    direction: ControlDirection = ControlDirection.DIRECT
+    # The physical valve uses 0% = closed and 100% = open. Increasing the
+    # opening lowers injection pressure, so the safe application default is
+    # reverse acting.
+    direction: ControlDirection = ControlDirection.REVERSE
     deadband_bar: float = 0.0
     maximum_output_rate_percent_per_second: float = 1000.0
     measurement_filter_alpha: float = 1.0
