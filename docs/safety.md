@@ -12,9 +12,11 @@ nyomáskülönbség ellenőrzése van függőben; a besajtolópumpa ekkor még n
 Nyomás-adatminőségi hiba, kapcsolatvesztés, nem véges adat vagy bármely nyomáshatár
 túllépése azonnal megszakítja az indítást. A cél-nyomásnál a köpenypumpa STOP után
 állandó nyomástartásra vált. A szükséges nyomástöbblet nélkül a besajtolópumpa nem
-kaphat `RUN` parancsot, és annak felfutása közben a nyomástöbblet elvesztése
-mindkét pumpa leállítását okozza. A mérési adatrögzítés csak mindkét kezdőnyomás
-elérése után indulhat.
+kaphat `RUN` parancsot. Sikeres `RUN` után a nyomástöbblet már nem safety
+interlock: a köpenypumpa a megadott fix nyomáscélt tartja, miközben a különbség
+csak tájékoztató adat. A saját pumpanyomás-határok, adatminőség-, kapcsolat-,
+vonali- és differenciálnyomás-védelmek változatlanul aktívak. A mérési
+adatrögzítés csak mindkét kezdőnyomás elérése után indulhat.
 
 A `FLOW` és `VOLA` lassú kijelzési mezők külön frissességet kapnak. Ezek önálló
 elavulása nem írhatja felül a friss pumpanyomás biztonsági minőségét; a rendszer
@@ -32,6 +34,12 @@ engedélyezését, és mindkettőnek meg kell lennie a hardverkapcsolódás és 
 indítása előtt. Az NI `set_safe_state()` visszavonja a kimeneti engedélyt; a
 felső szint ilyenkor a hardvermód-engedélyt is érvényteleníti, ezért fél-
 engedélyezett `READY` állapotból nem indulhat új mérés.
+
+A telemetria minőségromlásához tartozó safety esemény kódja a UI riasztásában
+és a diagnosztikai naplóban azonos. A teljes safe-state minden részlépése
+(köpenypumpa STOP, besajtolópumpa STOP, NI szelep safe-state) önálló
+`SAFETY_ACTION` eseményt és `OK` vagy `FAILED` eredményt kap. Egy részlépés
+hibája nem akadályozhatja meg a többi biztonsági művelet megkísérlését.
 
 ## Minimális interlockok
 

@@ -5,6 +5,7 @@ from enum import StrEnum
 
 class DataQuality(StrEnum):
     GOOD = "good"
+    INVALID = "invalid"
     OUT_OF_RANGE = "out_of_range"
     STALE = "stale"
     DISCONNECTED = "disconnected"

@@ -279,7 +279,7 @@ class PumpControlService:
         polling_interval_seconds: float = 0.25,
         margin_stability_seconds: float = 0.0,
     ) -> None:
-        """Build a stable jacket margin, then ramp both pumps to their targets."""
+        """Use the startup margin once, then hold the fixed jacket target."""
         self._require_authorized()
         if confirmation != self.START_MEASUREMENT_CONFIRMATION:
             raise PermissionError("measurement pump-start confirmation did not match")
@@ -387,15 +387,6 @@ class PumpControlService:
             while True:
                 require_application_safe()
                 statuses = self.statuses()
-                margin = (
-                    statuses[PumpRole.JACKET].pressure_bar
-                    - statuses[PumpRole.INJECTION].pressure_bar
-                )
-                if margin < self._minimum_margin:
-                    raise PermissionError(
-                        f"jacket pressure margin fell to {margin:.2f} bar; "
-                        f"at least {self._minimum_margin:.2f} bar is required"
-                    )
                 jacket_pressure = statuses[PumpRole.JACKET].pressure_bar
                 injection_pressure = statuses[PumpRole.INJECTION].pressure_bar
                 if (

@@ -1,6 +1,13 @@
+import os
 from pathlib import Path
+from time import time
 
-from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
+from eor_control.diagnostics import (
+    STRUCTURED_EVENT_FIELDS,
+    DiagnosticCategory,
+    DiagnosticLogger,
+    LogRetentionSettings,
+)
 
 
 def test_disabled_logger_does_not_record_or_create_file(tmp_path: Path) -> None:
@@ -73,3 +80,112 @@ def test_hardware_events_are_written_to_separate_file(tmp_path: Path) -> None:
     assert ">2.0 V</td>" in hardware_log
     assert "inventory complete" not in hardware_log
     assert hardware_log.count('class="log-event') == 2
+
+
+def test_structured_event_contains_required_fields_and_context(tmp_path: Path) -> None:
+    logger = DiagnosticLogger(tmp_path / "application.html")
+    logger.configure(enabled=True, categories=DiagnosticCategory)
+    logger.set_context_provider(
+        lambda: {"measurement_id": "measurement-42", "section_id": 7}
+    )
+
+    logger.emit_event(
+        DiagnosticCategory.JACKET_PUMP,
+        "TELEMETRY_QUALITY_CHANGED",
+        fields={
+            "device": "jacket_pump",
+            "field": "pressure",
+            "previous_quality": "good",
+            "new_quality": "stale",
+            "age_ms": 2476,
+            "stale_limit_ms": 2000,
+        },
+    )
+
+    event = logger.events_after(0)[0]
+    fields = dict(event.fields)
+    assert event.event_id == "TELEMETRY_QUALITY_CHANGED"
+    assert fields["measurement_id"] == "measurement-42"
+    assert fields["section_id"] == "7"
+    assert set(STRUCTURED_EVENT_FIELDS).issubset(fields)
+    assert fields["event_id"] == "TELEMETRY_QUALITY_CHANGED"
+    assert "timestamp" in fields
+    assert "monotonic_seconds" in fields
+    assert "previous_quality=good" in event.message
+    assert "new_quality=stale" in event.message
+
+
+def test_cleanup_only_deletes_expired_managed_inactive_unlocked_logs(
+    tmp_path: Path,
+) -> None:
+    active = tmp_path / "application.html"
+    hardware = tmp_path / "hardware_communication.html"
+    logger = DiagnosticLogger(active, hardware_path=hardware)
+    logger.configure(enabled=True, categories=DiagnosticCategory)
+    logger.emit(DiagnosticCategory.SYSTEM, "STATE", "active")
+    logger.emit(DiagnosticCategory.JACKET_PUMP, "RX", "active hardware")
+    expired = tmp_path / "application-20260101-000000-deadbeef.html"
+    expired.write_text("expired", encoding="utf-8")
+    locked = tmp_path / "hardware_communication-20260101-000000-locked.html"
+    locked.write_text("locked", encoding="utf-8")
+    locked.with_name(locked.name + ".lock").write_text("", encoding="utf-8")
+    raw_csv = tmp_path / "measurement-raw.csv"
+    raw_csv.write_text("must remain", encoding="utf-8")
+    active_measurement = tmp_path / "measurement-active.html"
+    active_measurement.write_text("open measurement", encoding="utf-8")
+    logger.set_protected_log_paths([active_measurement])
+    old = time() - 40 * 86400
+    os.utime(expired, (old, old))
+    os.utime(locked, (old, old))
+    os.utime(active_measurement, (old, old))
+    logger.configure_retention(
+        LogRetentionSettings(
+            retention_days=30,
+            compression_enabled=False,
+        )
+    )
+
+    result = logger.cleanup_logs()
+
+    assert result.deleted_files == 1
+    assert not expired.exists()
+    assert active.exists()
+    assert hardware.exists()
+    assert locked.exists()
+    assert raw_csv.exists()
+    assert active_measurement.exists()
+
+
+def test_cleanup_compresses_closed_logs_and_reports_directory_size(
+    tmp_path: Path,
+) -> None:
+    logger = DiagnosticLogger(tmp_path / "application.html")
+    logger.configure(enabled=True, categories=DiagnosticCategory)
+    closed = tmp_path / "application-20260724-100000-cafebabe.html"
+    closed.write_text("closed log" * 100, encoding="utf-8")
+
+    result = logger.cleanup_logs()
+
+    assert result.compressed_files == 1
+    assert not closed.exists()
+    assert closed.with_suffix(".html.gz").exists()
+    assert result.remaining_bytes == logger.directory_size_bytes
+
+
+def test_active_log_rotates_before_append_when_size_limit_is_reached(
+    tmp_path: Path,
+) -> None:
+    active = tmp_path / "application.html"
+    active.write_bytes(b"x" * 1024 * 1024)
+    logger = DiagnosticLogger(active)
+    logger.configure(enabled=True, categories=DiagnosticCategory)
+    logger.configure_retention(
+        LogRetentionSettings(maximum_file_size_mb=1)
+    )
+
+    logger.emit(DiagnosticCategory.SYSTEM, "STATE", "after rotation")
+
+    rotated = tuple(tmp_path.glob("application-*.html"))
+    assert len(rotated) == 1
+    assert rotated[0].stat().st_size == 1024 * 1024
+    assert "after rotation" in active.read_text(encoding="utf-8")

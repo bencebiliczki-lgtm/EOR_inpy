@@ -107,6 +107,19 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   az NI-kimenet engedélye jöjjön létre, és csak ezután indulhat az
   eszközkapcsolódás. Safe-state vagy normál mérésleállítás mindkét engedélyt
   érvénytelenítse; új méréshez ismételt, explicit hardvermód-aktiválás szükséges.
+- A pumpatelemetria minden mezőjének (`pressure`, `flow`, `volume`, `status`)
+  minőségátmenete külön, strukturált diagnosztikai esemény legyen. A napló
+  tartalmazza a mérés- és szakaszazonosítót, az előző/új minőséget, az adat
+  korát és STALE-határát, az utolsó sikeres időbélyeget és parancsidőt, valamint
+  az aktivált safety szabályt, stratégiát, műveletet és eredményt. Az első
+  átmenet és a helyreállás mindig naplózandó; tartós hibánál ismétlési
+  összefoglaló használható ciklusonkénti azonos esemény helyett.
+- A diagnosztikai naplók napi vagy méretalapú rotációja, legalább 30 napos
+  alapértelmezett megőrzése és opcionális gzip-tömörítése legyen beállítható.
+  A tisztítás indításkor és naponta háttérfeladatban fusson. Csak az ismert
+  alkalmazás-, hardverkommunikációs és mérési diagnosztikai naplóminták
+  kezelhetők; az aktív, megjelölt/zárolt vagy nyitott méréshez tartozó fájl,
+  továbbá CSV, Excel és SQLite adat nem törölhető.
 - Aktív HARDVER + `READY` állapotban a dashboard mérésindítás nélkül is
   folyamatosan jelenítse meg a két pumpa cache-elt nyomását, térfogatáramát,
   maradék térfogatát és telemetriaállapotát, valamint az engedélyezett NI
@@ -132,8 +145,10 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   20 bar köpeny–besajtoló többlet a beállított ideig stabil, induljon el a
   besajtolópumpa is. Ezután mindkét pumpa együtt haladjon a kezdő célértéke felé,
   a köpeny pedig saját célján STOP után váltson állandó nyomástartásra. A
-  nyomástöbbletet minden felügyeleti ciklus ellenőrizze. A PID- és adatrögzítési
-  ciklus csak mindkét kezdőnyomás elérése után kezdődhet.
+  nyomástöbblet kizárólag a besajtolópumpa `RUN` előtti indítási engedélyfeltétel:
+  a `RUN` után és a mérési ciklusban nem kell fenntartani. A köpenypumpa a
+  kezelő által megadott fix nyomáscélt tartsa, ne kövesse a besajtolási nyomást.
+  A PID- és adatrögzítési ciklus csak mindkét kezdőnyomás elérése után kezdődhet.
 - A pumpatelemetria minőségét mezőnként kell nyilvántartani. A nyomás
   biztonságkritikus; elavulása reteszelt hibát okozhat. A FLOW vagy VOLA önálló
   elavulása `DEGRADED` kapcsolatot jelezzen és maradjon látható, de önmagában ne
@@ -182,7 +197,8 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 - A diagnosztikai napló alapértelmezetten legyen engedélyezve.
 - Az élő grafikon a figyelmeztetést sárga, a kritikus riasztást piros ponttal
   jelölje; hover esetén jelenjen meg a magyar idő, szakasz és hibarészlet.
-- Automatikus nyomásfelépítés közben a köpeny- és besajtolási nyomás megengedett különbségének betartása.
+- Automatikus nyomásfelépítéskor a besajtolópumpa indítása előtt a konfigurált
+  köpeny–besajtolási nyomáskülönbség stabil meglétének ellenőrzése.
 - A szelep automata és kézi módban működhet.
 - Automata módban a szabályozási forrás választható legyen: besajtoló pumpa nyomása vagy vonali nyomásmérő.
 - A PID paraméterei módosíthatók és névvel menthető profilokba rendezhetők.

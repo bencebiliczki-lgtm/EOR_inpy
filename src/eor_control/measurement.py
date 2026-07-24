@@ -117,7 +117,7 @@ class MeasurementService:
         control_deadline_missed: bool = False,
         pressure_target_bar: float | None = None,
         use_line_pressure_for_control: bool = False,
-        enforce_minimum_margin: bool = True,
+        enforce_minimum_margin: bool = False,
     ) -> MeasurementRecord:
         jacket, jacket_quality = self._read_pump(self._jacket_pump)
         injection, injection_quality = self._read_pump(self._injection_pump)
@@ -234,8 +234,9 @@ class MeasurementService:
         priority = {
             DataQuality.GOOD: 0,
             DataQuality.STALE: 1,
-            DataQuality.OUT_OF_RANGE: 2,
-            DataQuality.DISCONNECTED: 3,
+            DataQuality.INVALID: 2,
+            DataQuality.OUT_OF_RANGE: 3,
+            DataQuality.DISCONNECTED: 4,
         }
         return max(qualities, key=priority.__getitem__)
 
@@ -288,7 +289,11 @@ class MeasurementService:
     def reset_safety_latch(self, snapshot: MeasurementSnapshot) -> SafetyDecision:
         """Clear the safety latch only when a fresh snapshot is currently safe."""
 
-        return self._safety_monitor.reset(snapshot, operator_acknowledged=True)
+        return self._safety_monitor.reset(
+            snapshot,
+            operator_acknowledged=True,
+            enforce_minimum_margin=False,
+        )
 
     def close(self) -> None:
         try:

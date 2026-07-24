@@ -12,6 +12,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 from typing import cast
+from uuid import uuid4
 
 import pyqtgraph as pg  # type: ignore[import-untyped]
 from PySide6.QtCore import (
@@ -100,7 +101,12 @@ from eor_control.device_testing import (
     configuration_hash,
 )
 from eor_control.devices import DisabledPump
-from eor_control.diagnostics import DiagnosticCategory, DiagnosticEvent, DiagnosticLogger
+from eor_control.diagnostics import (
+    DiagnosticCategory,
+    DiagnosticEvent,
+    DiagnosticLogger,
+    LogRetentionSettings,
+)
 from eor_control.domain import DataQuality, MeasurementRecord, PumpStatus
 from eor_control.hardware import (
     ConnectionTestRegistry,
@@ -3379,9 +3385,61 @@ class LoggingSettingsDialog(ResizableDialog):
             categories_layout.addWidget(checkbox)
             self.category_checks[category] = checkbox
         layout.addWidget(categories_box)
+        retention = logger.retention_settings
+        retention_box = QGroupBox("Szerviz — automatikus naplómegőrzés")
+        retention_form = QFormLayout(retention_box)
+        self.retention_days = QSpinBox()
+        self.retention_days.setObjectName("logging_retention_days")
+        self.retention_days.setRange(1, 3650)
+        self.retention_days.setValue(retention.retention_days)
+        self.measurement_retention_days = QSpinBox()
+        self.measurement_retention_days.setObjectName(
+            "logging_measurement_retention_days"
+        )
+        self.measurement_retention_days.setRange(1, 3650)
+        self.measurement_retention_days.setValue(
+            retention.measurement_retention_days
+        )
+        self.maximum_file_size = QSpinBox()
+        self.maximum_file_size.setObjectName("logging_maximum_file_size_mb")
+        self.maximum_file_size.setRange(1, 2048)
+        self.maximum_file_size.setSuffix(" MiB")
+        self.maximum_file_size.setValue(retention.maximum_file_size_mb)
+        self.maximum_rotated_files = QSpinBox()
+        self.maximum_rotated_files.setObjectName("logging_maximum_rotated_files")
+        self.maximum_rotated_files.setRange(1, 1000)
+        self.maximum_rotated_files.setValue(retention.maximum_rotated_files)
+        self.total_storage_limit = QSpinBox()
+        self.total_storage_limit.setObjectName("logging_total_storage_limit_mb")
+        self.total_storage_limit.setRange(1, 102400)
+        self.total_storage_limit.setSuffix(" MiB")
+        self.total_storage_limit.setValue(retention.total_storage_limit_mb)
+        self.compression_enabled = QCheckBox("Lezárt naplók tömörítése")
+        self.compression_enabled.setObjectName("logging_compression_enabled")
+        self.compression_enabled.setChecked(retention.compression_enabled)
+        self.automatic_cleanup = QCheckBox(
+            "Automatikus tisztítás indításkor és naponta"
+        )
+        self.automatic_cleanup.setObjectName("logging_automatic_cleanup_enabled")
+        self.automatic_cleanup.setChecked(retention.automatic_cleanup_enabled)
+        retention_form.addRow("Alkalmazás- és hardvernaplók:", self.retention_days)
+        retention_form.addRow("Mérési diagnosztikai naplók:", self.measurement_retention_days)
+        retention_form.addRow("Aktív fájl mérethatára:", self.maximum_file_size)
+        retention_form.addRow("Rotált fájlok maximuma:", self.maximum_rotated_files)
+        retention_form.addRow("Összesített tárhelykorlát:", self.total_storage_limit)
+        retention_form.addRow(self.compression_enabled)
+        retention_form.addRow(self.automatic_cleanup)
+        layout.addWidget(retention_box)
         path_label = QLabel(
             f"Alkalmazásnapló: {logger.path}\n"
-            f"Hardverkommunikáció: {logger.hardware_path}"
+            f"Hardverkommunikáció: {logger.hardware_path}\n"
+            f"Naplókönyvtár mérete: {logger.directory_size_bytes / 1024 / 1024:.2f} MiB\n"
+            "Utolsó tisztítás: "
+            + (
+                logger.last_maintenance.summary
+                if logger.last_maintenance is not None
+                else "még nem futott"
+            )
         )
         path_label.setStyleSheet("color:#66788a")
         path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -3404,7 +3462,32 @@ class LoggingSettingsDialog(ResizableDialog):
         self._settings.setValue(
             "logging/categories", [category.value for category in sorted(categories)]
         )
+        retention = LogRetentionSettings(
+            retention_days=self.retention_days.value(),
+            measurement_retention_days=self.measurement_retention_days.value(),
+            maximum_file_size_mb=self.maximum_file_size.value(),
+            maximum_rotated_files=self.maximum_rotated_files.value(),
+            total_storage_limit_mb=self.total_storage_limit.value(),
+            compression_enabled=self.compression_enabled.isChecked(),
+            automatic_cleanup_enabled=self.automatic_cleanup.isChecked(),
+        )
+        self._logger.configure_retention(retention)
+        for key, value in (
+            ("retention_days", retention.retention_days),
+            ("measurement_retention_days", retention.measurement_retention_days),
+            ("maximum_file_size_mb", retention.maximum_file_size_mb),
+            ("maximum_rotated_files", retention.maximum_rotated_files),
+            ("total_storage_limit_mb", retention.total_storage_limit_mb),
+            ("compression_enabled", retention.compression_enabled),
+            (
+                "automatic_cleanup_enabled",
+                retention.automatic_cleanup_enabled,
+            ),
+        ):
+            self._settings.setValue(f"logging/{key}", value)
         self._settings.sync()
+        if retention.automatic_cleanup_enabled:
+            self._logger.cleanup_logs_async()
         self.accept()
 
 
@@ -4552,15 +4635,16 @@ class CalibrationSettingsDialog(ResizableDialog):
             ("Besajtolópumpa maximális nyomása", self.max_injection),
             ("Vonali nyomás maximuma", self.max_line),
             ("Differenciálnyomás maximuma", self.max_delta),
-            ("Köpenynyomás minimális többlete", self.minimum_margin),
+            ("Indítási köpenynyomás minimális többlete", self.minimum_margin),
             ("Célérték maximális túllövése", self.max_overshoot),
         ):
             safety_form.addRow(label, field)
         safety_layout.addWidget(safety_box)
         safety_note = QLabel(
-            "A beállított minimális köpenynyomás-többletet a biztonsági "
-            "felügyelet, az indítás előtti ellenőrzés és a pumpavezérlés "
-            "együttesen érvényesíti."
+            "A minimális köpenynyomás-többlet kizárólag a besajtolópumpa "
+            "indítási engedélyfeltétele. A köpenypumpa a célérték elérése után "
+            "fix CONST PRESS nyomástartásban marad; mérés közben a különbséget "
+            "a program nem szabályozza és nem reteszeli."
         )
         safety_note.setWordWrap(True)
         safety_note.setStyleSheet("padding:8px;color:#8a5a00;font-weight:600")
@@ -4800,6 +4884,8 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             "köpenynyomás-többlet a megadott ideig stabil, "
             "a besajtolópumpa is elindul, és a két pumpa együtt halad a "
             "kezdőértékek felé. A köpeny a célján STOP után nyomástartásra vált. "
+            "Ettől kezdve a 20 bar-os különbséget a program nem tartja fenn: "
+            "a köpenypumpa a megadott fix nyomáscélt tartja. "
             "A két saját pumpahatárt a program RUN előtt a pumpákba írja. A "
             "mérési ciklus csak mindkét kezdőnyomás elérése után indul."
         )
@@ -5264,6 +5350,8 @@ class DashboardWindow(QMainWindow):
         self._measurement_time_origin: float | None = None
         self._last_cycle_result: ControlCycleResult | None = None
         self._last_hardware_status_record: MeasurementRecord | None = None
+        self._diagnostic_measurement_id: str | None = None
+        self._diagnostic_section_id: int | None = None
         self._hardware_status_active = False
         self._hardware_status_generation = 0
         self._preflight_active = False
@@ -5281,6 +5369,20 @@ class DashboardWindow(QMainWindow):
             hardware_path=data_directory / "logs" / "hardware_communication.html",
         )
         self._restore_logging_settings()
+        self._diagnostics.set_context_provider(
+            lambda: {
+                "measurement_id": self._diagnostic_measurement_id,
+                "section_id": self._diagnostic_section_id,
+            }
+        )
+        self._log_maintenance_timer = QTimer(self)
+        self._log_maintenance_timer.setInterval(24 * 60 * 60 * 1000)
+        self._log_maintenance_timer.timeout.connect(
+            self._run_scheduled_log_maintenance
+        )
+        self._log_maintenance_timer.start()
+        if self._diagnostics.retention_settings.automatic_cleanup_enabled:
+            self._diagnostics.cleanup_logs_async()
         self._restore_nas_settings()
         self.setWindowIcon(application_icon())
         self._times: deque[float] = deque(maxlen=6000)
@@ -5438,7 +5540,7 @@ class DashboardWindow(QMainWindow):
             ("Besajtolópumpa", self._injection_label),
             ("Vonali nyomás", self._line_label),
             ("Differenciálnyomás", self._delta_label),
-            ("Köpeny–besajtolás különbség", self._pressure_margin_label),
+            ("Nyomáskülönbség (tájékoztató)", self._pressure_margin_label),
             ("Szelep", self._valve_label),
         )
         self._connection_labels: dict[str, QLabel] = {}
@@ -6000,6 +6102,51 @@ class DashboardWindow(QMainWindow):
             except ValueError:
                 continue
         self._diagnostics.configure(enabled=enabled, categories=categories)
+        defaults = LogRetentionSettings()
+
+        def integer(key: str, fallback: int) -> int:
+            try:
+                value = int(str(self._user_settings.value(f"logging/{key}", fallback)))
+            except (TypeError, ValueError):
+                return fallback
+            return value if value > 0 else fallback
+
+        def boolean(key: str, fallback: bool) -> bool:
+            value = str(
+                self._user_settings.value(
+                    f"logging/{key}", "true" if fallback else "false"
+                )
+            ).lower()
+            return value in {"1", "true", "yes"}
+
+        retention = LogRetentionSettings(
+            retention_days=integer("retention_days", defaults.retention_days),
+            measurement_retention_days=integer(
+                "measurement_retention_days",
+                defaults.measurement_retention_days,
+            ),
+            maximum_file_size_mb=integer(
+                "maximum_file_size_mb", defaults.maximum_file_size_mb
+            ),
+            maximum_rotated_files=integer(
+                "maximum_rotated_files", defaults.maximum_rotated_files
+            ),
+            total_storage_limit_mb=integer(
+                "total_storage_limit_mb", defaults.total_storage_limit_mb
+            ),
+            compression_enabled=boolean(
+                "compression_enabled", defaults.compression_enabled
+            ),
+            automatic_cleanup_enabled=boolean(
+                "automatic_cleanup_enabled",
+                defaults.automatic_cleanup_enabled,
+            ),
+        )
+        self._diagnostics.configure_retention(retention)
+
+    def _run_scheduled_log_maintenance(self) -> None:
+        if self._diagnostics.retention_settings.automatic_cleanup_enabled:
+            self._diagnostics.cleanup_logs_async()
 
     def _open_settings_hub(self, initial_page: str = "devices") -> None:
         if self._runtime.running and initial_page in {
@@ -6652,12 +6799,7 @@ class DashboardWindow(QMainWindow):
         )
         self._pressure_margin_label.setText(f"{margin:.1f} bar")
         self._pressure_margin_label.setStyleSheet(
-            "background:transparent;font-size:20px;font-weight:700;"
-            + (
-                "color:#1b7f3a"
-                if margin >= self._minimum_margin.value()
-                else "color:#9a6700"
-            )
+            "background:transparent;font-size:20px;font-weight:700;color:#66788a"
         )
 
     def _open_logging_settings(self) -> None:
@@ -8509,6 +8651,11 @@ class DashboardWindow(QMainWindow):
         self._refresh_state()
 
     def _complete_measurement_start(self, settings: RuntimeSettings) -> None:
+        self._diagnostic_measurement_id = uuid4().hex
+        section_id = self._stage.currentData()
+        self._diagnostic_section_id = (
+            section_id if isinstance(section_id, int) else None
+        )
         self._control_loop.reset_injected_volume_tracking()
         self._measurement_time_origin = None
         self._last_cycle_result = None
@@ -9063,12 +9210,7 @@ class DashboardWindow(QMainWindow):
         )
         self._pressure_margin_label.setText(f"{margin:.1f} bar")
         self._pressure_margin_label.setStyleSheet(
-            "background:transparent;font-size:20px;font-weight:700;"
-            + (
-                "color:#1b7f3a"
-                if margin >= self._minimum_margin.value()
-                else "color:#b00020"
-            )
+            "background:transparent;font-size:20px;font-weight:700;color:#66788a"
         )
         output = result.command.output_percent
         self._valve_label.setText("SAFE" if output is None else f"{output:.1f} %")
@@ -9100,16 +9242,48 @@ class DashboardWindow(QMainWindow):
         self._flow_plot.setXRange(x_minimum, x_maximum, padding=0.0)
         if result.record.safety_reasons:
             reason = "; ".join(result.record.safety_reasons)
-            self._add_alarm_point(latest, result, "critical", reason)
-            self._set_active_alarm(f"RETESSZELT BIZTONSÁGI HIBA: {reason}")
+            safety_rule = (
+                "INJECTION_PRESSURE_ABOVE_JACKET"
+                if "injection pressure exceeds jacket pressure"
+                in result.record.safety_reasons
+                else (
+                    "PUMP_TELEMETRY_STALE"
+                    if snapshot.quality is DataQuality.STALE
+                    else (
+                        "PUMP_TELEMETRY_INVALID"
+                        if snapshot.quality is DataQuality.INVALID
+                        else "SAFETY_INTERLOCK"
+                    )
+                )
+            )
+            coded_reason = f"[{safety_rule}] {reason}"
+            self._diagnostics.emit_event(
+                DiagnosticCategory.RUNTIME,
+                "SAFETY_RULE_TRIGGERED",
+                fields={
+                    "device": "measurement_control",
+                    "field": "safety",
+                    "previous_quality": DataQuality.GOOD.value,
+                    "new_quality": snapshot.quality.value,
+                    "safety_rule": safety_rule,
+                    "selected_fault_strategy": "FULL_SAFE_STOP",
+                    "action": "request_full_safe_state",
+                    "action_result": "REQUESTED",
+                },
+                level="CRITICAL",
+            )
+            self._add_alarm_point(latest, result, "critical", coded_reason)
+            self._set_active_alarm(
+                f"RETESSZELT BIZTONSÁGI HIBA: {coded_reason}"
+            )
             if self._run_mode is RunMode.HARDWARE:
-                self._handle_critical_hardware_fault(reason)
+                self._handle_critical_hardware_fault(coded_reason)
                 return
             if self._runtime.running:
                 self._runtime.stop()
             if self._devices.status.state is not ApplicationState.FAULT:
                 self._devices.emergency_stop(
-                    f"simulation safety interlock: {reason}"
+                    f"simulation safety interlock: {coded_reason}"
                 )
             self._measurement_writer.complete_current_phase()
             self._start_pending_stage_exports()

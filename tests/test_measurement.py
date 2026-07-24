@@ -123,10 +123,26 @@ def test_simulation_persistence_policy_never_writes_records() -> None:
     assert writer.records == []
 
 
-def test_safety_interlock_requests_safe_state_after_recording() -> None:
+def test_normal_measurement_does_not_enforce_startup_pressure_margin() -> None:
     measurement_service, jacket, injection, daq, writer = service(jacket_pressure=119.0)
 
     record = measurement_service.sample_once(active_stage="water", valve_percent=25.0)
+
+    assert record.safety_reasons == ()
+    assert writer.records == [record]
+    assert not jacket.stop_requested
+    assert not injection.stop_requested
+    assert not daq.safe_state_requested
+
+
+def test_explicit_startup_margin_interlock_requests_safe_state() -> None:
+    measurement_service, jacket, injection, daq, writer = service(jacket_pressure=119.0)
+
+    record = measurement_service.sample_once(
+        active_stage="startup",
+        valve_percent=25.0,
+        enforce_minimum_margin=True,
+    )
 
     assert record.safety_reasons == ("jacket pressure margin is too low",)
     assert writer.records == [record]

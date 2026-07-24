@@ -107,7 +107,7 @@ class DeviceControlService:
     def stop(self) -> None:
         if self._state not in (ApplicationState.READY, ApplicationState.RUNNING):
             raise RuntimeError("devices can only be stopped from ready or running state")
-        errors = self._request_safe_state()
+        errors = self._request_safe_state("NORMAL_STOP")
         if errors:
             self._fault_reason = "; ".join(errors)
             self._state = ApplicationState.FAULT
@@ -137,7 +137,7 @@ class DeviceControlService:
     def disconnect(self) -> None:
         errors: list[str] = []
         if self._state is ApplicationState.RUNNING:
-            errors.extend(self._request_safe_state())
+            errors.extend(self._request_safe_state("DISCONNECT_WHILE_RUNNING"))
         for label, pump in (
             ("jacket pump", self._jacket_pump),
             ("injection pump", self._injection_pump),
@@ -173,12 +173,12 @@ class DeviceControlService:
             )
 
     def _enter_fault(self, reason: str) -> None:
-        errors = self._request_safe_state()
+        errors = self._request_safe_state(reason)
         details = "; ".join(errors)
         self._fault_reason = f"{reason}; safe-state errors: {details}" if errors else reason
         self._state = ApplicationState.FAULT
 
-    def _request_safe_state(self) -> tuple[str, ...]:
+    def _request_safe_state(self, safety_rule: str) -> tuple[str, ...]:
         errors: list[str] = []
         operations = (
             (
@@ -202,9 +202,21 @@ class DeviceControlService:
                 operation()
             except Exception as error:
                 errors.append(f"{label} failed: {error}")
-                self._log_safe_state(category, label, f"FAILED: {error}", "ERROR")
+                self._log_safe_state(
+                    category,
+                    label,
+                    f"FAILED: {error}",
+                    "ERROR",
+                    safety_rule,
+                )
             else:
-                self._log_safe_state(category, label, "OK", "WARNING")
+                self._log_safe_state(
+                    category,
+                    label,
+                    "OK",
+                    "WARNING",
+                    safety_rule,
+                )
         return tuple(errors)
 
     def _log_safe_state(
@@ -213,11 +225,20 @@ class DeviceControlService:
         label: str,
         result: str,
         level: str,
+        safety_rule: str,
     ) -> None:
         if self._diagnostics is not None:
-            self._diagnostics.emit(
+            self._diagnostics.emit_event(
                 category,
-                "SAFE_STATE",
-                f"{label}: {result}",
+                "SAFETY_ACTION",
+                fields={
+                    "device": category.value,
+                    "field": "control",
+                    "safety_rule": safety_rule,
+                    "selected_fault_strategy": "FULL_SAFE_STOP",
+                    "action": label,
+                    "action_result": result,
+                },
+                direction="SAFE_STATE",
                 level=level,
             )

@@ -115,6 +115,8 @@ class SafetyMonitor:
         ):
             reasons.append("line pressure limit exceeded")
         margin = snapshot.jacket_pump.pressure_bar - snapshot.injection_pump.pressure_bar
+        if margin < 0.0:
+            reasons.append("injection pressure exceeds jacket pressure")
         if enforce_minimum_margin and margin < self._limits.minimum_jacket_margin_bar:
             reasons.append("jacket pressure margin is too low")
         if reasons:
@@ -126,17 +128,27 @@ class SafetyMonitor:
         )
 
     def reset(
-        self, snapshot: MeasurementSnapshot, *, operator_acknowledged: bool
+        self,
+        snapshot: MeasurementSnapshot,
+        *,
+        operator_acknowledged: bool,
+        enforce_minimum_margin: bool = True,
     ) -> SafetyDecision:
         """Clear a latched fault only after acknowledgement and safe precondition checks."""
         if not self._latched_reasons:
-            return self.evaluate(snapshot)
+            return self.evaluate(
+                snapshot,
+                enforce_minimum_margin=enforce_minimum_margin,
+            )
         if not operator_acknowledged:
             return SafetyDecision(False, self._latched_reasons, bool(self._latched_reasons))
 
         previous_reasons = self._latched_reasons
         self._latched_reasons = ()
-        decision = self.evaluate(snapshot)
+        decision = self.evaluate(
+            snapshot,
+            enforce_minimum_margin=enforce_minimum_margin,
+        )
         if decision.safe:
             return decision
 

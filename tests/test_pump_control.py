@@ -251,6 +251,34 @@ def test_measurement_start_rechecks_margin_immediately_before_injection_run() ->
     assert injection.commands[-1] == "STOP"
 
 
+def test_margin_may_fall_after_injection_run_while_jacket_holds_fixed_target() -> None:
+    control, jacket, injection = service()
+    checks = 0
+
+    def safety_check() -> tuple[str, ...]:
+        nonlocal checks
+        checks += 1
+        if checks == 3:
+            jacket.pressure = 120.0
+            injection.pressure = 105.0
+        return ()
+
+    control.start_measurement_pumps(
+        jacket_target_pressure_bar=120.0,
+        jacket_buildup_flow_ml_per_hour=60.0,
+        injection_start_pressure_bar=100.0,
+        injection_target_flow_ml_per_hour=60.0,
+        confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+        startup_safety_check=safety_check,
+    )
+
+    assert jacket.commands[-3:] == ["STOP", "PRESS=120.0", "RUN"]
+    assert injection.commands[-1] == "RUN"
+    assert jacket.pressure - injection.pressure == pytest.approx(15.0)
+    assert control.state(PumpRole.JACKET).mode is PumpOperatingMode.CONSTANT_PRESSURE
+    assert control.state(PumpRole.JACKET).target == pytest.approx(120.0)
+
+
 def test_injection_run_requires_twenty_bar_jacket_margin() -> None:
     control, _, injection = service(jacket_pressure=119.9)
     prepare(control, PumpRole.INJECTION)

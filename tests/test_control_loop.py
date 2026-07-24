@@ -108,7 +108,7 @@ def test_automatic_cycle_uses_calibrated_line_pressure() -> None:
     assert actuator.output_percent == pytest.approx(20.0)
 
 
-def test_interlock_suppresses_output_and_requests_safe_actuator_state() -> None:
+def test_runtime_allows_fixed_jacket_hold_below_startup_margin() -> None:
     control_loop, actuator, writer = loop(jacket_pressure=119.0)
 
     result = control_loop.execute_once(
@@ -119,9 +119,9 @@ def test_interlock_suppresses_output_and_requests_safe_actuator_state() -> None:
     )
 
     assert writer.records == [result.record]
-    assert not result.command.enabled
-    assert actuator.output_percent is None
-    assert actuator.safe_state_requested
+    assert result.command.enabled
+    assert actuator.output_percent == pytest.approx(35.0)
+    assert not actuator.safe_state_requested
 
 
 def test_separate_manual_output_safety_does_not_require_measurement_snapshot() -> None:
@@ -157,7 +157,7 @@ def test_paused_supervision_holds_output_without_persisting() -> None:
     assert writer.records == []
 
 
-def test_paused_supervision_forces_safe_actuator_state_on_fault() -> None:
+def test_paused_supervision_does_not_reapply_startup_margin() -> None:
     control_loop, actuator, writer = loop(jacket_pressure=119.0)
     control_loop.write_manual_output(35.0)
     writer.records.clear()
@@ -169,8 +169,8 @@ def test_paused_supervision_forces_safe_actuator_state_on_fault() -> None:
         setpoint_bar=400.0,
     )
 
-    assert not result.command.enabled
-    assert result.command.reason == "paused measurement safety interlock"
-    assert actuator.output_percent is None
-    assert actuator.safe_state_requested
+    assert result.command.enabled
+    assert result.command.reason == "measurement paused; physical output held"
+    assert actuator.output_percent == pytest.approx(35.0)
+    assert not actuator.safe_state_requested
     assert writer.records == []

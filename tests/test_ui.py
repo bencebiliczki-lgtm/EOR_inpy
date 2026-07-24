@@ -187,6 +187,38 @@ def test_hardware_authorization_precedes_ni_output_authorization() -> None:
     assert calls == ["hardware", "ni_output"]
 
 
+def test_log_retention_service_settings_are_persisted(tmp_path: Path) -> None:
+    application()
+    settings = QSettings(
+        str(tmp_path / "logging.ini"), QSettings.Format.IniFormat
+    )
+    logger = DiagnosticLogger(
+        tmp_path / "logs" / "application.html",
+        hardware_path=tmp_path / "logs" / "hardware_communication.html",
+    )
+    dialog = LoggingSettingsDialog(logger, settings)
+    dialog.retention_days.setValue(45)
+    dialog.measurement_retention_days.setValue(90)
+    dialog.maximum_file_size.setValue(12)
+    dialog.maximum_rotated_files.setValue(18)
+    dialog.total_storage_limit.setValue(512)
+    dialog.compression_enabled.setChecked(False)
+    dialog.automatic_cleanup.setChecked(False)
+
+    dialog._save()
+
+    retention = logger.retention_settings
+    assert retention.retention_days == 45
+    assert retention.measurement_retention_days == 90
+    assert retention.maximum_file_size_mb == 12
+    assert retention.maximum_rotated_files == 18
+    assert retention.total_storage_limit_mb == 512
+    assert not retention.compression_enabled
+    assert not retention.automatic_cleanup_enabled
+    assert int(settings.value("logging/retention_days")) == 45
+    assert int(settings.value("logging/measurement_retention_days")) == 90
+
+
 def test_settings_hub_uses_resizable_left_navigation() -> None:
     application()
     opened: list[str] = []
@@ -1634,8 +1666,10 @@ def test_alarm_close_refuses_unsafe_fresh_measurement(
     assert not window._alarm_label.isHidden()
     assert errors and "továbbra is hibát jelez" in errors[-1]
 
+    application().processEvents()
     injection.pressure_bar = 100.0
     window._alarm_close_button.click()
+    application().processEvents()
 
     assert window._devices.status.state is ApplicationState.READY
     assert window._alarm_label.isHidden()

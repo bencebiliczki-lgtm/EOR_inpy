@@ -163,6 +163,16 @@ Az NI-engedélyezési regresszió ellenőrzi a kezelői hardverengedély → NI 
 kimenet engedély → eszközkapcsolódás sorrendet, valamint azt, hogy safe-state és
 normál hardveres leállítás után egyik engedély sem marad érvényes.
 
+A telemetria-minőség elfogadási tesztjei külön-külön fagyasztják a pressure,
+flow és volume mezőt, ellenőrzik több mező egymást követő STALE átmenetét,
+a parse-hibából származó INVALID állapotot, a GOOD helyreállást, valamint a
+kapcsolatvesztés és újracsatlakozás eseményeit. A safe-state teszt minden
+pumpa- és szelepművelet naplózott eredményét ellenőrzi.
+
+A naplómegőrzési tesztek igazolják a lejárt ismert naplók törlését, a lezárt
+naplók tömörítését, az aktív és zárolt fájlok védelmét, valamint azt, hogy a
+nyers CSV nem kerül az automatikus tisztítás hatókörébe.
+
 A mérési pumpaindítás tesztje ellenőrzi a köpenypumpa `CONST FLOW → RUN`, a stabil
 20 bar többletnél még a teljes köpenycél előtt engedett besajtoló `RUN`, majd a
 köpenycélnál a `STOP → CONST PRESS → RUN` sorrendet, továbbá mindkét dokumentált
@@ -172,6 +182,10 @@ pumpához. Ellenőrzi továbbá a pontos indítási
 megerősítést, a két kezdőnyomás és a tervezett nyomástöbblet kötelező bevitelét,
 a besajtoló kezdőnyomásának kivárását, valamint azt, hogy timeout vagy indulási
 biztonsági hiba esetén egyik pumpa sem marad RUN állapotban.
+Külön regresszió igazolja, hogy a besajtoló sikeres `RUN` parancsa után a
+nyomáskülönbség 20 bar alá esése nem állítja le a pumpákat: a köpeny a megadott
+fix `CONST PRESS` célon marad, a normál és szüneteltetett mérési safety pedig nem
+alkalmazza újra az indítási marginfeltételt.
 A részleges kapcsolati tesztek igazolják, hogy az egyik pumpa vagy NI-bemenet hibája
 mellett a többi eszköz sikeres státusza megmarad, a kapcsolódás és REMOTE módba
 lépés egy műveletként fut, REMOTE-hibánál pedig a port bezáródik. Bezáráskor minden

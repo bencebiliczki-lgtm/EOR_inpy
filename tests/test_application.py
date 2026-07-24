@@ -1,6 +1,9 @@
+from pathlib import Path
+
 import pytest
 
 from eor_control.application import ApplicationState, DeviceControlService, RunMode
+from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
 from eor_control.simulators import SimulatedDataAcquisition, SimulatedPump
 
 
@@ -106,6 +109,33 @@ def test_emergency_stop_is_latched_until_acknowledged() -> None:
 
     control.acknowledge_fault()
     assert control.status.state is ApplicationState.IDLE
+
+
+def test_safe_state_logs_every_action_and_result(tmp_path: Path) -> None:
+    logger = DiagnosticLogger(tmp_path / "application.html")
+    logger.configure(enabled=True, categories=DiagnosticCategory)
+    control = DeviceControlService(
+        jacket_pump=SimulatedPump(),
+        injection_pump=SimulatedPump(),
+        daq=SimulatedDataAcquisition(),
+        mode=RunMode.SIMULATION,
+        diagnostics=logger,
+    )
+    control.connect()
+    control.start()
+
+    control.emergency_stop("PUMP_TELEMETRY_STALE")
+
+    actions = [
+        event
+        for event in logger.events_after(0)
+        if event.event_id == "SAFETY_ACTION"
+    ]
+    assert len(actions) == 3
+    assert {dict(event.fields)["action_result"] for event in actions} == {"OK"}
+    assert {dict(event.fields)["selected_fault_strategy"] for event in actions} == {
+        "FULL_SAFE_STOP"
+    }
 
 
 def test_hardware_authorization_is_cleared_on_disconnect_and_fault_acknowledgement() -> None:

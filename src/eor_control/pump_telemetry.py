@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from math import isfinite
 from threading import Condition, Event, Lock, Thread, current_thread
@@ -8,6 +9,7 @@ from typing import Protocol, TypeVar
 
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
 from eor_control.domain import DataQuality, PumpStatus
+from eor_control.timezone import as_hungarian_time
 
 T = TypeVar("T")
 
@@ -133,6 +135,10 @@ class PollingPump:
         self._connected = False
         self._stop_latched = False
         self._pending_commands = 0
+        self._reported_qualities: dict[str, DataQuality] = {}
+        self._last_command = "NONE"
+        self._last_command_elapsed_ms = 0.0
+        self._field_error_counts: dict[str, int] = {}
 
     def connect(self) -> None:
         with self._condition:
@@ -164,6 +170,7 @@ class PollingPump:
                     f"{self._name} pump initial telemetry failed: {error}"
                 ) from error
             raise TimeoutError(f"{self._name} pump initial telemetry timed out")
+        self._log_connection_event("TELEMETRY_CONNECTION_RESTORED", "SUCCESS")
 
     def read_status(self) -> PumpStatus:
         status, _ = self.read_cached_status()
@@ -216,6 +223,13 @@ class PollingPump:
             errors.get("status"),
             connected=connected,
         )
+        fields = {
+            "pressure": pressure,
+            "flow": flow,
+            "volume": volume,
+            "status": operating_status,
+        }
+        self._log_quality_transitions(fields)
         status = cache.status
         if not connected:
             status = PumpStatus(
@@ -294,6 +308,7 @@ class PollingPump:
             self._connected = False
             self._stop_event.set()
             thread = self._thread
+        self._log_connection_event("TELEMETRY_CONNECTION_LOST", "DISCONNECTED")
         if thread is not None and thread is not current_thread():
             thread.join(self._intervals.startup_timeout_seconds)
         try:
@@ -324,9 +339,9 @@ class PollingPump:
 
     def _poll(self) -> None:
         try:
-            pressure = self._read(self._pump.read_pressure_bar)
+            pressure = self._read("PRESS", self._pump.read_pressure_bar)
             pressure_at = monotonic()
-            self._read(self._pump.read_operating_status)
+            self._read("STATUS", self._pump.read_operating_status)
             status_at = monotonic()
             with self._condition:
                 self._cache = _CachedTelemetry(
@@ -359,15 +374,35 @@ class PollingPump:
                 )
                 if self._stop_event.wait(max(0.0, due - monotonic())):
                     break
+                started = monotonic()
+                lateness = max(0.0, started - due)
+                interval = (
+                    self._intervals.pressure_seconds
+                    if field == "pressure"
+                    else self._intervals.slow_telemetry_seconds
+                )
+                if lateness > interval:
+                    self._log_field_event(
+                        "POLLING_DEADLINE_MISSED",
+                        field,
+                        previous_quality=self._reported_qualities.get(field),
+                        new_quality=self._reported_qualities.get(field),
+                        age_seconds=lateness,
+                        action="poll_field",
+                        action_result="DEADLINE_MISSED",
+                        level="WARNING",
+                    )
                 try:
                     if field == "pressure":
                         self._update(
-                            field, self._read(self._pump.read_pressure_bar)
+                            field,
+                            self._read("PRESS", self._pump.read_pressure_bar),
                         )
                         next_pressure = monotonic() + self._intervals.pressure_seconds
                     elif field == "flow":
                         self._update(
-                            field, self._read(self._pump.read_flow_ml_per_hour)
+                            field,
+                            self._read("FLOW", self._pump.read_flow_ml_per_hour),
                         )
                         next_flow = (
                             monotonic() + self._intervals.slow_telemetry_seconds
@@ -375,13 +410,13 @@ class PollingPump:
                     elif field == "volume":
                         self._update(
                             field,
-                            self._read(self._pump.read_remaining_volume_ml),
+                            self._read("VOLA", self._pump.read_remaining_volume_ml),
                         )
                         next_volume = (
                             monotonic() + self._intervals.slow_telemetry_seconds
                         )
                     else:
-                        self._read(self._pump.read_operating_status)
+                        self._read("STATUS", self._pump.read_operating_status)
                         self._update(field, None)
                         self._log_telemetry_health()
                         next_status = (
@@ -408,8 +443,13 @@ class PollingPump:
                     self._worker_error = error
                     self._connected = False
                 self._condition.notify_all()
+            if not self._stop_event.is_set():
+                self._log_connection_event(
+                    "TELEMETRY_CONNECTION_LOST",
+                    f"FAILED: {type(error).__name__}: {error}",
+                )
 
-    def _read(self, operation: Callable[[], T]) -> T:
+    def _read(self, command: str, operation: Callable[[], T]) -> T:
         # Operator and safety commands have priority over the next scheduled
         # telemetry transaction. An already-running serial read is allowed to
         # finish, then the queued command gets the line before polling resumes.
@@ -418,8 +458,15 @@ class PollingPump:
                 lambda: self._pending_commands == 0
                 or self._stop_event.is_set()
             )
-        with self._command_lock:
-            return operation()
+        started = monotonic()
+        with self._condition:
+            self._last_command = command
+        try:
+            with self._command_lock:
+                return operation()
+        finally:
+            with self._condition:
+                self._last_command_elapsed_ms = (monotonic() - started) * 1000.0
 
     def _update(self, field: str, value: float | None) -> None:
         now = monotonic()
@@ -430,6 +477,7 @@ class PollingPump:
                 return
             status = cache.status
             errors = dict(cache.errors)
+            recovered_error_count = self._field_error_counts.pop(field, 0)
             errors.pop(field, None)
             self._cache = _CachedTelemetry(
                 PumpStatus(
@@ -452,6 +500,17 @@ class PollingPump:
                 tuple(sorted(errors.items())),
             )
             self._condition.notify_all()
+        if recovered_error_count:
+            self._log_field_event(
+                "TELEMETRY_POLLING_RECOVERED",
+                field,
+                previous_quality=self._reported_qualities.get(field),
+                new_quality=DataQuality.GOOD,
+                age_seconds=0.0,
+                action="poll_field",
+                action_result=f"SUCCESS_AFTER_{recovered_error_count}_FAILURES",
+                level="INFO",
+            )
 
     def _record_field_error(self, field: str, error: Exception) -> None:
         with self._condition:
@@ -461,6 +520,8 @@ class PollingPump:
                 self._condition.notify_all()
                 return
             errors = dict(cache.errors)
+            error_count = self._field_error_counts.get(field, 0) + 1
+            self._field_error_counts[field] = error_count
             errors[field] = str(error)
             self._cache = _CachedTelemetry(
                 cache.status,
@@ -471,11 +532,35 @@ class PollingPump:
                 tuple(sorted(errors.items())),
             )
             self._condition.notify_all()
-        self._log(
-            f"{field} telemetry failed; last successful field update retained: "
-            f"{error}",
-            level="WARNING",
+        if error_count == 1 or error_count % 10 == 0:
+            self._log(
+                f"{field} telemetry failed; last successful field update retained; "
+                f"repeat_count={error_count}: {error}",
+                level="WARNING",
+            )
+        event_id = (
+            "TELEMETRY_TIMEOUT"
+            if isinstance(error, TimeoutError) or "timeout" in str(error).lower()
+            else "TELEMETRY_PARSE_FAILED"
         )
+        if error_count == 1 or error_count % 10 == 0:
+            self._log_field_event(
+                event_id,
+                field,
+                previous_quality=self._reported_qualities.get(field),
+                new_quality=(
+                    self._reported_qualities.get(field)
+                    if event_id == "TELEMETRY_TIMEOUT"
+                    else DataQuality.INVALID
+                ),
+                age_seconds=self._field_age(field),
+                action="retain_last_successful_value",
+                action_result=(
+                    f"FAILED: {type(error).__name__}: {error}; "
+                    f"repeat_count={error_count}"
+                ),
+                level="WARNING",
+            )
 
     @staticmethod
     def _field_state(
@@ -489,11 +574,177 @@ class PollingPump:
         age = None if updated_at is None else max(0.0, now - updated_at)
         if not connected:
             quality = DataQuality.DISCONNECTED
+        elif error is not None and "timeout" not in error.lower():
+            quality = DataQuality.INVALID
         elif updated_at is None or age is not None and age > stale_after:
             quality = DataQuality.STALE
         else:
             quality = DataQuality.GOOD
         return TelemetryFieldState(quality, age, updated_at, error)
+
+    def _log_quality_transitions(
+        self, fields: dict[str, TelemetryFieldState]
+    ) -> None:
+        for name, field in fields.items():
+            with self._condition:
+                previous = self._reported_qualities.get(name)
+                if previous is field.quality:
+                    continue
+                self._reported_qualities[name] = field.quality
+            if previous is None and field.quality is DataQuality.GOOD:
+                continue
+            event_id = (
+                "TELEMETRY_QUALITY_RECOVERED"
+                if field.quality is DataQuality.GOOD
+                else (
+                    "TELEMETRY_CONNECTION_LOST"
+                    if field.quality is DataQuality.DISCONNECTED
+                    else "TELEMETRY_QUALITY_CHANGED"
+                )
+            )
+            self._log_field_event(
+                event_id,
+                name,
+                previous_quality=previous,
+                new_quality=field.quality,
+                age_seconds=field.age_seconds,
+                action=(
+                    "resume_fresh_telemetry"
+                    if field.quality is DataQuality.GOOD
+                    else "evaluate_safety_policy"
+                ),
+                action_result="SUCCESS",
+                level=(
+                    "INFO"
+                    if field.quality is DataQuality.GOOD
+                    else "WARNING"
+                ),
+            )
+
+    def _field_age(self, field: str) -> float | None:
+        with self._condition:
+            cache = self._cache
+        if cache is None:
+            return None
+        updated_at = {
+            "pressure": cache.pressure_at,
+            "flow": cache.flow_at,
+            "volume": cache.volume_at,
+            "status": cache.operating_status_at,
+        }.get(field)
+        return None if updated_at is None else max(0.0, monotonic() - updated_at)
+
+    def _stale_limit(self, field: str) -> float:
+        return (
+            self._intervals.pressure_stale_seconds
+            if field == "pressure"
+            else self._intervals.slow_telemetry_stale_seconds
+        )
+
+    def _log_field_event(
+        self,
+        event_id: str,
+        field: str,
+        *,
+        previous_quality: DataQuality | None,
+        new_quality: DataQuality | None,
+        age_seconds: float | None,
+        action: str,
+        action_result: str,
+        level: str,
+    ) -> None:
+        if self._diagnostics is None:
+            return
+        last_success = (
+            "NONE"
+            if age_seconds is None
+            else (
+                as_hungarian_time(
+                    datetime.now(UTC) - timedelta(seconds=age_seconds)
+                ).isoformat()
+            )
+        )
+        safety_rule = (
+            f"{self._name.upper()}_{field.upper()}_"
+            f"{(new_quality or previous_quality or DataQuality.GOOD).value.upper()}"
+        )
+        self._diagnostics.emit_event(
+            self._diagnostic_category,
+            event_id,
+            fields={
+                "device": f"{self._name}_pump",
+                "field": field,
+                "previous_quality": (
+                    previous_quality.value if previous_quality is not None else "UNKNOWN"
+                ),
+                "new_quality": (
+                    new_quality.value if new_quality is not None else "UNKNOWN"
+                ),
+                "age_ms": (
+                    "NONE"
+                    if age_seconds is None
+                    else round(age_seconds * 1000.0, 3)
+                ),
+                "stale_limit_ms": round(self._stale_limit(field) * 1000.0, 3),
+                "last_success_timestamp": last_success,
+                "last_command": self._last_command,
+                "last_command_elapsed_ms": round(
+                    self._last_command_elapsed_ms, 3
+                ),
+                "safety_rule": safety_rule,
+                "selected_fault_strategy": (
+                    "FULL_SAFE_STOP" if field == "pressure" else "DEGRADED_TELEMETRY"
+                ),
+                "action": action,
+                "action_result": action_result,
+            },
+            direction="TELEMETRY",
+            level=level,
+        )
+
+    def _log_connection_event(self, event_id: str, result: str) -> None:
+        if self._diagnostics is None:
+            return
+        self._diagnostics.emit_event(
+            self._diagnostic_category,
+            event_id,
+            fields={
+                "device": f"{self._name}_pump",
+                "field": "connection",
+                "previous_quality": (
+                    "disconnected"
+                    if event_id == "TELEMETRY_CONNECTION_RESTORED"
+                    else "good"
+                ),
+                "new_quality": (
+                    "good"
+                    if event_id == "TELEMETRY_CONNECTION_RESTORED"
+                    else "disconnected"
+                ),
+                "last_command": self._last_command,
+                "last_command_elapsed_ms": round(
+                    self._last_command_elapsed_ms, 3
+                ),
+                "safety_rule": (
+                    "NONE"
+                    if event_id == "TELEMETRY_CONNECTION_RESTORED"
+                    else f"{self._name.upper()}_CONNECTION_LOST"
+                ),
+                "selected_fault_strategy": (
+                    "NONE"
+                    if event_id == "TELEMETRY_CONNECTION_RESTORED"
+                    else "FULL_SAFE_STOP"
+                ),
+                "action": (
+                    "reconnect"
+                    if event_id == "TELEMETRY_CONNECTION_RESTORED"
+                    else "disconnect"
+                ),
+                "action_result": result,
+            },
+            direction="TELEMETRY",
+            level="WARNING",
+        )
 
     def _log_telemetry_health(self) -> None:
         telemetry = self.read_telemetry()
