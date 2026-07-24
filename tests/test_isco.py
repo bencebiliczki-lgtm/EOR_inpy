@@ -175,3 +175,19 @@ def test_non_a_channel_control_commands_receive_channel_suffix() -> None:
         "RUNB",
         "STOPB",
     ]
+
+
+def test_pressure_limit_uses_documented_channel_maxpress_command() -> None:
+    client = ScriptedClient(
+        {
+            "RSVPB": ["READY"],
+            "IDENTIFY": ["MODEL 260D PUMP"],
+            "MAXPRESSB=150": [""],
+        }
+    )
+    pump = IscoPump(client, IscoSerialConfig("COM1", 6, pump_channel="B"))
+    pump.connect()
+
+    pump.set_pressure_limit(150.0)
+
+    assert client.commands[-1] == "MAXPRESSB=150"

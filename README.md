@@ -64,6 +64,10 @@ A Developer mód bekapcsolása után a `Developer` → `Szimulációs mód` kapc
 lehet visszatérni a mentés nélküli szimulációhoz. A váltás leállított mérésnél
 biztonságosan lezárja az élő hardverkapcsolatot. A kapcsoló kikapcsolása az eszközbeállítási
 ablakot nyitja meg; az éles mód továbbra is felderítést és külön megerősítést kér.
+A `Developer` → `Szimuláció és hibateszt…` oldal állítható pumpanyomás-rámpát,
+válaszkésést és saját nyomáshatárokat biztosít. Ugyanitt pumpa-STALE,
+kapcsolatvesztés, üres cilinder, motorhiba és túlnyomás, továbbá NI-jelhiba és
+szelepberagadás is injektálható a normál biztonsági útvonal ellenőrzéséhez.
 
 Első indításkor nyisd meg a `Projekt` → `Projektkezelő…` ablakot, hozz létre egy
 projektet és legalább egy mérési szakaszt, aktiváld a hardvermódot, majd kattints

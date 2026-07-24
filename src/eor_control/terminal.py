@@ -54,7 +54,7 @@ class TerminalApplication:
 
     def __init__(self, output: TextIO) -> None:
         self._output = output
-        self._jacket = SimulatedPump(pressure_bar=120.0)
+        self._jacket = SimulatedPump(pressure_bar=120.0, flow_ml_per_hour=10.0)
         self._injection = SimulatedPump(
             pressure_bar=100.0,
             flow_ml_per_hour=10.0,

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from eor_control.devices import DataAcquisition, Pump
+from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
 
 
 class RunMode(StrEnum):
@@ -36,11 +37,13 @@ class DeviceControlService:
         injection_pump: Pump,
         daq: DataAcquisition,
         mode: RunMode = RunMode.SIMULATION,
+        diagnostics: DiagnosticLogger | None = None,
     ) -> None:
         self._jacket_pump = jacket_pump
         self._injection_pump = injection_pump
         self._daq = daq
         self._mode = mode
+        self._diagnostics = diagnostics
         self._state = ApplicationState.IDLE
         self._fault_reason: str | None = None
         self._hardware_authorized = False
@@ -53,6 +56,18 @@ class DeviceControlService:
             fault_reason=self._fault_reason,
             hardware_authorized=self._hardware_authorized,
         )
+
+    @property
+    def jacket_pump(self) -> Pump:
+        return self._jacket_pump
+
+    @property
+    def injection_pump(self) -> Pump:
+        return self._injection_pump
+
+    @property
+    def data_acquisition(self) -> DataAcquisition:
+        return self._daq
 
     def authorize_hardware(self, confirmation: str) -> None:
         if self._mode is not RunMode.HARDWARE:
@@ -81,6 +96,10 @@ class DeviceControlService:
             acknowledge = getattr(pump, "acknowledge_stop_latch", None)
             if callable(acknowledge):
                 acknowledge()
+            if self._mode is RunMode.SIMULATION:
+                start_simulation = getattr(pump, "start_simulation", None)
+                if callable(start_simulation):
+                    start_simulation()
         self._state = ApplicationState.RUNNING
 
     def stop(self) -> None:
@@ -141,13 +160,43 @@ class DeviceControlService:
     def _request_safe_state(self) -> tuple[str, ...]:
         errors: list[str] = []
         operations = (
-            ("jacket pump STOP", self._jacket_pump.request_stop),
-            ("injection pump STOP", self._injection_pump.request_stop),
-            ("DAQ safe state", self._daq.set_safe_state),
+            (
+                "jacket pump STOP",
+                self._jacket_pump.request_stop,
+                DiagnosticCategory.JACKET_PUMP,
+            ),
+            (
+                "injection pump STOP",
+                self._injection_pump.request_stop,
+                DiagnosticCategory.INJECTION_PUMP,
+            ),
+            (
+                "DAQ safe state",
+                self._daq.set_safe_state,
+                DiagnosticCategory.NI_VALVE,
+            ),
         )
-        for label, operation in operations:
+        for label, operation, category in operations:
             try:
                 operation()
             except Exception as error:
                 errors.append(f"{label} failed: {error}")
+                self._log_safe_state(category, label, f"FAILED: {error}", "ERROR")
+            else:
+                self._log_safe_state(category, label, "OK", "WARNING")
         return tuple(errors)
+
+    def _log_safe_state(
+        self,
+        category: DiagnosticCategory,
+        label: str,
+        result: str,
+        level: str,
+    ) -> None:
+        if self._diagnostics is not None:
+            self._diagnostics.emit(
+                category,
+                "SAFE_STATE",
+                f"{label}: {result}",
+                level=level,
+            )

@@ -65,6 +65,7 @@ from eor_control.pump_control import PumpRole  # noqa: E402
 from eor_control.simulators import (  # noqa: E402
     SimulatedDataAcquisition,
     SimulatedPump,
+    SimulatedValveActuator,
 )
 from eor_control.storage import CsvMeasurementWriter  # noqa: E402
 from eor_control.ui import (  # noqa: E402
@@ -89,8 +90,10 @@ from eor_control.ui import (  # noqa: E402
     ProjectSelectionDialog,
     ProjectSettingsDialog,
     PumpControlDialog,
+    PumpTelemetrySettingsDialog,
     ResizableDialog,
     SettingsHubDialog,
+    SimulationSettingsPage,
     StageSettingsDialog,
     application_icon,
     application_icon_path,
@@ -147,6 +150,7 @@ def test_application_dialogs_are_resizable() -> None:
         PumpControlDialog,
         LoggingSettingsDialog,
         ControlCycleSettingsDialog,
+        PumpTelemetrySettingsDialog,
         DeveloperViewDialog,
         DataManagementDialog,
         CalibrationSettingsDialog,
@@ -214,6 +218,8 @@ def test_dashboard_settings_hub_embeds_real_editors(
         ("logging", LoggingSettingsDialog),
         ("calibration", CalibrationSettingsDialog),
         ("control_cycle", ControlCycleSettingsDialog),
+        ("pump_telemetry", PumpTelemetrySettingsDialog),
+        ("simulation", SimulationSettingsPage),
     ):
         window._open_settings_hub(key)
         hub = hubs[-1]
@@ -234,6 +240,53 @@ def test_dashboard_settings_hub_embeds_real_editors(
     window.close()
 
 
+def test_simulation_settings_page_applies_model_and_injects_faults() -> None:
+    application()
+    jacket = SimulatedPump(pressure_bar=120.0)
+    injection = SimulatedPump(pressure_bar=100.0)
+    daq = SimulatedDataAcquisition()
+    daq.inputs.update(line_pressure=2.0, differential_pressure=1.5)
+    valve = SimulatedValveActuator()
+    events: list[str] = []
+    page = SimulationSettingsPage(
+        jacket=jacket,
+        injection=injection,
+        daq=daq,
+        valve=valve,
+        log_event=events.append,
+    )
+    jacket.connect()
+    injection.connect()
+    page.jacket_ramp.setValue(3.5)
+    page.response_delay.setValue(250.0)
+    next(
+        button
+        for button in page.findChildren(QPushButton)
+        if button.text() == "Szimulációs modell alkalmazása"
+    ).click()
+
+    assert jacket.pressure_ramp_bar_per_second == pytest.approx(3.5)
+    assert jacket.response_delay.maximum_seconds == pytest.approx(0.25)
+
+    next(
+        button
+        for button in page.findChildren(QPushButton)
+        if button.text() == "Hiba injektálása"
+    ).click()
+    _, quality = jacket.read_cached_status()
+    assert quality is DataQuality.STALE
+    assert "pressure_stale" in events[-1]
+
+    next(
+        button
+        for button in page.findChildren(QPushButton)
+        if button.text() == "Minden szimulált hiba törlése"
+    ).click()
+    _, quality = jacket.read_cached_status()
+    assert quality is DataQuality.GOOD
+    page.close()
+
+
 def test_developer_control_cycle_settings_are_persisted(tmp_path: Path) -> None:
     application()
     settings = QSettings(str(tmp_path / "cycle.ini"), QSettings.Format.IniFormat)
@@ -246,6 +299,47 @@ def test_developer_control_cycle_settings_are_persisted(tmp_path: Path) -> None:
     assert float(settings.value("developer/control_interval_seconds")) == 1.0
     assert float(settings.value("developer/watchdog_tolerance_seconds")) == 0.2
     assert "1.200 s" in dialog.deadline.text()
+
+
+def test_pump_telemetry_stale_settings_are_validated_and_persisted(
+    tmp_path: Path,
+) -> None:
+    application()
+    settings = QSettings(
+        str(tmp_path / "pump-telemetry.ini"), QSettings.Format.IniFormat
+    )
+    dialog = PumpTelemetrySettingsDialog(settings)
+    dialog.pressure_poll.setValue(0.5)
+    dialog.slow_poll.setValue(2.0)
+    dialog.pressure_stale.setValue(2.5)
+    dialog.slow_stale.setValue(5.0)
+    dialog.startup_timeout.setValue(8.0)
+
+    dialog._save()
+    intervals = PumpTelemetrySettingsDialog.intervals(settings)
+
+    assert intervals.pressure_seconds == pytest.approx(0.5)
+    assert intervals.slow_telemetry_seconds == pytest.approx(2.0)
+    assert intervals.pressure_stale_seconds == pytest.approx(2.5)
+    assert intervals.slow_telemetry_stale_seconds == pytest.approx(5.0)
+    assert intervals.startup_timeout_seconds == pytest.approx(8.0)
+
+
+def test_pump_telemetry_menu_rejects_stale_limit_below_poll_interval(
+    tmp_path: Path,
+) -> None:
+    application()
+    settings = QSettings(
+        str(tmp_path / "invalid-pump-telemetry.ini"),
+        QSettings.Format.IniFormat,
+    )
+    dialog = PumpTelemetrySettingsDialog(settings)
+    dialog.pressure_poll.setValue(2.0)
+    dialog.pressure_stale.setValue(1.0)
+
+    assert not dialog._save_button.isEnabled()
+    assert "HIBÁS BEÁLLÍTÁS" in dialog.validation.text()
+    dialog.close()
 
 
 def test_dashboard_runtime_uses_developer_cycle_settings(tmp_path: Path) -> None:
@@ -517,7 +611,14 @@ def test_measurement_pump_startup_dialog_requires_all_values_and_confirmation() 
     dialog.confirmation.setText("START MEASUREMENT PUMPS")
 
     assert dialog.start_button.isEnabled()
-    assert dialog.plan() == MeasurementPumpPlan(120.0, 60.0, 100.0, 10.0)
+    assert dialog.plan() == MeasurementPumpPlan(
+        120.0,
+        60.0,
+        100.0,
+        10.0,
+        jacket_pressure_limit_bar=400.0,
+        injection_pressure_limit_bar=350.0,
+    )
     dialog.injection_start_pressure.setValue(101.0)
     assert not dialog.start_button.isEnabled()
 
@@ -1632,6 +1733,38 @@ def test_measurement_start_preflight_rejects_invalid_sensor_voltage(
     window.close()
 
 
+def test_active_hardware_ready_state_refreshes_dashboard_without_measurement(
+    tmp_path: Path,
+) -> None:
+    app = application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        tmp_path / "projects.sqlite3",
+    )
+    window._hardware_status_timer.stop()
+    window._run_mode = RunMode.HARDWARE
+    window._hardware_status_generation += 1
+
+    window._refresh_active_hardware_status()
+    for _ in range(100):
+        app.processEvents()
+        if window._last_hardware_status_record is not None:
+            break
+        sleep(0.01)
+
+    assert window._devices.status.state is ApplicationState.READY
+    assert not window._runtime.running
+    assert window._last_cycle_result is None
+    assert window._jacket_label.text() == "120.0 bar"
+    assert window._injection_label.text() == "100.0 bar"
+    assert window._connection_labels["jacket"].text() == "KAPCSOLÓDVA"
+    assert window._connection_labels["line_daq"].text() == "KAPCSOLÓDVA — ÉLŐ"
+    assert window._valve_label.text() == "SAFE — mérés nem fut"
+    assert len(window._times) == 0
+    window._run_mode = RunMode.SIMULATION
+    window.close()
+
+
 def test_dashboard_loads_projects_and_stages_from_sqlite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1685,7 +1818,14 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert pump_plan.jacket_buildup_flow_ml_per_hour == 0.0
     assert pump_plan.injection_start_pressure_bar == 88.0
     assert pump_plan.injection_target_flow_ml_per_hour == 10.0
-    remembered_plan = MeasurementPumpPlan(115.0, 45.0, 90.0, 8.0)
+    remembered_plan = MeasurementPumpPlan(
+        115.0,
+        45.0,
+        90.0,
+        8.0,
+        jacket_pressure_limit_bar=155.0,
+        injection_pressure_limit_bar=135.0,
+    )
     window._remember_measurement_pump_plan(remembered_plan)
     assert window._default_measurement_pump_plan() == remembered_plan
     assert not window._project_selector_required

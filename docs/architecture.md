@@ -130,6 +130,18 @@ az űrlapot a mentett profilról, ezért a tárolt profil hallgatólagosan nem m
 
 ## Szabályozási mag
 
+A fizikai ISCO pumpákat a `PollingPump` worker választja le a vezérlési
+ciklusról. Kapcsolódáskor csak a biztonságkritikus nyomás és az alap működési
+státusz kötelező; a FLOW és VOLA később, háttérben tölti fel a cache-t. A cache
+mezőnként tárolja az utolsó sikeres monotonic időpontot, kort, minőséget és utolsó
+hibát. A `read_cached_status()` kompatibilitási útvonalának minősége kizárólag a
+nyomás frissességét jelenti, ezért lassú FLOW/VOLA adat nem állítja le a PID-et.
+A teljes `read_telemetry()` állapot `TELEMETRY_PARTIAL`, `READY`, `DEGRADED` vagy
+`DISCONNECTED` lehet. A poller a legkorábbi határidő szerint igazságosan választ
+mezőt; a kezelői és biztonsági parancsok a következő polling tranzakció előtt
+elsőbbséget kapnak. Az alapstátusz-poll a diagnosztikai naplóba írja minden mező
+korát és utolsó sikeres monotonic időpontját.
+
 A `ValveController` kézi és automata módot támogat. Automata módban a
 besajtolópumpa nyomása vagy a vonali nyomás választható visszacsatolásként. A
 `PidController` konfigurálható hatásirányt, kimeneti korlátot, mérési jelre számolt
@@ -340,6 +352,18 @@ hardveradaptereket szimulátorokra. Az új `MeasurementService` és
 `ProjectMeasurementWriter` külön-külön is tiltott perzisztenciával indul. A
 kapcsoló kikapcsolása a meglévő, felderítést és kezelői megerősítést végző
 eszközbeállítási folyamatot nyitja meg; közvetlenül nem aktivál fizikai kimenetet.
+
+A szimulációs adapterréteg időfüggő eszközmodelleket használ. A
+`SimulatedPump` explicit állapotgépet, nyomásrámpát, térfogyást és önálló
+túlnyomásvédelmet valósít meg; a `VirtualSimulationClock` várakozás nélkül,
+determinisztikusan léptethető. A `SimulatedDataAcquisition` zajt, driftet,
+egyszeri tüskét, befagyott jelet és kapcsolatvesztést, a
+`SimulatedValveActuator` véges mozgatási sebességet, beragadást és fordított
+irányt képes modellezni. A Developer beállítások **Szimuláció és hibateszt**
+oldala módosítja a futó szimulátor paramétereit és `SIMULATION` diagnosztikai
+eseménnyel naplózza a hibainjektálást. Ezek az objektumok csak
+`RunMode.SIMULATION` mellett érhetők el, és a mérési perzisztencia továbbra is
+tiltott.
 
 A normál dashboardon nincs külön `Csatlakozás` és `Leválasztás`: a HARDVER mód
 aktiválása létrehozza a `PollingPump` workereket, megnyitja mindkét pyserial

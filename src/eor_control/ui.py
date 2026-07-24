@@ -130,13 +130,19 @@ from eor_control.projects import (
     ProjectRepository,
 )
 from eor_control.pump_control import PumpControlService, PumpOperatingMode, PumpRole
-from eor_control.pump_telemetry import PollingPump
+from eor_control.pump_telemetry import (
+    PollingPump,
+    PumpPollingIntervals,
+    PumpTelemetrySnapshot,
+)
 from eor_control.runtime import BackgroundControlRunner, RuntimeSettings
 from eor_control.safety import ManualSafetyMonitor, SafetyLimits, SafetyMonitor
 from eor_control.simulators import (
     SimulatedDataAcquisition,
     SimulatedPump,
+    SimulatedPumpFault,
     SimulatedValveActuator,
+    SimulationDelay,
 )
 from eor_control.timezone import format_hungarian_time
 
@@ -1213,6 +1219,18 @@ class RuntimeBridge(QObject):
     pump_startup_completed = Signal()
     pump_startup_failed = Signal(str)
     stage_export_batch_finished = Signal()
+    hardware_status_completed = Signal(object)
+    hardware_status_failed = Signal(object)
+
+
+@dataclass(frozen=True, slots=True)
+class HardwareDashboardStatus:
+    generation: int
+    record: MeasurementRecord
+    jacket_connection: str
+    jacket_connection_ok: bool | None
+    injection_connection: str
+    injection_connection_ok: bool | None
 
 
 class DeviceTestBridge(QObject):
@@ -2801,6 +2819,9 @@ class MeasurementPumpPlan:
     jacket_buildup_flow_ml_per_hour: float
     injection_start_pressure_bar: float
     injection_target_flow_ml_per_hour: float
+    jacket_pressure_limit_bar: float | None = None
+    injection_pressure_limit_bar: float | None = None
+    margin_stability_seconds: float = 2.0
 
 
 class PumpControlDialog(ResizableDialog):
@@ -3476,6 +3497,189 @@ class ControlCycleSettingsDialog(ResizableDialog):
         self._settings.setValue(
             "developer/watchdog_tolerance_seconds", self.watchdog_tolerance.value()
         )
+        self._settings.sync()
+        self.accept()
+
+
+class PumpTelemetrySettingsDialog(ResizableDialog):
+    """Service-only polling and STALE thresholds for physical ISCO pumps."""
+
+    SETTINGS = {
+        "pressure_seconds": "developer/pump_pressure_poll_seconds",
+        "slow_telemetry_seconds": "developer/pump_slow_poll_seconds",
+        "pressure_stale_seconds": "developer/pump_pressure_stale_seconds",
+        "slow_telemetry_stale_seconds": "developer/pump_slow_stale_seconds",
+        "startup_timeout_seconds": "developer/pump_startup_timeout_seconds",
+    }
+
+    def __init__(self, settings: QSettings, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._settings = settings
+        self.setWindowTitle("Developer – pumpatelemetria és STALE")
+        self.resize(620, 470)
+        layout = QVBoxLayout(self)
+
+        warning = QLabel(
+            "SZERVIZBEÁLLÍTÁS — A nyomás STALE-határa biztonsági időkorlát. "
+            "Növelése késlelteti a pumpakapcsolat elvesztésének felismerését. "
+            "A mentett értékek a következő hardveraktiváláskor lépnek életbe."
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet(
+            "color:#9a6700;font-weight:700;padding:8px;"
+            "border:1px solid #9a6700;border-radius:6px"
+        )
+        layout.addWidget(warning)
+
+        defaults = self.intervals(settings)
+        form = QFormLayout()
+        self.pressure_poll = self._seconds_field(0.1, 10.0, 0.1)
+        self.pressure_poll.setObjectName("pump_pressure_poll_seconds")
+        self.pressure_poll.setValue(defaults.pressure_seconds)
+        self.slow_poll = self._seconds_field(0.3, 60.0, 0.1)
+        self.slow_poll.setObjectName("pump_slow_poll_seconds")
+        self.slow_poll.setValue(defaults.slow_telemetry_seconds)
+        self.pressure_stale = self._seconds_field(0.2, 60.0, 0.1)
+        self.pressure_stale.setObjectName("pump_pressure_stale_seconds")
+        self.pressure_stale.setValue(defaults.pressure_stale_seconds)
+        self.slow_stale = self._seconds_field(0.5, 120.0, 0.5)
+        self.slow_stale.setObjectName("pump_slow_stale_seconds")
+        self.slow_stale.setValue(defaults.slow_telemetry_stale_seconds)
+        self.startup_timeout = self._seconds_field(1.0, 120.0, 0.5)
+        self.startup_timeout.setObjectName("pump_startup_timeout_seconds")
+        self.startup_timeout.setValue(defaults.startup_timeout_seconds)
+        form.addRow(
+            input_field_label("Nyomás polling időköze", self.pressure_poll),
+            self.pressure_poll,
+        )
+        form.addRow(
+            input_field_label("FLOW/VOLA/STATUS polling időköze", self.slow_poll),
+            self.slow_poll,
+        )
+        form.addRow(
+            input_field_label("Nyomás STALE-határa", self.pressure_stale),
+            self.pressure_stale,
+        )
+        form.addRow(
+            input_field_label("FLOW/VOLA/STATUS STALE-határa", self.slow_stale),
+            self.slow_stale,
+        )
+        form.addRow(
+            input_field_label("Kezdő telemetria timeout", self.startup_timeout),
+            self.startup_timeout,
+        )
+        layout.addLayout(form)
+
+        self.validation = QLabel()
+        self.validation.setObjectName("pump_telemetry_validation")
+        self.validation.setWordWrap(True)
+        layout.addWidget(self.validation)
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._save_button = self._buttons.button(
+            QDialogButtonBox.StandardButton.Save
+        )
+        self._buttons.accepted.connect(self._save)
+        self._buttons.rejected.connect(self.reject)
+        layout.addWidget(self._buttons)
+        for field in (
+            self.pressure_poll,
+            self.slow_poll,
+            self.pressure_stale,
+            self.slow_stale,
+            self.startup_timeout,
+        ):
+            field.valueChanged.connect(self._refresh_validation)
+        self._refresh_validation()
+
+    @staticmethod
+    def _seconds_field(
+        minimum: float, maximum: float, step: float
+    ) -> QDoubleSpinBox:
+        field = QDoubleSpinBox()
+        field.setRange(minimum, maximum)
+        field.setDecimals(3)
+        field.setSingleStep(step)
+        field.setSuffix(" s")
+        return field
+
+    def selected_intervals(self) -> PumpPollingIntervals:
+        return PumpPollingIntervals(
+            pressure_seconds=self.pressure_poll.value(),
+            slow_telemetry_seconds=self.slow_poll.value(),
+            pressure_stale_seconds=self.pressure_stale.value(),
+            slow_telemetry_stale_seconds=self.slow_stale.value(),
+            startup_timeout_seconds=self.startup_timeout.value(),
+        )
+
+    @classmethod
+    def intervals(cls, settings: QSettings) -> PumpPollingIntervals:
+        defaults = PumpPollingIntervals()
+
+        def value(field: str, fallback: float) -> float:
+            try:
+                parsed = float(
+                    str(settings.value(cls.SETTINGS[field], fallback))
+                )
+            except (TypeError, ValueError):
+                return fallback
+            return parsed if isfinite(parsed) else fallback
+
+        try:
+            return PumpPollingIntervals(
+                pressure_seconds=value(
+                    "pressure_seconds", defaults.pressure_seconds
+                ),
+                slow_telemetry_seconds=value(
+                    "slow_telemetry_seconds",
+                    defaults.slow_telemetry_seconds,
+                ),
+                pressure_stale_seconds=value(
+                    "pressure_stale_seconds",
+                    defaults.pressure_stale_seconds,
+                ),
+                slow_telemetry_stale_seconds=value(
+                    "slow_telemetry_stale_seconds",
+                    defaults.slow_telemetry_stale_seconds,
+                ),
+                startup_timeout_seconds=value(
+                    "startup_timeout_seconds",
+                    defaults.startup_timeout_seconds,
+                ),
+            )
+        except ValueError:
+            return defaults
+
+    def _refresh_validation(self, *_args: object) -> None:
+        try:
+            intervals = self.selected_intervals()
+        except ValueError as error:
+            self.validation.setText(f"HIBÁS BEÁLLÍTÁS: {error}")
+            self.validation.setStyleSheet("color:#b00020;font-weight:700")
+            self._save_button.setEnabled(False)
+            return
+        self.validation.setText(
+            "Érvényes beállítás. Nyomáskimaradás legkésőbb "
+            f"{intervals.pressure_stale_seconds:.3f} s után válik STALE-lé."
+        )
+        self.validation.setStyleSheet("color:#1b7f3a;font-weight:700")
+        self._save_button.setEnabled(True)
+
+    def _save(self) -> None:
+        intervals = self.selected_intervals()
+        values = {
+            "pressure_seconds": intervals.pressure_seconds,
+            "slow_telemetry_seconds": intervals.slow_telemetry_seconds,
+            "pressure_stale_seconds": intervals.pressure_stale_seconds,
+            "slow_telemetry_stale_seconds": (
+                intervals.slow_telemetry_stale_seconds
+            ),
+            "startup_timeout_seconds": intervals.startup_timeout_seconds,
+        }
+        for field, value in values.items():
+            self._settings.setValue(self.SETTINGS[field], value)
         self._settings.sync()
         self.accept()
 
@@ -4578,10 +4782,12 @@ class MeasurementPumpStartupDialog(ResizableDialog):
         layout = QVBoxLayout(self)
         explanation = QLabel(
             "A köpenypumpa a megadott térfogatárammal építi fel a nyomást. "
-            "A cél-nyomás elérésekor a program STOP után állandó nyomástartásra "
-            "kapcsol. Ezután a besajtolópumpa a megadott térfogatárammal építi "
-            "fel a saját kezdőnyomását. A mérési ciklus csak mindkét kezdőnyomás "
-            "elérése után indul."
+            f"Ha a legalább {minimum_jacket_margin_bar:g} bar "
+            "köpenynyomás-többlet a megadott ideig stabil, "
+            "a besajtolópumpa is elindul, és a két pumpa együtt halad a "
+            "kezdőértékek felé. A köpeny a célján STOP után nyomástartásra vált. "
+            "A két saját pumpahatárt a program RUN előtt a pumpákba írja. A "
+            "mérési ciklus csak mindkét kezdőnyomás elérése után indul."
         )
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
@@ -4621,6 +4827,36 @@ class MeasurementPumpStartupDialog(ResizableDialog):
         self.injection_flow.setSuffix(" ml/h")
         self.injection_flow.setValue(defaults.injection_target_flow_ml_per_hour)
 
+        self.jacket_pressure_limit = QDoubleSpinBox()
+        self.jacket_pressure_limit.setObjectName("startup_jacket_pressure_limit")
+        self.jacket_pressure_limit.setRange(0.01, maximum_jacket_pressure_bar)
+        self.jacket_pressure_limit.setDecimals(2)
+        self.jacket_pressure_limit.setSuffix(" bar")
+        self.jacket_pressure_limit.setValue(
+            defaults.jacket_pressure_limit_bar or maximum_jacket_pressure_bar
+        )
+
+        self.injection_pressure_limit = QDoubleSpinBox()
+        self.injection_pressure_limit.setObjectName(
+            "startup_injection_pressure_limit"
+        )
+        self.injection_pressure_limit.setRange(
+            0.01, maximum_injection_pressure_bar
+        )
+        self.injection_pressure_limit.setDecimals(2)
+        self.injection_pressure_limit.setSuffix(" bar")
+        self.injection_pressure_limit.setValue(
+            defaults.injection_pressure_limit_bar
+            or maximum_injection_pressure_bar
+        )
+
+        self.margin_stability = QDoubleSpinBox()
+        self.margin_stability.setObjectName("startup_margin_stability_seconds")
+        self.margin_stability.setRange(0.0, 60.0)
+        self.margin_stability.setDecimals(1)
+        self.margin_stability.setSuffix(" s")
+        self.margin_stability.setValue(defaults.margin_stability_seconds)
+
         self.confirmation = QLineEdit()
         self.confirmation.setObjectName("startup_confirmation")
         self.confirmation.setPlaceholderText(
@@ -4632,6 +4868,11 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             "Besajtoló elérendő kezdőnyomása", self.injection_start_pressure
         )
         form.addRow("Besajtoló térfogatárama", self.injection_flow)
+        form.addRow("Köpenypumpa saját nyomáshatára", self.jacket_pressure_limit)
+        form.addRow(
+            "Besajtolópumpa saját nyomáshatára", self.injection_pressure_limit
+        )
+        form.addRow("20 bar többlet stabilitási ideje", self.margin_stability)
         form.addRow(
             f"Megerősítés: {PumpControlService.START_MEASUREMENT_CONFIRMATION}",
             self.confirmation,
@@ -4663,6 +4904,9 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             self.jacket_buildup_flow,
             self.injection_start_pressure,
             self.injection_flow,
+            self.jacket_pressure_limit,
+            self.injection_pressure_limit,
+            self.margin_stability,
         ):
             field.valueChanged.connect(self._refresh_start_enabled)
         self.confirmation.textChanged.connect(self._refresh_start_enabled)
@@ -4674,6 +4918,9 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             jacket_buildup_flow_ml_per_hour=self.jacket_buildup_flow.value(),
             injection_start_pressure_bar=self.injection_start_pressure.value(),
             injection_target_flow_ml_per_hour=self.injection_flow.value(),
+            jacket_pressure_limit_bar=self.jacket_pressure_limit.value(),
+            injection_pressure_limit_bar=self.injection_pressure_limit.value(),
+            margin_stability_seconds=self.margin_stability.value(),
         )
 
     def confirmation_text(self) -> str:
@@ -4700,6 +4947,11 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             and plan.jacket_buildup_flow_ml_per_hour > 0.0
             and plan.injection_start_pressure_bar > 0.0
             and plan.injection_target_flow_ml_per_hour > 0.0
+            and plan.jacket_pressure_limit_bar is not None
+            and plan.jacket_target_pressure_bar <= plan.jacket_pressure_limit_bar
+            and plan.injection_pressure_limit_bar is not None
+            and plan.injection_start_pressure_bar
+            <= plan.injection_pressure_limit_bar
             and margin_ok
             and self.confirmation_text()
             == PumpControlService.START_MEASUREMENT_CONFIRMATION
@@ -4771,6 +5023,179 @@ class PreflightDialog(ResizableDialog):
         layout.addWidget(buttons)
 
 
+class SimulationSettingsPage(QWidget):
+    """Service panel for deterministic simulation and fault injection."""
+
+    def __init__(
+        self,
+        *,
+        jacket: SimulatedPump,
+        injection: SimulatedPump,
+        daq: SimulatedDataAcquisition,
+        valve: SimulatedValveActuator,
+        log_event: Callable[[str], None],
+    ) -> None:
+        super().__init__()
+        self._pumps = {"jacket": jacket, "injection": injection}
+        self._daq = daq
+        self._valve = valve
+        self._log_event = log_event
+        layout = QVBoxLayout(self)
+        notice = QLabel(
+            "SZIMULÁCIÓ — az itt injektált hibák nem érnek el fizikai eszközt. "
+            "Futó mérés közben a normál biztonsági logika reagál rájuk."
+        )
+        notice.setWordWrap(True)
+        notice.setStyleSheet(
+            "background:#fff4cf;color:#513900;padding:8px;font-weight:700"
+        )
+        layout.addWidget(notice)
+
+        model = QGroupBox("Fizikai modell")
+        form = QFormLayout(model)
+        self.jacket_ramp = self._number(
+            jacket.pressure_ramp_bar_per_second, 0.0, 100.0, " bar/s"
+        )
+        self.injection_ramp = self._number(
+            injection.pressure_ramp_bar_per_second, 0.0, 100.0, " bar/s"
+        )
+        self.response_delay = self._number(
+            jacket.response_delay.maximum_seconds * 1000.0,
+            0.0,
+            10000.0,
+            " ms",
+        )
+        self.jacket_limit = self._number(
+            jacket.hardware_pressure_limit_bar, 0.1, 10000.0, " bar"
+        )
+        self.injection_limit = self._number(
+            injection.hardware_pressure_limit_bar, 0.1, 10000.0, " bar"
+        )
+        form.addRow("Köpeny nyomásrámpa", self.jacket_ramp)
+        form.addRow("Besajtoló nyomásrámpa", self.injection_ramp)
+        form.addRow("Pumpaválasz késleltetése", self.response_delay)
+        form.addRow("Köpeny saját nyomáshatára", self.jacket_limit)
+        form.addRow("Besajtoló saját nyomáshatára", self.injection_limit)
+        apply_model = QPushButton("Szimulációs modell alkalmazása")
+        apply_model.clicked.connect(self._apply_model)
+        form.addRow(apply_model)
+        layout.addWidget(model)
+
+        faults = QGroupBox("Hibainjektálás")
+        fault_form = QFormLayout(faults)
+        self.device = QComboBox()
+        self.device.addItem("Köpenypumpa", "jacket")
+        self.device.addItem("Besajtolópumpa", "injection")
+        self.device.addItem("NI vonali nyomás", "ni_line")
+        self.device.addItem("NI differenciálnyomás", "ni_differential")
+        self.device.addItem("Szelep", "valve")
+        self.fault = QComboBox()
+        self.device.currentIndexChanged.connect(self._refresh_faults)
+        inject = QPushButton("Hiba injektálása")
+        inject.setStyleSheet(
+            "background:#b00020;color:white;font-weight:700;padding:8px"
+        )
+        inject.clicked.connect(self._inject_fault)
+        clear = QPushButton("Minden szimulált hiba törlése")
+        clear.clicked.connect(self._clear_faults)
+        fault_form.addRow("Eszköz", self.device)
+        fault_form.addRow("Hiba", self.fault)
+        fault_form.addRow(inject)
+        fault_form.addRow(clear)
+        self.status = QLabel("Nincs injektált hiba.")
+        self.status.setWordWrap(True)
+        fault_form.addRow("Állapot", self.status)
+        layout.addWidget(faults)
+        layout.addStretch(1)
+        self._refresh_faults()
+
+    @staticmethod
+    def _number(
+        value: float, minimum: float, maximum: float, suffix: str
+    ) -> QDoubleSpinBox:
+        field = QDoubleSpinBox()
+        field.setRange(minimum, maximum)
+        field.setDecimals(3)
+        field.setValue(value)
+        field.setSuffix(suffix)
+        return field
+
+    def _apply_model(self) -> None:
+        jacket = self._pumps["jacket"]
+        injection = self._pumps["injection"]
+        jacket.pressure_ramp_bar_per_second = self.jacket_ramp.value()
+        injection.pressure_ramp_bar_per_second = self.injection_ramp.value()
+        delay = SimulationDelay(
+            self.response_delay.value() / 1000.0,
+            self.response_delay.value() / 1000.0,
+        )
+        jacket.response_delay = delay
+        injection.response_delay = delay
+        jacket.hardware_pressure_limit_bar = self.jacket_limit.value()
+        injection.hardware_pressure_limit_bar = self.injection_limit.value()
+        self.status.setText("A szimulációs modell frissítve.")
+        self._log_event("simulation model updated")
+
+    def _refresh_faults(self) -> None:
+        device = str(self.device.currentData())
+        self.fault.clear()
+        if device in self._pumps:
+            for fault, label in (
+                (SimulatedPumpFault.PRESSURE_STALE.value, "Nyomásadat fagyása / STALE"),
+                (SimulatedPumpFault.DISCONNECT.value, "Kapcsolatvesztés"),
+                (SimulatedPumpFault.EMPTY_CYLINDER.value, "Üres cilinder"),
+                (SimulatedPumpFault.MOTOR_FAILURE.value, "Motorhiba"),
+                (SimulatedPumpFault.OVERPRESSURE.value, "Saját túlnyomásvédelem"),
+            ):
+                self.fault.addItem(label, fault)
+        elif device.startswith("ni_"):
+            self.fault.addItem("Egyszeri feszültségtüske", "spike")
+            self.fault.addItem("Befagyott érzékelőérték", "freeze")
+            self.fault.addItem("NI kapcsolatvesztés", "disconnect")
+        else:
+            self.fault.addItem("Szelep beragadása", "stuck")
+            self.fault.addItem("Fordított működési irány", "reverse")
+
+    def _inject_fault(self) -> None:
+        device = str(self.device.currentData())
+        fault = str(self.fault.currentData())
+        if device in self._pumps:
+            self._pumps[device].inject_fault(SimulatedPumpFault(fault))
+        elif device.startswith("ni_"):
+            channel = (
+                "line_pressure"
+                if device == "ni_line"
+                else "differential_pressure"
+            )
+            if fault == "spike":
+                self._daq.inject_spike(channel, 10.0)
+            elif fault == "freeze":
+                self._daq.freeze(channel)
+            else:
+                self._daq.disconnect()
+        elif fault == "stuck":
+            self._valve.stuck = True
+        else:
+            self._valve.reverse_direction = True
+        message = f"fault injected: device={device}; fault={fault}"
+        self.status.setText(message)
+        self._log_event(message)
+
+    def _clear_faults(self) -> None:
+        for pump in self._pumps.values():
+            pump.clear_faults()
+        self._daq.reconnect()
+        self._daq.unfreeze("line_pressure")
+        self._daq.unfreeze("differential_pressure")
+        self._valve.stuck = False
+        self._valve.reverse_direction = False
+        self.status.setText(
+            "A szimulált hibák törölve. Reteszelt alkalmazáshibánál zárja be "
+            "a dashboard riasztását a friss biztonsági ellenőrzéshez."
+        )
+        self._log_event("all simulated faults cleared")
+
+
 class DashboardWindow(QMainWindow):
     def __init__(
         self,
@@ -4792,6 +5217,21 @@ class DashboardWindow(QMainWindow):
         self._devices = devices
         self._control_loop = control_loop
         self._valve = valve
+        self._simulation_jacket = (
+            devices.jacket_pump
+            if isinstance(devices.jacket_pump, SimulatedPump)
+            else None
+        )
+        self._simulation_injection = (
+            devices.injection_pump
+            if isinstance(devices.injection_pump, SimulatedPump)
+            else None
+        )
+        self._simulation_daq = (
+            devices.data_acquisition
+            if isinstance(devices.data_acquisition, SimulatedDataAcquisition)
+            else None
+        )
         self._projects = projects
         self._data_directory = data_directory
         self._measurement_writer = measurement_writer
@@ -4809,6 +5249,9 @@ class DashboardWindow(QMainWindow):
         self._hardware_actuator: AnalogValveActuator | None = None
         self._measurement_time_origin: float | None = None
         self._last_cycle_result: ControlCycleResult | None = None
+        self._last_hardware_status_record: MeasurementRecord | None = None
+        self._hardware_status_active = False
+        self._hardware_status_generation = 0
         self._preflight_active = False
         self._critical_hardware_recovery_active = False
         self._overview_dialog: MeasurementOverviewDialog | None = None
@@ -4850,8 +5293,20 @@ class DashboardWindow(QMainWindow):
         self._runtime_bridge.stage_export_batch_finished.connect(
             self._stage_export_batch_finished
         )
+        self._runtime_bridge.hardware_status_completed.connect(
+            self._hardware_status_completed
+        )
+        self._runtime_bridge.hardware_status_failed.connect(
+            self._hardware_status_failed
+        )
         self._runtime = self._make_runtime(control_loop)
         self._build_ui()
+        self._hardware_status_timer = QTimer(self)
+        self._hardware_status_timer.setInterval(500)
+        self._hardware_status_timer.timeout.connect(
+            self._refresh_active_hardware_status
+        )
+        self._hardware_status_timer.start()
         self._build_menu()
         self._build_tray_menu()
         if self._tray_available:
@@ -5490,6 +5945,25 @@ class DashboardWindow(QMainWindow):
             lambda: self._open_settings_hub("control_cycle")
         )
         developer_menu.addAction(self._control_cycle_settings_action)
+        self._pump_telemetry_settings_action = QAction(
+            "Pumpatelemetria és STALE…", self
+        )
+        self._pump_telemetry_settings_action.setVisible(self._developer_mode)
+        self._pump_telemetry_settings_action.triggered.connect(
+            lambda: self._open_settings_hub("pump_telemetry")
+        )
+        developer_menu.addAction(self._pump_telemetry_settings_action)
+        self._simulation_settings_action = QAction(
+            "Szimuláció és hibateszt…", self
+        )
+        self._simulation_settings_action.setVisible(self._developer_mode)
+        self._simulation_settings_action.setEnabled(
+            self._run_mode is RunMode.SIMULATION
+        )
+        self._simulation_settings_action.triggered.connect(
+            lambda: self._open_settings_hub("simulation")
+        )
+        developer_menu.addAction(self._simulation_settings_action)
         self._developer_view_action = QAction("Eszközkommunikáció…", self)
         self._developer_view_action.setShortcut("Ctrl+Shift+L")
         self._developer_view_action.setVisible(self._developer_mode)
@@ -5518,6 +5992,7 @@ class DashboardWindow(QMainWindow):
             "devices",
             "calibration",
             "control_cycle",
+            "pump_telemetry",
         }:
             self._show_error(
                 "Futó vagy szüneteltetett mérés közben ez a beállítás nem módosítható."
@@ -5559,15 +6034,34 @@ class DashboardWindow(QMainWindow):
             ),
         ]
         if self._developer_mode:
-            pages.append(
+            pages.extend(
                 (
-                    "control_cycle",
-                    "Vezérlési ciklus",
-                    "PID-ciklusidő és watchdog-tűrés. Ezek módosítása csak "
-                    "leállított mérésnél engedélyezett.",
-                    self._create_control_cycle_settings_page,
+                    (
+                        "control_cycle",
+                        "Vezérlési ciklus",
+                        "PID-ciklusidő és watchdog-tűrés. Ezek módosítása csak "
+                        "leállított mérésnél engedélyezett.",
+                        self._create_control_cycle_settings_page,
+                    ),
+                    (
+                        "pump_telemetry",
+                        "Pumpatelemetria / STALE",
+                        "Nyomás- és lassú telemetria polling, mezőnkénti "
+                        "STALE-határok és startup timeout.",
+                        self._create_pump_telemetry_settings_page,
+                    ),
                 )
             )
+            if self._run_mode is RunMode.SIMULATION:
+                pages.append(
+                    (
+                        "simulation",
+                        "Szimuláció és hibateszt",
+                        "Időfüggő pumpa-, NI- és szelepmodell, valamint "
+                        "biztonsági hibák célzott injektálása.",
+                        self._create_simulation_settings_page,
+                    )
+                )
         hub = SettingsHubDialog(tuple(pages), parent=self)
         hub.select_page(initial_page)
         hub.exec()
@@ -5652,6 +6146,24 @@ class DashboardWindow(QMainWindow):
         layout.addStretch()
         return page
 
+    def _create_simulation_settings_page(self) -> QWidget:
+        if (
+            self._run_mode is not RunMode.SIMULATION
+            or self._simulation_jacket is None
+            or self._simulation_injection is None
+            or self._simulation_daq is None
+        ):
+            return QLabel("A hibatesztelő panel csak szimulációs módban érhető el.")
+        return SimulationSettingsPage(
+            jacket=self._simulation_jacket,
+            injection=self._simulation_injection,
+            daq=self._simulation_daq,
+            valve=self._valve,
+            log_event=lambda message: self._diagnostics.emit(
+                DiagnosticCategory.SYSTEM, "SIMULATION", message
+            ),
+        )
+
     def _create_control_cycle_settings_page(self) -> QWidget:
         if self._runtime.running:
             return QLabel(
@@ -5673,6 +6185,35 @@ class DashboardWindow(QMainWindow):
             QTimer.singleShot(0, dialog.show)
 
         dialog.accepted.connect(apply)
+        dialog.rejected.connect(lambda: QTimer.singleShot(0, dialog.show))
+        return dialog
+
+    def _create_pump_telemetry_settings_page(self) -> QWidget:
+        if self._runtime.running:
+            return QLabel(
+                "A pumpatelemetria időzítése futó vagy szüneteltetett mérés "
+                "közben nem módosítható."
+            )
+        dialog = PumpTelemetrySettingsDialog(self._user_settings)
+        self._embedded_settings_dialog(dialog)
+
+        def applied() -> None:
+            intervals = dialog.selected_intervals()
+            self._diagnostics.emit(
+                DiagnosticCategory.SYSTEM,
+                "CONFIG",
+                "pump telemetry settings updated; effective on next hardware "
+                f"activation: pressure_poll={intervals.pressure_seconds:.3f}s; "
+                f"slow_poll={intervals.slow_telemetry_seconds:.3f}s; "
+                f"pressure_stale={intervals.pressure_stale_seconds:.3f}s; "
+                "slow_stale="
+                f"{intervals.slow_telemetry_stale_seconds:.3f}s; "
+                f"startup_timeout={intervals.startup_timeout_seconds:.3f}s",
+                level="WARNING",
+            )
+            QTimer.singleShot(0, dialog.show)
+
+        dialog.accepted.connect(applied)
         dialog.rejected.connect(lambda: QTimer.singleShot(0, dialog.show))
         return dialog
 
@@ -5839,7 +6380,12 @@ class DashboardWindow(QMainWindow):
         line = self._line_calibration_values()
         delta = self._delta_calibration_values()
         latest = self._last_cycle_result
-        snapshot = latest.record.snapshot if latest is not None else None
+        record = (
+            latest.record
+            if latest is not None
+            else self._last_hardware_status_record
+        )
+        snapshot = record.snapshot if record is not None else None
         return {
             "state": self._state_label.text() or "—",
             "mode": (
@@ -5856,10 +6402,10 @@ class DashboardWindow(QMainWindow):
             "last_update": (
                 format_hungarian_time(snapshot.recorded_at, "%Y-%m-%d %H:%M:%S")
                 if snapshot is not None
-                else "Nincs mérési adat"
+                else "Nincs eszközadat"
             ),
             "data_quality": (
-                snapshot.quality.value if snapshot is not None else "Nincs mérési adat"
+                snapshot.quality.value if snapshot is not None else "Nincs eszközadat"
             ),
             "alarm": self._active_alarm_text,
             "jacket_connection": self._connection_labels["jacket"].text(),
@@ -5891,6 +6437,215 @@ class DashboardWindow(QMainWindow):
             "max_overshoot": f"{self._max_overshoot.value():g} bar",
         }
 
+    def _refresh_active_hardware_status(self) -> None:
+        if (
+            self._run_mode is not RunMode.HARDWARE
+            or self._devices.status.state is not ApplicationState.READY
+            or self._runtime.running
+            or self._preflight_active
+            or self._hardware_status_active
+        ):
+            return
+        self._hardware_status_active = True
+        generation = self._hardware_status_generation
+        control_loop = self._control_loop
+        jacket = self._devices.jacket_pump
+        injection = self._devices.injection_pump
+        active_stage = self._stage.currentText().strip() or "Előkészítés"
+
+        def execute() -> None:
+            try:
+                record = control_loop.observe_pump_startup_once(
+                    active_stage=active_stage
+                )
+                jacket_text, jacket_ok = self._pump_telemetry_summary(jacket)
+                injection_text, injection_ok = self._pump_telemetry_summary(
+                    injection
+                )
+                result = HardwareDashboardStatus(
+                    generation,
+                    record,
+                    jacket_text,
+                    jacket_ok,
+                    injection_text,
+                    injection_ok,
+                )
+            except Exception as error:
+                self._runtime_bridge.hardware_status_failed.emit(
+                    (generation, str(error))
+                )
+            else:
+                self._runtime_bridge.hardware_status_completed.emit(result)
+
+        Thread(
+            target=execute,
+            name="eor-hardware-dashboard-status",
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _pump_telemetry_summary(pump: object) -> tuple[str, bool | None]:
+        reader = getattr(pump, "read_telemetry", None)
+        if not callable(reader):
+            return "KAPCSOLÓDVA", True
+        telemetry = reader()
+        if not isinstance(telemetry, PumpTelemetrySnapshot):
+            raise TypeError("invalid pump telemetry snapshot")
+        age = telemetry.pressure.age_seconds
+        pressure_age = "nincs adat" if age is None else f"{age:.2f} s"
+        slow_issues = [
+            name
+            for name, field in (
+                ("FLOW", telemetry.flow),
+                ("VOLA", telemetry.volume),
+                ("STATUS", telemetry.operating_status),
+            )
+            if field.quality is not DataQuality.GOOD
+        ]
+        details = (
+            f"{telemetry.connection_state.value} | nyomás kora: {pressure_age}"
+        )
+        if slow_issues:
+            details += " | lassú adat: " + ", ".join(slow_issues)
+        if telemetry.connection_state.value == "READY":
+            return details, True
+        if telemetry.connection_state.value == "DISCONNECTED":
+            return details, False
+        return details, None
+
+    def _hardware_status_completed(self, result: object) -> None:
+        if not isinstance(result, HardwareDashboardStatus):
+            return
+        if result.generation == self._hardware_status_generation:
+            self._hardware_status_active = False
+        if (
+            result.generation != self._hardware_status_generation
+            or self._run_mode is not RunMode.HARDWARE
+            or self._devices.status.state is not ApplicationState.READY
+        ):
+            return
+        self._last_hardware_status_record = result.record
+        self._set_connection_status(
+            "jacket", result.jacket_connection, result.jacket_connection_ok
+        )
+        self._set_connection_status(
+            "injection",
+            result.injection_connection,
+            result.injection_connection_ok,
+        )
+        self._apply_idle_hardware_record(result.record)
+        if result.record.safety_reasons:
+            reason = "; ".join(result.record.safety_reasons)
+            self._set_active_alarm(f"RETESSZELT BIZTONSÁGI HIBA: {reason}")
+            self._handle_critical_hardware_fault(reason)
+
+    def _hardware_status_failed(self, payload: object) -> None:
+        if not (
+            isinstance(payload, tuple)
+            and len(payload) == 2
+            and isinstance(payload[0], int)
+            and isinstance(payload[1], str)
+        ):
+            return
+        generation, message = payload
+        if generation == self._hardware_status_generation:
+            self._hardware_status_active = False
+        if (
+            generation != self._hardware_status_generation
+            or self._run_mode is not RunMode.HARDWARE
+            or self._devices.status.state is not ApplicationState.READY
+        ):
+            return
+        self._handle_critical_hardware_fault(
+            f"dashboard hardverállapot-frissítési hiba: {message}"
+        )
+
+    def _apply_idle_hardware_record(self, record: MeasurementRecord) -> None:
+        snapshot = record.snapshot
+        self._jacket_label.setText(f"{snapshot.jacket_pump.pressure_bar:.1f} bar")
+        self._injection_label.setText(
+            f"{snapshot.injection_pump.pressure_bar:.1f} bar"
+        )
+        self._jacket_remaining_label.setText(
+            f"Maradék folyadék: "
+            f"{snapshot.jacket_pump.remaining_volume_ml:.1f} ml"
+        )
+        self._injection_remaining_label.setText(
+            f"Maradék folyadék: "
+            f"{snapshot.injection_pump.remaining_volume_ml:.1f} ml"
+        )
+        self._injection_flow_label.setText(
+            f"Besajtolási sebesség: "
+            f"{snapshot.injection_pump.flow_ml_per_hour:.1f} ml/h"
+        )
+        self._jacket_net_volume_label.setText(
+            "Indítás óta nettó köpenytérfogat: a mérés nem fut"
+        )
+        self._injected_volume_label.setText(
+            "Indítás óta nettó besajtolt: a mérés nem fut"
+        )
+        configuration = self._active_hardware_configuration
+        line_enabled = (
+            snapshot.line_pressure_bar is not None
+            if configuration is None
+            else configuration.line_pressure_enabled
+        )
+        delta_enabled = (
+            snapshot.differential_pressure_bar is not None
+            if configuration is None
+            else configuration.differential_pressure_enabled
+        )
+        valve_enabled = (
+            True if configuration is None else configuration.valve_output_enabled
+        )
+        self._line_label.setText(
+            f"{snapshot.line_pressure_bar:.1f} bar"
+            if line_enabled and snapshot.line_pressure_bar is not None
+            else "Nincs hozzáadva"
+        )
+        self._delta_label.setText(
+            f"{snapshot.differential_pressure_bar:.1f} bar"
+            if delta_enabled and snapshot.differential_pressure_bar is not None
+            else "Nincs hozzáadva"
+        )
+        self._set_connection_status(
+            "line_daq",
+            "KAPCSOLÓDVA — ÉLŐ"
+            if line_enabled
+            else "NINCS HOZZÁADVA",
+            True if line_enabled else None,
+        )
+        self._set_connection_status(
+            "delta_daq",
+            "KAPCSOLÓDVA — ÉLŐ"
+            if delta_enabled
+            else "NINCS HOZZÁADVA",
+            True if delta_enabled else None,
+        )
+        self._set_connection_status(
+            "valve",
+            "KAPCSOLÓDVA — SAFE"
+            if valve_enabled
+            else "NINCS HOZZÁADVA",
+            True if valve_enabled else None,
+        )
+        self._valve_label.setText(
+            "SAFE — mérés nem fut" if valve_enabled else "Nincs hozzáadva"
+        )
+        margin = (
+            snapshot.jacket_pump.pressure_bar
+            - snapshot.injection_pump.pressure_bar
+        )
+        self._pressure_margin_label.setText(f"{margin:.1f} bar")
+        self._pressure_margin_label.setStyleSheet(
+            "background:transparent;font-size:20px;font-weight:700;"
+            + (
+                "color:#1b7f3a"
+                if margin >= self._minimum_margin.value()
+                else "color:#9a6700"
+            )
+        )
+
     def _open_logging_settings(self) -> None:
         self._open_settings_hub("logging")
 
@@ -5914,6 +6669,11 @@ class DashboardWindow(QMainWindow):
         self._set_service_controls_visible(enabled)
         self._simulation_mode_action.setVisible(enabled)
         self._control_cycle_settings_action.setVisible(enabled)
+        self._pump_telemetry_settings_action.setVisible(enabled)
+        self._simulation_settings_action.setVisible(enabled)
+        self._simulation_settings_action.setEnabled(
+            enabled and self._run_mode is RunMode.SIMULATION
+        )
         self._developer_view_action.setVisible(enabled)
         self._user_settings.setValue("developer/enabled", enabled)
         self._user_settings.sync()
@@ -6235,6 +6995,9 @@ class DashboardWindow(QMainWindow):
                     diagnostic_category=DiagnosticCategory.JACKET_PUMP,
                 ),
                 name="jacket-direct",
+                intervals=PumpTelemetrySettingsDialog.intervals(
+                    self._user_settings
+                ),
             )
             if hardware.jacket_pump_enabled
             else DisabledPump("jacket")
@@ -6248,6 +7011,9 @@ class DashboardWindow(QMainWindow):
                         diagnostic_category=DiagnosticCategory.INJECTION_PUMP,
                     ),
                     name="injection-direct",
+                    intervals=PumpTelemetrySettingsDialog.intervals(
+                        self._user_settings
+                    ),
                 )
                 if hardware.injection_pump_enabled
                 else DisabledPump("injection")
@@ -6543,6 +7309,11 @@ class DashboardWindow(QMainWindow):
                     diagnostic_category=DiagnosticCategory.JACKET_PUMP,
                 ),
                 name="jacket",
+                intervals=PumpTelemetrySettingsDialog.intervals(
+                    self._user_settings
+                ),
+                diagnostics=self._diagnostics,
+                diagnostic_category=DiagnosticCategory.JACKET_PUMP,
             )
             if configuration.jacket_pump_enabled
             else DisabledPump("jacket")
@@ -6556,6 +7327,11 @@ class DashboardWindow(QMainWindow):
                         diagnostic_category=DiagnosticCategory.INJECTION_PUMP,
                     ),
                     name="injection",
+                    intervals=PumpTelemetrySettingsDialog.intervals(
+                        self._user_settings
+                    ),
+                    diagnostics=self._diagnostics,
+                    diagnostic_category=DiagnosticCategory.INJECTION_PUMP,
                 )
                 if configuration.injection_pump_enabled
                 else DisabledPump("injection")
@@ -6633,6 +7409,7 @@ class DashboardWindow(QMainWindow):
             injection_pump=injection,
             daq=daq,
             mode=RunMode.HARDWARE,
+            diagnostics=self._diagnostics,
         )
         new_devices.authorize_hardware(DeviceControlService.HARDWARE_CONFIRMATION)
         pump_control = PumpControlService(
@@ -6665,6 +7442,9 @@ class DashboardWindow(QMainWindow):
         self._measurement_writer = writer
         self._devices = new_devices
         self._pump_control = pump_control
+        self._hardware_status_generation += 1
+        self._hardware_status_active = False
+        self._last_hardware_status_record = None
         self._active_hardware_configuration = configuration
         self._hardware_connection_result = connection_result
         self._hardware_daq = daq
@@ -6674,6 +7454,7 @@ class DashboardWindow(QMainWindow):
         self._remember_run_mode(RunMode.HARDWARE)
         self._set_line_pressure_source_available(configuration.line_pressure_enabled)
         self._sync_simulation_mode_action()
+        self._simulation_settings_action.setEnabled(False)
         self._diagnostics.emit(
             DiagnosticCategory.SYSTEM,
             "MODE",
@@ -6726,7 +7507,7 @@ class DashboardWindow(QMainWindow):
                 )
                 return
 
-        jacket = SimulatedPump(pressure_bar=120.0)
+        jacket = SimulatedPump(pressure_bar=120.0, flow_ml_per_hour=10.0)
         injection = SimulatedPump(
             pressure_bar=100.0,
             flow_ml_per_hour=10.0,
@@ -6775,6 +7556,12 @@ class DashboardWindow(QMainWindow):
         self._devices = DeviceControlService(
             jacket_pump=jacket, injection_pump=injection, daq=daq
         )
+        self._hardware_status_generation += 1
+        self._hardware_status_active = False
+        self._last_hardware_status_record = None
+        self._simulation_jacket = jacket
+        self._simulation_injection = injection
+        self._simulation_daq = daq
         self._devices.connect()
         self._pump_control = None
         self._active_hardware_configuration = None
@@ -6788,6 +7575,7 @@ class DashboardWindow(QMainWindow):
         else:
             self._remember_run_mode(RunMode.SIMULATION)
         self._sync_simulation_mode_action()
+        self._simulation_settings_action.setEnabled(self._developer_mode)
         self._diagnostics.emit(
             DiagnosticCategory.SYSTEM, "MODE", "simulation mode activated"
         )
@@ -7629,6 +8417,19 @@ class DashboardWindow(QMainWindow):
                             injection_target_flow_ml_per_hour=(
                                 plan.injection_target_flow_ml_per_hour
                             ),
+                            jacket_pressure_limit_bar=(
+                                plan.jacket_pressure_limit_bar
+                                if plan.jacket_pressure_limit_bar is not None
+                                else self._max_jacket.value()
+                            ),
+                            injection_pressure_limit_bar=(
+                                plan.injection_pressure_limit_bar
+                                if plan.injection_pressure_limit_bar is not None
+                                else self._max_injection.value()
+                            ),
+                            margin_stability_seconds=(
+                                plan.margin_stability_seconds
+                            ),
                             confirmation=confirmation,
                             startup_safety_check=lambda: (
                                 ("measurement pump startup was cancelled",)
@@ -7744,6 +8545,18 @@ class DashboardWindow(QMainWindow):
                 "pump_startup/injection_target_flow_ml_per_hour",
                 stage_flow,
             ),
+            jacket_pressure_limit_bar=stored_float(
+                "pump_startup/jacket_pressure_limit_bar",
+                self._max_jacket.value(),
+            ),
+            injection_pressure_limit_bar=stored_float(
+                "pump_startup/injection_pressure_limit_bar",
+                self._max_injection.value(),
+            ),
+            margin_stability_seconds=stored_float(
+                "pump_startup/margin_stability_seconds",
+                2.0,
+            ),
         )
 
     def _remember_measurement_pump_plan(self, plan: MeasurementPumpPlan) -> None:
@@ -7759,6 +8572,15 @@ class DashboardWindow(QMainWindow):
             ),
             "pump_startup/injection_target_flow_ml_per_hour": (
                 plan.injection_target_flow_ml_per_hour
+            ),
+            "pump_startup/jacket_pressure_limit_bar": (
+                plan.jacket_pressure_limit_bar
+            ),
+            "pump_startup/injection_pressure_limit_bar": (
+                plan.injection_pressure_limit_bar
+            ),
+            "pump_startup/margin_stability_seconds": (
+                plan.margin_stability_seconds
             ),
         }
         for key, value in values.items():
@@ -8120,6 +8942,7 @@ class DashboardWindow(QMainWindow):
         if self._runtime.paused and not result.record.safety_reasons:
             return
         self._last_cycle_result = result
+        self._last_hardware_status_record = result.record
         snapshot = result.record.snapshot
         self._diagnostics.emit(
             DiagnosticCategory.RUNTIME,
@@ -8402,12 +9225,21 @@ class DashboardWindow(QMainWindow):
         QTimer.singleShot(0, self._open_device_settings)
 
     def _set_connection(self, key: str, connected: bool) -> None:
+        self._set_connection_status(
+            key,
+            "KAPCSOLÓDVA" if connected else "HIBA",
+            connected,
+        )
+
+    def _set_connection_status(
+        self, key: str, text: str, ok: bool | None
+    ) -> None:
         label = self._connection_labels[key]
-        label.setText("KAPCSOLÓDVA" if connected else "HIBA")
+        label.setText(text)
+        color = "#1b7f3a" if ok is True else "#b00020" if ok is False else "#9a6700"
         label.setStyleSheet(
-            "background:transparent;color:#1b7f3a;font-size:11px;font-weight:700"
-            if connected
-            else "background:transparent;color:#b00020;font-size:11px;font-weight:700"
+            f"background:transparent;color:{color};"
+            "font-size:11px;font-weight:700"
         )
 
     def _set_all_connections(self, text: str, *, ok: bool | None) -> None:
@@ -8569,6 +9401,8 @@ class DashboardWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._save_user_settings()
+        self._hardware_status_timer.stop()
+        self._hardware_status_generation += 1
         application_managed_connection = (
             self._devices.status.state is not ApplicationState.IDLE
         )
@@ -8605,7 +9439,7 @@ def build_simulated_dashboard(
     *,
     settings: QSettings | None = None,
 ) -> DashboardWindow:
-    jacket = SimulatedPump(pressure_bar=120.0)
+    jacket = SimulatedPump(pressure_bar=120.0, flow_ml_per_hour=10.0)
     injection = SimulatedPump(
         pressure_bar=100.0, flow_ml_per_hour=10.0, remaining_volume_ml=260.0
     )

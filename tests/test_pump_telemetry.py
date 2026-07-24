@@ -5,7 +5,11 @@ from time import monotonic, sleep
 import pytest
 
 from eor_control.domain import DataQuality
-from eor_control.pump_telemetry import PollingPump, PumpPollingIntervals
+from eor_control.pump_telemetry import (
+    PollingPump,
+    PumpConnectionState,
+    PumpPollingIntervals,
+)
 
 
 @dataclass
@@ -61,6 +65,17 @@ class SlowPollablePump:
         self.calls["disconnect"] += 1
 
 
+@dataclass
+class SlowTelemetryFailurePump(SlowPollablePump):
+    def read_flow_ml_per_hour(self) -> float:
+        self.calls["flow"] += 1
+        raise TimeoutError("FLOW timeout")
+
+    def read_remaining_volume_ml(self) -> float:
+        self.calls["volume"] += 1
+        raise TimeoutError("VOLA timeout")
+
+
 def slow_intervals() -> PumpPollingIntervals:
     return PumpPollingIntervals(
         pressure_seconds=10.0,
@@ -106,6 +121,32 @@ def test_connect_is_idempotent_and_does_not_repeat_identification_lifecycle() ->
     pump.connect()
 
     assert raw.calls["connect"] == 1
+    pump.disconnect()
+
+
+def test_slow_field_failure_does_not_make_pressure_stale_or_stop_worker() -> None:
+    raw = SlowTelemetryFailurePump(delay_seconds=0.0)
+    intervals = PumpPollingIntervals(
+        pressure_seconds=0.02,
+        slow_telemetry_seconds=0.03,
+        pressure_stale_seconds=0.2,
+        slow_telemetry_stale_seconds=0.06,
+        startup_timeout_seconds=1.0,
+    )
+    pump = PollingPump(raw, name="test", intervals=intervals)
+    pump.connect()
+    sleep(0.09)
+
+    status, control_quality = pump.read_cached_status()
+    telemetry = pump.read_telemetry()
+
+    assert status.pressure_bar == pytest.approx(123.0)
+    assert control_quality is DataQuality.GOOD
+    assert telemetry.pressure.quality is DataQuality.GOOD
+    assert telemetry.flow.quality is DataQuality.STALE
+    assert telemetry.flow.last_error == "FLOW timeout"
+    assert telemetry.connection_state is PumpConnectionState.DEGRADED
+    assert raw.calls["pressure"] >= 2
     pump.disconnect()
 
 

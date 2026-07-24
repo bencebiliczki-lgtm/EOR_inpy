@@ -150,6 +150,12 @@ class IscoPump:
             f"{self._channel_command('PRESS', suffix_a=False)}={value}"
         )
 
+    def set_pressure_limit(self, pressure_bar: float) -> None:
+        """Program the documented MAXPRESS limit for the configured channel."""
+        self._require_connected()
+        value = self._format_nonnegative(pressure_bar, "pressure limit")
+        self._client.command(f"{self._channel_command('MAXPRESS')}={value}")
+
     def run(self) -> None:
         self._require_connected()
         self._client.command(self._channel_command("RUN", suffix_a=False))

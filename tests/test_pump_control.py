@@ -31,6 +31,9 @@ class FakePump:
     def set_constant_pressure(self, target: float) -> None:
         self.commands.append(f"PRESS={target}")
 
+    def set_pressure_limit(self, target: float) -> None:
+        self.commands.append(f"MAXPRESS={target}")
+
     def run(self) -> None:
         self.commands.append("RUN")
 
@@ -110,6 +113,44 @@ def test_measurement_start_preserves_hourly_flow_targets() -> None:
     assert control.state(PumpRole.INJECTION).running
 
 
+def test_measurement_start_programs_both_hardware_pressure_limits() -> None:
+    control, jacket, injection = service()
+
+    control.start_measurement_pumps(
+        jacket_target_pressure_bar=120.0,
+        jacket_buildup_flow_ml_per_hour=1000.0,
+        injection_start_pressure_bar=100.0,
+        injection_target_flow_ml_per_hour=1000.0,
+        jacket_pressure_limit_bar=150.0,
+        injection_pressure_limit_bar=130.0,
+        confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+    )
+
+    assert "MAXPRESS=150.0" in jacket.commands
+    assert "MAXPRESS=130.0" in injection.commands
+
+
+def test_injection_starts_after_margin_before_jacket_reaches_full_target() -> None:
+    control, jacket, injection = service(
+        jacket_pressure=20.0,
+        injection_pressure=0.0,
+    )
+
+    with pytest.raises(TimeoutError, match="targets were not reached"):
+        control.start_measurement_pumps(
+            jacket_target_pressure_bar=120.0,
+            jacket_buildup_flow_ml_per_hour=60.0,
+            injection_start_pressure_bar=100.0,
+            injection_target_flow_ml_per_hour=60.0,
+            confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+            pressure_buildup_timeout_seconds=0.001,
+            polling_interval_seconds=0.001,
+        )
+
+    assert "RUN" in injection.commands
+    assert "PRESS=120.0" not in jacket.commands
+
+
 def test_measurement_start_requires_exact_confirmation() -> None:
     control, jacket, injection = service()
 
@@ -148,7 +189,7 @@ def test_measurement_start_safety_failure_stops_both_pumps() -> None:
 def test_measurement_start_pressure_timeout_never_runs_injection() -> None:
     control, jacket, injection = service(jacket_pressure=119.0)
 
-    with pytest.raises(TimeoutError, match="target is 120.00 bar"):
+    with pytest.raises(TimeoutError, match="margin remained 19.00 bar"):
         control.start_measurement_pumps(
             jacket_target_pressure_bar=120.0,
             jacket_buildup_flow_ml_per_hour=60.0,
@@ -167,7 +208,7 @@ def test_measurement_start_pressure_timeout_never_runs_injection() -> None:
 def test_measurement_start_waits_for_injection_start_pressure() -> None:
     control, jacket, injection = service(injection_pressure=99.0)
 
-    with pytest.raises(TimeoutError, match="injection pressure remained 99.00 bar"):
+    with pytest.raises(TimeoutError, match="injection 99.00/100.00 bar"):
         control.start_measurement_pumps(
             jacket_target_pressure_bar=120.0,
             jacket_buildup_flow_ml_per_hour=60.0,

@@ -155,3 +155,22 @@ def test_paused_supervision_holds_output_without_persisting() -> None:
     assert result.command.output_percent == 35.0
     assert actuator.output_percent == 35.0
     assert writer.records == []
+
+
+def test_paused_supervision_forces_safe_actuator_state_on_fault() -> None:
+    control_loop, actuator, writer = loop(jacket_pressure=119.0)
+    control_loop.write_manual_output(35.0)
+    writer.records.clear()
+
+    result = control_loop.supervise_hold_once(
+        active_stage="water",
+        mode=ControlMode.AUTOMATIC,
+        source=PressureSource.INJECTION_PUMP,
+        setpoint_bar=400.0,
+    )
+
+    assert not result.command.enabled
+    assert result.command.reason == "paused measurement safety interlock"
+    assert actuator.output_percent is None
+    assert actuator.safe_state_requested
+    assert writer.records == []

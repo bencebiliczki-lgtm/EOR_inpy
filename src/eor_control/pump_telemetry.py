@@ -1,10 +1,12 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from math import isfinite
 from threading import Condition, Event, Lock, Thread, current_thread
 from time import monotonic
 from typing import Protocol, TypeVar
 
+from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
 from eor_control.domain import DataQuality, PumpStatus
 
 T = TypeVar("T")
@@ -26,6 +28,8 @@ class PollablePump(Protocol):
     def set_constant_flow(self, flow_ml_per_hour: float) -> None: ...
 
     def set_constant_pressure(self, pressure_bar: float) -> None: ...
+
+    def set_pressure_limit(self, pressure_bar: float) -> None: ...
 
     def run(self) -> None: ...
 
@@ -62,21 +66,48 @@ class PumpPollingIntervals:
             raise ValueError("slow pump telemetry stale limit must cover one polling interval")
 
 
+class PumpConnectionState(StrEnum):
+    CONNECTED = "CONNECTED"
+    TELEMETRY_PARTIAL = "TELEMETRY_PARTIAL"
+    READY = "READY"
+    DEGRADED = "DEGRADED"
+    DISCONNECTED = "DISCONNECTED"
+
+
+@dataclass(frozen=True, slots=True)
+class TelemetryFieldState:
+    quality: DataQuality
+    age_seconds: float | None
+    last_update_monotonic: float | None
+    last_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PumpTelemetrySnapshot:
+    status: PumpStatus
+    connection_state: PumpConnectionState
+    pressure: TelemetryFieldState
+    flow: TelemetryFieldState
+    volume: TelemetryFieldState
+    operating_status: TelemetryFieldState
+
+
 @dataclass(frozen=True, slots=True)
 class _CachedTelemetry:
     status: PumpStatus
     pressure_at: float
-    flow_at: float
-    volume_at: float
+    flow_at: float | None
+    volume_at: float | None
     operating_status_at: float
+    errors: tuple[tuple[str, str], ...] = ()
 
 
 class PollingPump:
     """Keep blocking DASNET reads outside the control loop.
 
-    One instance owns one pump and one worker.  The first complete telemetry set is
-    acquired during connection; subsequent ``read_status`` calls only read the
-    timestamped cache.
+    One instance owns one pump and one worker. Pressure and basic operating status
+    are required during connection; slower flow and volume telemetry is filled in
+    by the worker afterwards. Control reads only use the timestamped cache.
     """
 
     def __init__(
@@ -85,10 +116,14 @@ class PollingPump:
         *,
         name: str,
         intervals: PumpPollingIntervals | None = None,
+        diagnostics: DiagnosticLogger | None = None,
+        diagnostic_category: DiagnosticCategory = DiagnosticCategory.SYSTEM,
     ) -> None:
         self._pump = pump
         self._name = name
         self._intervals = intervals or PumpPollingIntervals()
+        self._diagnostics = diagnostics
+        self._diagnostic_category = diagnostic_category
         self._condition = Condition()
         self._command_lock = Lock()
         self._stop_event = Event()
@@ -97,6 +132,7 @@ class PollingPump:
         self._worker_error: Exception | None = None
         self._connected = False
         self._stop_latched = False
+        self._pending_commands = 0
 
     def connect(self) -> None:
         with self._condition:
@@ -134,6 +170,15 @@ class PollingPump:
         return status
 
     def read_cached_status(self) -> tuple[PumpStatus, DataQuality]:
+        """Return the status and the safety-critical pressure quality.
+
+        Flow and remaining volume have their own quality in ``read_telemetry``.
+        Their age must not stop pressure control or the complete measurement.
+        """
+        telemetry = self.read_telemetry()
+        return telemetry.status, telemetry.pressure.quality
+
+    def read_telemetry(self) -> PumpTelemetrySnapshot:
         with self._condition:
             cache = self._cache
             error = self._worker_error
@@ -142,30 +187,69 @@ class PollingPump:
             detail = f": {error}" if error is not None else ""
             raise ConnectionError(f"{self._name} pump has no telemetry{detail}")
         now = monotonic()
-        quality = DataQuality.GOOD
-        if error is not None or not connected:
-            quality = DataQuality.DISCONNECTED
-        elif (
-            now - cache.pressure_at > self._intervals.pressure_stale_seconds
-            or any(
-                now - timestamp > self._intervals.slow_telemetry_stale_seconds
-                for timestamp in (
-                    cache.flow_at,
-                    cache.volume_at,
-                    cache.operating_status_at,
-                )
-            )
-        ):
-            quality = DataQuality.STALE
+        errors = dict(cache.errors)
+        pressure = self._field_state(
+            now,
+            cache.pressure_at,
+            self._intervals.pressure_stale_seconds,
+            errors.get("pressure"),
+            connected=connected,
+        )
+        flow = self._field_state(
+            now,
+            cache.flow_at,
+            self._intervals.slow_telemetry_stale_seconds,
+            errors.get("flow"),
+            connected=connected,
+        )
+        volume = self._field_state(
+            now,
+            cache.volume_at,
+            self._intervals.slow_telemetry_stale_seconds,
+            errors.get("volume"),
+            connected=connected,
+        )
+        operating_status = self._field_state(
+            now,
+            cache.operating_status_at,
+            self._intervals.slow_telemetry_stale_seconds,
+            errors.get("status"),
+            connected=connected,
+        )
         status = cache.status
-        if quality is DataQuality.DISCONNECTED:
+        if not connected:
             status = PumpStatus(
                 pressure_bar=status.pressure_bar,
                 flow_ml_per_hour=status.flow_ml_per_hour,
                 remaining_volume_ml=status.remaining_volume_ml,
                 connected=False,
             )
-        return status, quality
+            state = PumpConnectionState.DISCONNECTED
+        elif (
+            pressure.quality is not DataQuality.GOOD
+            or any(
+                field.last_error is not None
+                for field in (flow, volume, operating_status)
+            )
+        ):
+            state = PumpConnectionState.DEGRADED
+        elif flow.age_seconds is None or volume.age_seconds is None:
+            state = PumpConnectionState.TELEMETRY_PARTIAL
+        elif any(
+            field.quality is not DataQuality.GOOD
+            for field in (flow, volume, operating_status)
+        ):
+            state = PumpConnectionState.DEGRADED
+        else:
+            state = PumpConnectionState.READY
+        return PumpTelemetrySnapshot(
+            status=status,
+            connection_state=state,
+            pressure=pressure,
+            flow=flow,
+            volume=volume,
+            operating_status=operating_status,
+        )
 
     def enter_remote(self) -> None:
         self._execute(self._pump.enter_remote)
@@ -177,6 +261,9 @@ class PollingPump:
 
     def set_constant_pressure(self, pressure_bar: float) -> None:
         self._execute(lambda: self._pump.set_constant_pressure(pressure_bar))
+
+    def set_pressure_limit(self, pressure_bar: float) -> None:
+        self._execute(lambda: self._pump.set_pressure_limit(pressure_bar))
 
     def run(self) -> None:
         self._execute(self._pump.run)
@@ -224,54 +311,97 @@ class PollingPump:
             with self._condition:
                 if not self._connected:
                     raise ConnectionError(f"{self._name} pump is disconnected")
-        with self._command_lock:
-            operation()
+        with self._condition:
+            self._pending_commands += 1
+            self._condition.notify_all()
+        try:
+            with self._command_lock:
+                operation()
+        finally:
+            with self._condition:
+                self._pending_commands -= 1
+                self._condition.notify_all()
 
     def _poll(self) -> None:
         try:
             pressure = self._read(self._pump.read_pressure_bar)
             pressure_at = monotonic()
-            flow = self._read(self._pump.read_flow_ml_per_hour)
-            flow_at = monotonic()
-            volume = self._read(self._pump.read_remaining_volume_ml)
-            volume_at = monotonic()
             self._read(self._pump.read_operating_status)
             status_at = monotonic()
             with self._condition:
                 self._cache = _CachedTelemetry(
-                    PumpStatus(pressure, flow, volume),
+                    PumpStatus(pressure, 0.0, 0.0),
                     pressure_at,
-                    flow_at,
-                    volume_at,
+                    None,
+                    None,
                     status_at,
                 )
                 self._condition.notify_all()
 
             next_pressure = monotonic() + self._intervals.pressure_seconds
             slow_step = self._intervals.slow_telemetry_seconds / 3.0
-            next_flow = monotonic() + slow_step
-            next_volume = monotonic() + 2.0 * slow_step
+            next_flow = monotonic()
+            next_volume = monotonic() + slow_step
             next_status = monotonic() + self._intervals.slow_telemetry_seconds
             while not self._stop_event.is_set():
-                due = min(next_pressure, next_flow, next_volume, next_status)
+                deadlines = {
+                    "pressure": next_pressure,
+                    "flow": next_flow,
+                    "volume": next_volume,
+                    "status": next_status,
+                }
+                field, due = min(
+                    deadlines.items(),
+                    key=lambda item: (
+                        item[1],
+                        0 if item[0] == "pressure" else 1,
+                    ),
+                )
                 if self._stop_event.wait(max(0.0, due - monotonic())):
                     break
-                now = monotonic()
-                if now >= next_pressure:
-                    self._update("pressure", self._read(self._pump.read_pressure_bar))
-                    next_pressure = monotonic() + self._intervals.pressure_seconds
-                elif now >= next_flow:
-                    self._update("flow", self._read(self._pump.read_flow_ml_per_hour))
-                    next_flow = monotonic() + self._intervals.slow_telemetry_seconds
-                elif now >= next_volume:
-                    self._update(
-                        "volume", self._read(self._pump.read_remaining_volume_ml)
+                try:
+                    if field == "pressure":
+                        self._update(
+                            field, self._read(self._pump.read_pressure_bar)
+                        )
+                        next_pressure = monotonic() + self._intervals.pressure_seconds
+                    elif field == "flow":
+                        self._update(
+                            field, self._read(self._pump.read_flow_ml_per_hour)
+                        )
+                        next_flow = (
+                            monotonic() + self._intervals.slow_telemetry_seconds
+                        )
+                    elif field == "volume":
+                        self._update(
+                            field,
+                            self._read(self._pump.read_remaining_volume_ml),
+                        )
+                        next_volume = (
+                            monotonic() + self._intervals.slow_telemetry_seconds
+                        )
+                    else:
+                        self._read(self._pump.read_operating_status)
+                        self._update(field, None)
+                        self._log_telemetry_health()
+                        next_status = (
+                            monotonic() + self._intervals.slow_telemetry_seconds
+                        )
+                except Exception as field_error:
+                    self._record_field_error(field, field_error)
+                    retry_at = monotonic() + (
+                        self._intervals.pressure_seconds
+                        if field == "pressure"
+                        else self._intervals.slow_telemetry_seconds
                     )
-                    next_volume = monotonic() + self._intervals.slow_telemetry_seconds
-                else:
-                    self._read(self._pump.read_operating_status)
-                    self._update("status", None)
-                    next_status = monotonic() + self._intervals.slow_telemetry_seconds
+                    if field == "pressure":
+                        next_pressure = retry_at
+                    elif field == "flow":
+                        next_flow = retry_at
+                    elif field == "volume":
+                        next_volume = retry_at
+                    else:
+                        next_status = retry_at
         except Exception as error:
             with self._condition:
                 if not self._stop_event.is_set():
@@ -280,6 +410,14 @@ class PollingPump:
                 self._condition.notify_all()
 
     def _read(self, operation: Callable[[], T]) -> T:
+        # Operator and safety commands have priority over the next scheduled
+        # telemetry transaction. An already-running serial read is allowed to
+        # finish, then the queued command gets the line before polling resumes.
+        with self._condition:
+            self._condition.wait_for(
+                lambda: self._pending_commands == 0
+                or self._stop_event.is_set()
+            )
         with self._command_lock:
             return operation()
 
@@ -291,6 +429,8 @@ class PollingPump:
             if cache is None:
                 return
             status = cache.status
+            errors = dict(cache.errors)
+            errors.pop(field, None)
             self._cache = _CachedTelemetry(
                 PumpStatus(
                     pressure_bar=(
@@ -309,4 +449,80 @@ class PollingPump:
                 now if field == "flow" else cache.flow_at,
                 now if field == "volume" else cache.volume_at,
                 now if field == "status" else cache.operating_status_at,
+                tuple(sorted(errors.items())),
+            )
+            self._condition.notify_all()
+
+    def _record_field_error(self, field: str, error: Exception) -> None:
+        with self._condition:
+            cache = self._cache
+            if cache is None:
+                self._worker_error = error
+                self._condition.notify_all()
+                return
+            errors = dict(cache.errors)
+            errors[field] = str(error)
+            self._cache = _CachedTelemetry(
+                cache.status,
+                cache.pressure_at,
+                cache.flow_at,
+                cache.volume_at,
+                cache.operating_status_at,
+                tuple(sorted(errors.items())),
+            )
+            self._condition.notify_all()
+        self._log(
+            f"{field} telemetry failed; last successful field update retained: "
+            f"{error}",
+            level="WARNING",
+        )
+
+    @staticmethod
+    def _field_state(
+        now: float,
+        updated_at: float | None,
+        stale_after: float,
+        error: str | None,
+        *,
+        connected: bool,
+    ) -> TelemetryFieldState:
+        age = None if updated_at is None else max(0.0, now - updated_at)
+        if not connected:
+            quality = DataQuality.DISCONNECTED
+        elif updated_at is None or age is not None and age > stale_after:
+            quality = DataQuality.STALE
+        else:
+            quality = DataQuality.GOOD
+        return TelemetryFieldState(quality, age, updated_at, error)
+
+    def _log_telemetry_health(self) -> None:
+        telemetry = self.read_telemetry()
+
+        def field_text(field: TelemetryFieldState) -> str:
+            age = "never" if field.age_seconds is None else f"{field.age_seconds:.3f}s"
+            updated = (
+                "never"
+                if field.last_update_monotonic is None
+                else f"{field.last_update_monotonic:.6f}"
+            )
+            return (
+                f"{field.quality.value},age={age},"
+                f"last_success_monotonic={updated}"
+            )
+
+        self._log(
+            f"state={telemetry.connection_state.value}; "
+            f"pressure[{field_text(telemetry.pressure)}]; "
+            f"flow[{field_text(telemetry.flow)}]; "
+            f"volume[{field_text(telemetry.volume)}]; "
+            f"status[{field_text(telemetry.operating_status)}]"
+        )
+
+    def _log(self, message: str, *, level: str = "INFO") -> None:
+        if self._diagnostics is not None:
+            self._diagnostics.emit(
+                self._diagnostic_category,
+                "TELEMETRY",
+                message,
+                level=level,
             )

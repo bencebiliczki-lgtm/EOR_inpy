@@ -3,17 +3,24 @@
 ## Felügyelt pumpaindítás
 
 A mérésindítás nem kerülheti meg a pumpák külön fizikai engedélyezését: a kezelőnek
-mindkét kezdőnyomást és a két indítási térfogatáramot tartalmazó pumpaterv
+mindkét kezdőnyomást, a pumpák saját hardveres nyomáshatárát és a két indítási
+térfogatáramot tartalmazó pumpaterv
 megjelenítése után pontos indítási megerősítést kell megadnia. Már a bevitelkor
 teljesülnie kell a tervezett köpeny–besajtoló nyomástöbbletnek. A köpenypumpa állandó áramú
 nyomásfelépítési szakaszában kizárólag a minimális köpeny–besajtolás
 nyomáskülönbség ellenőrzése van függőben; a besajtolópumpa ekkor még nem futhat.
-Adatminőségi hiba, kapcsolatvesztés, nem véges adat vagy bármely nyomáshatár
+Nyomás-adatminőségi hiba, kapcsolatvesztés, nem véges adat vagy bármely nyomáshatár
 túllépése azonnal megszakítja az indítást. A cél-nyomásnál a köpenypumpa STOP után
 állandó nyomástartásra vált. A szükséges nyomástöbblet nélkül a besajtolópumpa nem
 kaphat `RUN` parancsot, és annak felfutása közben a nyomástöbblet elvesztése
 mindkét pumpa leállítását okozza. A mérési adatrögzítés csak mindkét kezdőnyomás
 elérése után indulhat.
+
+A `FLOW` és `VOLA` lassú kijelzési mezők külön frissességet kapnak. Ezek önálló
+elavulása nem írhatja felül a friss pumpanyomás biztonsági minőségét; a rendszer
+ilyenkor `DEGRADED` telemetriát jelez. A pumpanyomás elavulása továbbra is
+biztonsági interlock. Szünethiba esetén a felügyelet közvetlenül meghívja a
+szelepaktuátor safe-state műveletét és nullázza a belső vezérlőkimenetet.
 
 ## Alapelv
 

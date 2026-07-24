@@ -59,6 +59,9 @@ class DisabledPump:
     def set_constant_pressure(self, pressure_bar: float) -> None:
         raise ConnectionError(self._message)
 
+    def set_pressure_limit(self, pressure_bar: float) -> None:
+        raise ConnectionError(self._message)
+
     def run(self) -> None:
         raise ConnectionError(self._message)
 

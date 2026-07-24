@@ -117,6 +117,7 @@ class ControlLoop:
             use_line_pressure_for_control=source is PressureSource.LINE_SENSOR,
         )
         if record.safety_reasons:
+            self._actuator.set_safe_state()
             self._last_output_percent = 0.0
             command = ValveCommand(
                 False,

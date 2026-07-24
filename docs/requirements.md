@@ -101,6 +101,12 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 - Normál kezelői módban a HARDVER mód aktiválása és az élő hardverkapcsolat egy
   művelet legyen. Sikeres aktiválás után a kapcsolat a mérések között is maradjon
   `READY` állapotban; külön Csatlakozás és Leválasztás gomb ne jelenjen meg.
+- Aktív HARDVER + `READY` állapotban a dashboard mérésindítás nélkül is
+  folyamatosan jelenítse meg a két pumpa cache-elt nyomását, térfogatáramát,
+  maradék térfogatát és telemetriaállapotát, valamint az engedélyezett NI
+  nyomásbemenetek aktuális értékét és a szelep biztonságos alapállapotát. Ez a
+  szolgáltatási nézet ne írjon mérési rekordot és ne adjon pontot a mérési
+  grafikonhoz; blokkoló I/O nem futhat a Qt UI-szálán.
 - A mérés kezelői gombjai: **Mérés indítása**, **Mérés
   szüneteltetése/folytatása** és **Mérés leállítása**. Szünetben a PID és az
   adatmentés álljon, de a biztonsági felügyelet fusson tovább és a fizikai
@@ -113,13 +119,26 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   nyissa meg az Eszközbeállításokat. Nem kritikus előellenőrzési hiba ne bontsa
   az élő hardverkapcsolatot.
 - Hardveres módban a mérésindítás külön ablakban kérje be mindkét pumpa elérendő
-  kezdőnyomását, a köpeny nyomásfelépítési térfogatáramát és a besajtoló
-  térfogatáramát, majd külön kezelői megerősítés után indítsa el a pumpákat.
-  A köpenypumpa először állandó térfogatárammal építse fel a nyomást; a cél
-  elérésekor STOP után váltson állandó nyomástartásra. A besajtolópumpa csak ezután,
-  a minimális köpenynyomás-többlet tényleges ellenőrzése után indulhat a megadott
-  térfogatárammal. A PID- és adatrögzítési ciklus csak a besajtoló kezdőnyomásának
-  elérése után kezdődhet.
+  kezdőnyomását, saját hardveres nyomáshatárát, a köpeny nyomásfelépítési
+  térfogatáramát, a besajtoló térfogatáramát és a nyomástöbblet stabilitási idejét.
+  A program a dokumentált `MAXPRESS` paranccsal állítsa be a két pumpa saját
+  határát még a `RUN` előtt. A köpenypumpa induljon elsőként; amikor a legalább
+  20 bar köpeny–besajtoló többlet a beállított ideig stabil, induljon el a
+  besajtolópumpa is. Ezután mindkét pumpa együtt haladjon a kezdő célértéke felé,
+  a köpeny pedig saját célján STOP után váltson állandó nyomástartásra. A
+  nyomástöbbletet minden felügyeleti ciklus ellenőrizze. A PID- és adatrögzítési
+  ciklus csak mindkét kezdőnyomás elérése után kezdődhet.
+- A pumpatelemetria minőségét mezőnként kell nyilvántartani. A nyomás
+  biztonságkritikus; elavulása reteszelt hibát okozhat. A FLOW vagy VOLA önálló
+  elavulása `DEGRADED` kapcsolatot jelezzen és maradjon látható, de önmagában ne
+  állítsa le a nyomásszabályozást vagy a teljes mérést. A kapcsolatindításhoz
+  nyomás és alapstátusz szükséges; a lassú mezők háttérben töltődhetnek fel.
+- Developer/szerviz módban a közös Beállítások ablak külön
+  **Pumpatelemetria / STALE** oldala szerkessze a nyomás- és lassú polling
+  időközét, a két mezőcsoport STALE-határát és a kezdő telemetria timeoutját.
+  STALE-határ nem lehet rövidebb a hozzá tartozó polling időköznél. A felület
+  jelezze, hogy a nyomás STALE-határának növelése késlelteti a kapcsolatvesztés
+  felismerését; az értékek csak a következő hardveraktiváláskor lépjenek életbe.
 - A köpenynyomás felépülése alatt minden egyéb szenzor-, kapcsolat- és
   nyomáshatár maradjon aktív. Timeout, kezelői megszakítás vagy bármely hiba
   mindkét pumpán STOP-ot és a mérési runtime indításának tiltását váltsa ki.
@@ -193,6 +212,13 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 - Developer módban külön **Szimulációs mód** kapcsoló legyen. Az átváltás csak
   leválasztott, IDLE állapotban történhet; a szimulációs runtime fizikai kimenetet
   és mérési perzisztenciát nem használhat.
+- Developer módban a szimuláció külön hibatesztelő beállítási oldalt kapjon.
+  A pumpamodell explicit `LOCAL/REMOTE/CONFIGURED/RUNNING/HOLDING/STOPPED/FAULT`
+  állapotokat, időfüggő nyomásrámpát, térfogyást és a PC-től független saját
+  túlnyomásvédelmet modellezzen. Legyen determinisztikus virtuális idő, állítható
+  pumpaválasz-késés, valamint pumpa-STALE, kapcsolatvesztés, üres cilinder,
+  motorhiba, túlnyomás, NI spike/fagyás/kiesés és szelepberagadás/fordított irány
+  injektálható. Minden injektálás kerüljön a diagnosztikai naplóba.
 - Az éles nyers fájl neve `_live_raw.csv` végződést kapjon; automatikus
   előzménybetöltés és NAS-szinkron csak ilyen, egyértelműen jelölt fájlt használhat.
 - Minden mérési fázis külön nyers CSV-fájlba kerüljön; fázisváltás nem írhatja az

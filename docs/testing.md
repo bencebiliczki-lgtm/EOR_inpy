@@ -15,7 +15,12 @@
 A szimulátoros automatikus tesztek jelenleg ellenőrzik a kalibrált mintavételt, a
 besajtolt térfogat követését, az 1 másodperc–1 óra intervallumkorlátot, az interlock
 és kapcsolatvesztés utáni biztonságos állapotot, valamint a nyers CSV fejlécét és
-append működését.
+append működését. Az eszközszimulációs regressziók virtuális idővel ellenőrzik a
+pumpa állapotgépét, nyomásrámpáját, térfogyását és saját túlnyomásvédelmét, a
+mezőszintű nyomás-STALE hibát, a determinisztikus válaszkésést, az NI
+freeze/spike/disconnect hibáit és a szelep véges sebességét, illetve beragadását.
+A Qt-teszt a Developer beállítási oldal modellfrissítését, hibainjektálását és
+hibatörlését is lefedi.
 
 Az analóg jelfeldolgozás tesztjei lefedik a 20 mintás burstöt, az izolált tüske
 mediános elutasítását, az EMA átmenetét és a három burst után elfogadott tartós
@@ -155,8 +160,10 @@ a pontos RUN-megerősítést, a konfigurálatlan indítás tiltását, a konfigu
 határ alatti és pontos határértékű esetét, valamint a globális safe STOP
 állapotszinkronját. Külön teszt igazolja a B csatorna parancsutótagjait.
 
-A mérési pumpaindítás tesztje ellenőrzi a köpenypumpa `CONST FLOW → RUN`, majd
-`STOP → CONST PRESS → RUN` sorrendjét, az `ML/HR` pumpaegység explicit beállítását,
+A mérési pumpaindítás tesztje ellenőrzi a köpenypumpa `CONST FLOW → RUN`, a stabil
+20 bar többletnél még a teljes köpenycél előtt engedett besajtoló `RUN`, majd a
+köpenycélnál a `STOP → CONST PRESS → RUN` sorrendet, továbbá mindkét dokumentált
+`MAXPRESS` hardverhatár-parancsot és az `ML/HR` pumpaegység explicit beállítását,
 valamint hogy az `1000 ml/h` kezelői célérték `FLOW=1000` parancsként jut el a
 pumpához. Ellenőrzi továbbá a pontos indítási
 megerősítést, a két kezdőnyomás és a tervezett nyomástöbblet kötelező bevitelét,
@@ -177,6 +184,12 @@ végrehajtás után látható sikerállapotot kap. A DASNET-tesztek külön elle
 hogy a soros timeouttal darabolt válasz a következő olvasási ablakból kiegészül.
 Külön regresszió rögzíti, hogy a 400 ms-os nyomáspolling 2 másodperces `STALE`
 határa lefedi a célgépen mért, legfeljebb 1,4 másodperces normál soros késést.
+Külön telemetriateszt igazolja, hogy FLOW/VOLA timeout mellett a nyomáspolling
+tovább fut, a nyomás minősége `GOOD` marad, míg a kapcsolat `DEGRADED` állapotot
+és mezőszintű hibát ad.
+A STALE szervizoldal UI-tesztje ellenőrzi a polling-, STALE- és startup
+timeoutértékek tartós mentését, visszatöltését, valamint a polling időköznél
+rövidebb STALE-határ mentésének tiltását.
 Hiányos telemetria mellett a működő szenzor értéke látható,
 miközben a kapcsolatfrissítés nem indít közös biztonsági mérési ciklust, a
 biztonságkritikus RUN külön ellenőrzése pedig változatlan marad.
@@ -199,6 +212,9 @@ jobb oldali oldalterületbe ágyazódnak, és nem nyitógombos második dialógu
 A grafikon regressziója
 ellenőrzi a sárga figyelmeztetési és piros kritikus pontok részletes hover
 adatait, valamint a pontok törlését a dashboard alaphelyzetbe állításakor.
+Az aktív hardver-dashboard regressziója `READY` állapotban, futó mérés nélkül
+ellenőrzi az élő pumpa- és NI-értékeket, a SAFE szelepállapotot, továbbá azt,
+hogy a szolgáltatási frissítés nem hoz létre grafikonpontot.
 
 A Developer vezérlésiciklus-beállítás tesztje ellenőrzi a ciklusidő és a
 watchdog-tűrés tartós mentését, valamint a számított végrehajtási határidőt.

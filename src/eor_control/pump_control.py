@@ -31,6 +31,8 @@ class ControllablePump(Protocol):
 
     def set_constant_pressure(self, pressure_bar: float) -> None: ...
 
+    def set_pressure_limit(self, pressure_bar: float) -> None: ...
+
     def run(self) -> None: ...
 
     def request_stop(self) -> None: ...
@@ -269,12 +271,15 @@ class PumpControlService:
         jacket_buildup_flow_ml_per_hour: float,
         injection_start_pressure_bar: float,
         injection_target_flow_ml_per_hour: float,
+        jacket_pressure_limit_bar: float | None = None,
+        injection_pressure_limit_bar: float | None = None,
         confirmation: str,
         startup_safety_check: Callable[[], tuple[str, ...]] | None = None,
         pressure_buildup_timeout_seconds: float = 120.0,
         polling_interval_seconds: float = 0.25,
+        margin_stability_seconds: float = 0.0,
     ) -> None:
-        """Start both pumps in a supervised jacket-first sequence."""
+        """Build a stable jacket margin, then ramp both pumps to their targets."""
         self._require_authorized()
         if confirmation != self.START_MEASUREMENT_CONFIRMATION:
             raise PermissionError("measurement pump-start confirmation did not match")
@@ -288,10 +293,28 @@ class PumpControlService:
         )
         if not all(isfinite(value) and value > 0.0 for value in values):
             raise ValueError("measurement pump targets and timings must be positive and finite")
+        if not isfinite(margin_stability_seconds) or margin_stability_seconds < 0.0:
+            raise ValueError("margin stability time must be nonnegative and finite")
+        limits = (jacket_pressure_limit_bar, injection_pressure_limit_bar)
+        if not all(
+            limit is None or isfinite(limit) and limit > 0.0
+            for limit in limits
+        ):
+            raise ValueError("pump pressure limits must be positive and finite")
+        if (
+            jacket_pressure_limit_bar is not None
+            and jacket_target_pressure_bar > jacket_pressure_limit_bar
+        ):
+            raise ValueError("jacket target pressure exceeds its pump pressure limit")
+        if (
+            injection_pressure_limit_bar is not None
+            and injection_start_pressure_bar > injection_pressure_limit_bar
+        ):
+            raise ValueError("injection target pressure exceeds its pump pressure limit")
         for role in PumpRole:
             self._require_connected(role)
 
-        def require_safe_injection_margin() -> None:
+        def require_application_safe() -> None:
             if startup_safety_check is not None:
                 reasons = startup_safety_check()
                 if reasons:
@@ -299,19 +322,17 @@ class PumpControlService:
                         "pump startup safety interlock active: "
                         + "; ".join(reasons)
                     )
-            statuses = self.statuses()
-            margin = (
-                statuses[PumpRole.JACKET].pressure_bar
-                - statuses[PumpRole.INJECTION].pressure_bar
-            )
-            if margin < self._minimum_margin:
-                raise PermissionError(
-                    f"jacket pressure margin is {margin:.2f} bar; "
-                    f"at least {self._minimum_margin:.2f} bar is required"
-                )
-
         try:
             self.enter_remote(PumpRole.JACKET)
+            if jacket_pressure_limit_bar is not None:
+                self._pumps[PumpRole.JACKET].set_pressure_limit(
+                    jacket_pressure_limit_bar
+                )
+                self._log(
+                    PumpRole.JACKET.value,
+                    f"hardware pressure limit={jacket_pressure_limit_bar}",
+                    level="WARNING",
+                )
             self.configure(
                 PumpRole.JACKET,
                 PumpOperatingMode.CONSTANT_FLOW,
@@ -320,52 +341,51 @@ class PumpControlService:
             self.run(PumpRole.JACKET, self.RUN_JACKET_CONFIRMATION)
 
             deadline = monotonic() + pressure_buildup_timeout_seconds
+            margin_stable_since: float | None = None
             while True:
-                if startup_safety_check is not None:
-                    reasons = startup_safety_check()
-                    if reasons:
-                        raise PermissionError(
-                            "pump startup safety interlock active: "
-                            + "; ".join(reasons)
-                        )
+                require_application_safe()
                 statuses = self.statuses()
                 jacket_pressure = statuses[PumpRole.JACKET].pressure_bar
-                if jacket_pressure >= jacket_target_pressure_bar:
-                    break
-                if monotonic() >= deadline:
+                injection_pressure = statuses[PumpRole.INJECTION].pressure_bar
+                margin = jacket_pressure - injection_pressure
+                now = monotonic()
+                if margin >= self._minimum_margin:
+                    if margin_stable_since is None:
+                        margin_stable_since = now
+                    if now - margin_stable_since >= margin_stability_seconds:
+                        break
+                else:
+                    margin_stable_since = None
+                if now >= deadline:
                     raise TimeoutError(
-                        f"jacket pressure remained {jacket_pressure:.2f} bar; "
-                        f"target is {jacket_target_pressure_bar:.2f} bar"
+                        f"jacket pressure margin remained {margin:.2f} bar; "
+                        f"at least {self._minimum_margin:.2f} bar must be stable "
+                        f"for {margin_stability_seconds:.2f} s"
                     )
                 sleep(polling_interval_seconds)
 
-            self.stop(PumpRole.JACKET)
-            self.configure(
-                PumpRole.JACKET,
-                PumpOperatingMode.CONSTANT_PRESSURE,
-                jacket_target_pressure_bar,
-            )
-            self.run(PumpRole.JACKET, self.RUN_JACKET_CONFIRMATION)
-            require_safe_injection_margin()
-
             self.enter_remote(PumpRole.INJECTION)
+            if injection_pressure_limit_bar is not None:
+                self._pumps[PumpRole.INJECTION].set_pressure_limit(
+                    injection_pressure_limit_bar
+                )
+                self._log(
+                    PumpRole.INJECTION.value,
+                    f"hardware pressure limit={injection_pressure_limit_bar}",
+                    level="WARNING",
+                )
             self.configure(
                 PumpRole.INJECTION,
                 PumpOperatingMode.CONSTANT_FLOW,
                 injection_target_flow_ml_per_hour,
             )
-            require_safe_injection_margin()
+            require_application_safe()
             self.run(PumpRole.INJECTION, self.RUN_INJECTION_CONFIRMATION)
 
             injection_deadline = monotonic() + pressure_buildup_timeout_seconds
+            jacket_holding = False
             while True:
-                if startup_safety_check is not None:
-                    reasons = startup_safety_check()
-                    if reasons:
-                        raise PermissionError(
-                            "pump startup safety interlock active: "
-                            + "; ".join(reasons)
-                        )
+                require_application_safe()
                 statuses = self.statuses()
                 margin = (
                     statuses[PumpRole.JACKET].pressure_bar
@@ -376,17 +396,36 @@ class PumpControlService:
                         f"jacket pressure margin fell to {margin:.2f} bar; "
                         f"at least {self._minimum_margin:.2f} bar is required"
                     )
+                jacket_pressure = statuses[PumpRole.JACKET].pressure_bar
                 injection_pressure = statuses[PumpRole.INJECTION].pressure_bar
-                if injection_pressure >= injection_start_pressure_bar:
+                if (
+                    jacket_pressure >= jacket_target_pressure_bar
+                    and not jacket_holding
+                ):
+                    self.stop(PumpRole.JACKET)
+                    self.configure(
+                        PumpRole.JACKET,
+                        PumpOperatingMode.CONSTANT_PRESSURE,
+                        jacket_target_pressure_bar,
+                    )
+                    self.run(PumpRole.JACKET, self.RUN_JACKET_CONFIRMATION)
+                    jacket_holding = True
+                if (
+                    jacket_pressure >= jacket_target_pressure_bar
+                    and injection_pressure >= injection_start_pressure_bar
+                ):
                     break
                 if monotonic() >= injection_deadline:
                     raise TimeoutError(
-                        f"injection pressure remained {injection_pressure:.2f} bar; "
-                        f"target is {injection_start_pressure_bar:.2f} bar"
+                        "pump startup targets were not reached: "
+                        f"jacket {jacket_pressure:.2f}/"
+                        f"{jacket_target_pressure_bar:.2f} bar, injection "
+                        f"{injection_pressure:.2f}/"
+                        f"{injection_start_pressure_bar:.2f} bar"
                     )
                 sleep(polling_interval_seconds)
 
-            require_safe_injection_margin()
+            require_application_safe()
         except Exception as error:
             stop_errors = self.stop_all()
             if stop_errors:
