@@ -79,6 +79,7 @@ from eor_control.hardware import (  # noqa: E402
     SerialPortInfo,
 )
 from eor_control.ni import NidaqmxDataAcquisition  # noqa: E402
+from eor_control.preflight import PreflightReport, PreflightStatus  # noqa: E402
 from eor_control.projects import ProjectRepository  # noqa: E402
 from eor_control.pump_control import PumpRole  # noqa: E402
 from eor_control.simulators import (  # noqa: E402
@@ -120,13 +121,76 @@ from eor_control.ui import (  # noqa: E402
     application_icon_path,
     build_simulated_dashboard,
     configure_windows_application_identity,
+    migrate_legacy_project_database,
+    migrate_legacy_project_files,
+    portable_user_settings,
     resolved_theme_stylesheet,
+    user_data_root_path,
 )
 
 
 def application() -> QApplication:
     instance = QApplication.instance()
     return instance if isinstance(instance, QApplication) else QApplication([])
+
+
+def test_user_settings_and_projects_use_documents_eor_with_legacy_migration(
+    tmp_path: Path,
+) -> None:
+    application_root = tmp_path / "application"
+    documents_root = tmp_path / "Documents"
+    user_root = user_data_root_path(documents_root)
+    legacy_settings_path = (
+        application_root / "config" / "AFKI" / "EORControl.ini"
+    )
+    legacy_settings_path.parent.mkdir(parents=True)
+    legacy_settings = QSettings(
+        str(legacy_settings_path), QSettings.Format.IniFormat
+    )
+    legacy_settings.setValue("appearance/theme", "dark")
+    legacy_settings.sync()
+    legacy_project_path = application_root / "data" / "projects.sqlite3"
+    with ProjectRepository(legacy_project_path) as repository:
+        repository.create_project(
+            name="Migrált projekt",
+            configuration={},
+            calibration_snapshot={},
+        )
+    legacy_project_files = application_root / "data" / "projects"
+    legacy_project_files.mkdir(parents=True)
+    (legacy_project_files / "raw.csv").write_text("measurement", encoding="utf-8")
+
+    settings = portable_user_settings(
+        application_root,
+        user_data_root=user_root,
+    )
+    project_path = user_root / "projects.sqlite3"
+    migrated = migrate_legacy_project_database(
+        legacy_project_path, project_path
+    )
+    project_files_path = user_root / "projects"
+    files_migrated = migrate_legacy_project_files(
+        legacy_project_files, project_files_path
+    )
+
+    assert user_root == documents_root / "EOR"
+    assert Path(settings.fileName()) == user_root / "EORControl.ini"
+    assert settings.value("appearance/theme") == "dark"
+    assert migrated
+    assert files_migrated
+    assert (project_files_path / "raw.csv").read_text(encoding="utf-8") == (
+        "measurement"
+    )
+    with ProjectRepository(project_path) as repository:
+        assert [project.name for project in repository.list_projects()] == [
+            "Migrált projekt"
+        ]
+    assert not migrate_legacy_project_database(
+        legacy_project_path, project_path
+    )
+    assert not migrate_legacy_project_files(
+        legacy_project_files, project_files_path
+    )
 
 
 def assert_input_fields_are_labelled(root: QWidget) -> None:
@@ -2561,6 +2625,12 @@ def test_preflight_does_not_require_safe_voltage_or_pid_validation_flags(
 
     assert report.for_key("pid_validation") is None
     assert physical_validation is not None
+    assert physical_validation.status is PreflightStatus.WARNING
+    assert PreflightReport((physical_validation,)).can_start
+    assert "szelepirány" in physical_validation.detail
+    assert "biztonsági nyomáshatárok" in physical_validation.detail
+    assert "szenzorkalibrációk" in physical_validation.detail
+    assert "pumpa MAX PRESS/SHUTDOWN" in physical_validation.detail
     assert "SAFE feszültség" not in physical_validation.detail
     summary = window._configuration_summary_text()
     assert "Nincs validált PID-hangolás" not in summary

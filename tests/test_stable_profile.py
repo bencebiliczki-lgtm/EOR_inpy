@@ -60,6 +60,15 @@ def test_obsolete_safe_output_and_pid_validation_flags_are_not_seeded() -> None:
     assert "pid/profile_validated" not in settings
 
 
+def test_valve_direction_validation_is_advisory_not_a_hardware_gate() -> None:
+    validation = validate_stable_profile(load_stable_profile(PROFILE_PATH))
+    issue = validation.for_key("safety.valve_direction_validated")
+
+    assert issue is not None
+    assert issue.level is ValidationLevel.REQUIRES_PHYSICAL_VALIDATION
+    assert not issue.blocks_hardware_measurement
+
+
 def test_invalid_stale_window_blocks_application_start(tmp_path: Path) -> None:
     payload = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
     payload["acquisition"]["stale_timeout_seconds"] = 2.0

@@ -314,7 +314,7 @@ def validate_stable_profile(profile: StableProfile) -> StableProfileValidation:
                 "safety.valve_direction_validated",
                 ValidationLevel.REQUIRES_PHYSICAL_VALIDATION,
                 "valve direction has not been physically validated",
-                blocks_hardware_measurement=True,
+                blocks_hardware_measurement=False,
             )
         )
     for key in (

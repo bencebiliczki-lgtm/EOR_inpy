@@ -1,6 +1,7 @@
 import ctypes
 import os
 import shutil
+import sqlite3
 import sys
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
@@ -21,6 +22,7 @@ from PySide6.QtCore import (
     QObject,
     QPersistentModelIndex,
     QSettings,
+    QStandardPaths,
     Qt,
     QTimer,
     Signal,
@@ -471,25 +473,47 @@ def application_root_path() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def portable_user_settings(
-    root: Path | None = None, *, migrate_legacy: bool = True
-) -> QSettings:
-    """Open the explicit portable INI and migrate older Registry settings once."""
+def user_data_root_path(documents_root: Path | None = None) -> Path:
+    """Return the per-user EOR directory below the Windows Documents folder."""
+    if documents_root is None:
+        location = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DocumentsLocation
+        )
+        documents_root = Path(location) if location else Path.home() / "Documents"
+    return documents_root / "EOR"
 
-    settings_path = (root or application_root_path()) / "config" / "AFKI" / "EORControl.ini"
+
+def portable_user_settings(
+    root: Path | None = None,
+    *,
+    migrate_legacy: bool = True,
+    user_data_root: Path | None = None,
+) -> QSettings:
+    """Open the Documents/EOR INI and migrate older settings once."""
+
+    application_root = root or application_root_path()
+    settings_path = (user_data_root or user_data_root_path()) / "EORControl.ini"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings = QSettings(str(settings_path), QSettings.Format.IniFormat)
     if migrate_legacy and not settings.allKeys():
-        legacy = QSettings(
-            QSettings.Format.NativeFormat,
-            QSettings.Scope.UserScope,
-            "AFKI",
-            "EORControl",
+        legacy_file = QSettings(
+            str(application_root / "config" / "AFKI" / "EORControl.ini"),
+            QSettings.Format.IniFormat,
         )
-        for key in legacy.allKeys():
-            settings.setValue(key, legacy.value(key))
+        if legacy_file.allKeys():
+            for key in legacy_file.allKeys():
+                settings.setValue(key, legacy_file.value(key))
+        else:
+            legacy_registry = QSettings(
+                QSettings.Format.NativeFormat,
+                QSettings.Scope.UserScope,
+                "AFKI",
+                "EORControl",
+            )
+            for key in legacy_registry.allKeys():
+                settings.setValue(key, legacy_registry.value(key))
         settings.sync()
-    profile_path = (root or application_root_path()) / "config" / "stable-defaults.json"
+    profile_path = application_root / "config" / "stable-defaults.json"
     if profile_path.is_file():
         profile = load_stable_profile(profile_path)
         for key, value in software_settings(profile).items():
@@ -497,6 +521,36 @@ def portable_user_settings(
                 settings.setValue(key, value)
         settings.sync()
     return settings
+
+
+def migrate_legacy_project_database(
+    legacy_path: Path, destination_path: Path
+) -> bool:
+    """Copy a legacy project database safely, including committed WAL content."""
+    if destination_path.exists() or not legacy_path.is_file():
+        return False
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with sqlite3.connect(legacy_path) as source, sqlite3.connect(
+            destination_path
+        ) as destination:
+            source.backup(destination)
+    except Exception:
+        with suppress(OSError):
+            destination_path.unlink()
+        raise
+    return True
+
+
+def migrate_legacy_project_files(
+    legacy_directory: Path, destination_directory: Path
+) -> bool:
+    """Copy the legacy raw project tree once without merging or overwriting."""
+    if destination_directory.exists() or not legacy_directory.is_dir():
+        return False
+    destination_directory.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(legacy_directory, destination_directory)
+    return True
 
 
 def application_icon() -> QIcon:
@@ -10303,7 +10357,7 @@ class DashboardWindow(QMainWindow):
                 (
                     PreflightStatus.PASSED
                     if not missing_physical
-                    else PreflightStatus.FAILED
+                    else PreflightStatus.WARNING
                 ),
                 (
                     "Minden kötelező fizikai paraméter validált."
@@ -10311,7 +10365,9 @@ class DashboardWindow(QMainWindow):
                     else "Nincs validálva: " + ", ".join(missing_physical)
                 ),
                 (
-                    "Végezze el és dokumentálja a helyszíni ellenőrzéseket."
+                    "Tájékoztató figyelmeztetés: végezze el és dokumentálja "
+                    "a helyszíni ellenőrzéseket. A hiányzó validációs jelzők "
+                    "nem blokkolják a mérés indítását."
                     if missing_physical
                     else ""
                 ),
@@ -11289,6 +11345,9 @@ class DashboardWindow(QMainWindow):
         calibration_validated = self._setting_bool(
             "calibration/profile_validated", False
         )
+        pump_shutdown_validated = self._setting_bool(
+            "hardware/pump_shutdown_validated", False
+        )
         try:
             self._pid_parameters()
         except ValueError:
@@ -11303,9 +11362,6 @@ class DashboardWindow(QMainWindow):
                 hardware_complete,
                 pump_ready,
                 ni_ready,
-                valve_direction_validated,
-                safety_validated,
-                calibration_validated,
                 pid_parameters_valid,
                 storage_ready,
             )
@@ -11320,17 +11376,45 @@ class DashboardWindow(QMainWindow):
                 + (
                     "validált"
                     if valve_direction_validated
-                    else "nincs validálva"
+                    else "figyelmeztetés — nincs validálva"
                 ),
                 "Biztonsági határok: "
-                + ("kész" if safety_validated else "hiányos/nincs validálva"),
+                + (
+                    "kész"
+                    if safety_validated
+                    else "figyelmeztetés — nincs validálva"
+                ),
                 "Kalibrációk: "
-                + ("kész" if calibration_validated else "hiányos/nincs validálva"),
+                + (
+                    "kész"
+                    if calibration_validated
+                    else "figyelmeztetés — nincs validálva"
+                ),
+                "Pumpa MAX PRESS/SHUTDOWN: "
+                + (
+                    "validált"
+                    if pump_shutdown_validated
+                    else "figyelmeztetés — nincs validálva"
+                ),
                 "PID-paraméterek: "
                 + ("számszakilag érvényes" if pid_parameters_valid else "hibás"),
                 f"Adatmentés: {'kész' if storage_ready else 'hibás'}",
                 "Mérésindítás: "
-                + ("engedélyezett" if measurement_ready else "blokkolt"),
+                + (
+                    "engedélyezett (validációs figyelmeztetésekkel)"
+                    if measurement_ready
+                    and not all(
+                        (
+                            valve_direction_validated,
+                            safety_validated,
+                            calibration_validated,
+                            pump_shutdown_validated,
+                        )
+                    )
+                    else "engedélyezett"
+                    if measurement_ready
+                    else "blokkolt"
+                ),
             )
         )
 
@@ -11481,13 +11565,23 @@ def build_simulated_dashboard(
 
 def run_ui() -> int:
     root = application_root_path()
-    settings = portable_user_settings(root)
+    user_data_root = user_data_root_path()
+    settings = portable_user_settings(root, user_data_root=user_data_root)
+    project_path = user_data_root / "projects.sqlite3"
+    migrate_legacy_project_database(
+        root / "data" / "projects.sqlite3", project_path
+    )
+    migrate_legacy_project_files(
+        root / "data" / "projects", user_data_root / "projects"
+    )
     configure_windows_application_identity()
     instance = QApplication.instance()
     application = instance if isinstance(instance, QApplication) else QApplication(sys.argv)
     application.setWindowIcon(application_icon())
     window = build_simulated_dashboard(
-        root / "data" / "simulated_measurements.csv", settings=settings
+        user_data_root / "simulated_measurements.csv",
+        project_path=project_path,
+        settings=settings,
     )
     window.show()
     return application.exec()

@@ -78,7 +78,9 @@ a `Mérés indítása` gombra. Indítás előtt kötelező, tételes ellenőrző
 meg a projekt, eszközkapcsolatok, szenzoradatok, kalibráció, biztonsági reteszek,
 a konfigurált minimális köpenynyomás-többlet és tárhely állapotával. Hiba tiltja az
 indítást; figyelmeztetés külön kezelői jóváhagyást igényel. A projekt és szakaszok a
-`data/projects.sqlite3` adatbázisban maradnak meg. A PID erősítések, hatásirány és
+felhasználó `Dokumentumok\EOR\projects.sqlite3` adatbázisában maradnak meg, a
+nyers projektfájlok pedig a `Dokumentumok\EOR\projects` könyvtárba kerülnek. A PID
+erősítések, hatásirány és
 kimeneti korlátok Developer módban módosíthatók. Normál kezelői nézetben csak az
 üzemi vezérlési mezők láthatók. Kritikus hardverhibánál a program safe-state-et
 kér, felszabadítja a portokat, majd részletes hibaüzenet után automatikusan
@@ -129,10 +131,12 @@ A program `QSettings` segítségével megőrzi az utoljára használt projektet 
 mérési szakaszt, a témát, a kézi/automata vezérlési mezőket, a PID-paramétereket,
 az adatrögzítési időközt, a kalibrációkat és a biztonsági határértékeket. Törölt
 projekt vagy sérült beállítás esetén biztonságos UI-alapértékre tér vissza.
-A beállítások explicit INI-fájlja a hordozható alkalmazásmappa
-`config/AFKI/EORControl.ini` útvonalán található. A korábbi Windows Registry-alapú
-`AFKI/EORControl` beállításokat az alkalmazás az első induláskor automatikusan
-átmásolja, ha az INI még üres. A témaválasztás azonnal lemezre kerül.
+A beállítások explicit INI-fájlja a felhasználó
+`Dokumentumok\EOR\EORControl.ini` útvonalán található. Az alkalmazás az első
+induláskor automatikusan átemeli a korábbi alkalmazásmappában lévő INI-t, illetve
+ennek hiányában a Windows Registry `AFKI/EORControl` beállításait. A régi
+`data/projects.sqlite3` adatbázist és a `data/projects` projektfákat is átmásolja,
+ha az új helyen még nincs megfelelő adat. A témaválasztás azonnal lemezre kerül.
 
 Az eszközök projektenkénti moduláris profilként konfigurálhatók: a
 `Projektbeállítások` ablakban a két pumpa, a két nyomásbemenet és a

@@ -20,8 +20,8 @@ fizikai paraméter blokkolja a hardveres mérés indítását.
 | Látható pont/sorozat | 2000 | Korlátozott UI-memória; a nyers CSV ettől független |
 | NAS mérés alatt | kikapcsolva | Offline-first, helyi mentés nem blokkolható |
 
-A profil migrációja csak hiányzó szoftveres kulcsokat tölt ki a hordozható
-`config/AFKI/EORControl.ini` fájlban. Meglévő kezelői vagy hardverbeállítást
+A profil migrációja csak hiányzó szoftveres kulcsokat tölt ki a felhasználó
+`Dokumentumok/EOR/EORControl.ini` fájljában. Meglévő kezelői vagy hardverbeállítást
 nem ír felül. Sémaverzió nélküli korábbi JSON-profil az 1-es verzióra
 migrálható; ismeretlen jövőbeli verziót a program elutasít.
 

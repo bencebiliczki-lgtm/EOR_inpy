@@ -172,6 +172,11 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 - A köpenynyomás felépülése alatt minden egyéb szenzor-, kapcsolat- és
   nyomáshatár maradjon aktív. Timeout, kezelői megszakítás vagy bármely hiba
   mindkét pumpán STOP-ot és a mérési runtime indításának tiltását váltsa ki.
+- A `valve_direction_validated`, `limits_validated`, `profile_validated` és
+  `pump_shutdown_validated` üzembe helyezési jelzők hiánya sárga, kezelő által
+  elfogadandó preflight-figyelmeztetés, nem mérésindítási tiltás. A tényleges
+  kapcsolat-, nyomásjel-, szelep-AO-, aktív vészleállítás-, nyomáshatár- és
+  érvénytelen mérési paraméterhibák továbbra is blokkolók.
 - Az alkalmazás ugyanabból az onedir kiadásban levő EXE-ből `terminal` argumentummal interaktív,
   állapotot megőrző parancssori vezérlést biztosítson.
 - A terminálból elérhető legyen a státusz, csatlakozás, mérésindítás/-leállítás,

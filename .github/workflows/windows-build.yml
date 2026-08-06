@@ -73,7 +73,7 @@ jobs:
           name: AFKI-EOR-package-${{ github.ref_name }}
           path: ${{ env.PACKAGE_PATH }}
       # Expected GitHub Secrets:
-      # SSH_HOST, SSH_USERNAME, SSH_PASSWORD, SSH_PORT (optional), SSH_REMOTE_DIR
+      # SSH_HOST, SSH_USERNAME, SSH_PASSWORD, SSH_PORT (optional)
       # TAILSCALE_CLIENT_ID, TAILSCALE_CLIENT_SECRET
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
@@ -83,13 +83,12 @@ jobs:
           tags: tag:ci
           ping: ${{ secrets.SSH_HOST }}
 
-      - name: Upload package over SSH
+      - name: Upload and extract package over SSH
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_PORT: ${{ secrets.SSH_PORT }}
           SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-          SSH_REMOTE_DIR: ${{ secrets.SSH_REMOTE_DIR }}
         shell: pwsh
         run: |
           if ([string]::IsNullOrWhiteSpace($env:SSH_PORT)) {
@@ -107,6 +106,7 @@ jobs:
           python -m pip install --quiet paramiko
 
           @'
+          import base64
           import os
           import pathlib
           import posixpath
@@ -117,10 +117,27 @@ jobs:
           username = os.environ["SSH_USERNAME"]
           password = os.environ["SSH_PASSWORD"]
           package_path = pathlib.Path(os.environ["PACKAGE_PATH"])
-          remote_dir = os.environ.get(
-              "SSH_REMOTE_DIR",
-              "C:/Users/Public/Downloads"
-          ).rstrip("/")
+          remote_dir = "C:/Users/eor/Desktop"
+          remote_windows_dir = r"C:\Users\eor\Desktop"
+
+          def run_powershell(client, script):
+              encoded = base64.b64encode(
+                  script.encode("utf-16-le")
+              ).decode("ascii")
+              command = (
+                  "powershell.exe -NoProfile -NonInteractive "
+                  f"-EncodedCommand {encoded}"
+              )
+              _stdin, stdout, stderr = client.exec_command(command)
+              exit_code = stdout.channel.recv_exit_status()
+              output = stdout.read().decode("utf-8", errors="replace").strip()
+              error = stderr.read().decode("utf-8", errors="replace").strip()
+              if output:
+                  print(output)
+              if exit_code != 0:
+                  raise RuntimeError(
+                      f"Remote PowerShell failed ({exit_code}): {error}"
+                  )
 
           client = paramiko.SSHClient()
           client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -142,6 +159,13 @@ jobs:
               if transport is not None:
                   transport.set_keepalive(15)
 
+              run_powershell(
+                  client,
+                  "$ErrorActionPreference = 'Stop'; "
+                  f"New-Item -ItemType Directory -Force -LiteralPath "
+                  f"'{remote_windows_dir}' | Out-Null",
+              )
+
               sftp = client.open_sftp()
               target_path = posixpath.join(
                   remote_dir,
@@ -152,7 +176,18 @@ jobs:
               sftp.put(str(package_path), target_path)
               sftp.close()
 
-              print("Package uploaded successfully.")
+              remote_archive = (
+                  remote_windows_dir + "\\" + package_path.name
+              )
+              print(f"Extracting package in: {remote_windows_dir}")
+              run_powershell(
+                  client,
+                  "$ErrorActionPreference = 'Stop'; "
+                  f"Expand-Archive -LiteralPath '{remote_archive}' "
+                  f"-DestinationPath '{remote_windows_dir}' -Force",
+              )
+
+              print("Package uploaded and extracted successfully.")
           finally:
               client.close()
           '@ | Set-Content -Path "$env:RUNNER_TEMP\upload_package.py"

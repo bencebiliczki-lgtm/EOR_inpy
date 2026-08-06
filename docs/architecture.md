@@ -316,8 +316,12 @@ fázist a projektválasztó számára. A visszatöltés a Qt widgetek tartomány
 történik; ismeretlen enum, hibás szám vagy már nem létező projekt nem írja felül a
 biztonságos alapértéket.
 Az alkalmazás nem hagyatkozik a platformfüggő QSettings-alapértelmezésre: explicit
-`config/AFKI/EORControl.ini` fájlt nyit. Üres INI esetén egyszer átmásolja a korábbi
-Windows Registry `AFKI/EORControl` kulcsait. A témaváltás külön azonnali `sync()`
+`Dokumentumok/EOR/EORControl.ini` fájlt nyit. Üres INI esetén egyszer átmásolja a
+korábbi alkalmazásmappában lévő INI-t, ennek hiányában pedig a Windows Registry
+`AFKI/EORControl` kulcsait. A `Dokumentumok/EOR/projects.sqlite3` hiányakor a korábbi
+`data/projects.sqlite3` adatbázist SQLite-backuppal migrálja; a nyers projektfák
+innentől a `Dokumentumok/EOR/projects` alatt készülnek, és a korábbi `data/projects`
+könyvtárat az első indulás egyszer, felülírás nélkül átmásolja. A témaváltás külön azonnali `sync()`
 műveletet végez, és az írási hibát az állapotsorban jelzi.
 
 A `SettingsHubDialog` az összes alkalmazásszintű beállítást egyetlen
