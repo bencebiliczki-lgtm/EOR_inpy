@@ -162,8 +162,8 @@ jobs:
               run_powershell(
                   client,
                   "$ErrorActionPreference = 'Stop'; "
-                  f"New-Item -ItemType Directory -Force -LiteralPath "
-                  f"'{remote_windows_dir}' | Out-Null",
+                  f"[System.IO.Directory]::CreateDirectory("
+                  f"'{remote_windows_dir}') | Out-Null",
               )
 
               sftp = client.open_sftp()
