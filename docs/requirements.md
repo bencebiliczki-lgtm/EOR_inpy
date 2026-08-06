@@ -163,14 +163,14 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 - A köpenynyomás felépülése alatt minden egyéb szenzor-, kapcsolat- és
   nyomáshatár maradjon aktív. Timeout, kezelői megszakítás vagy bármely hiba
   mindkét pumpán STOP-ot és a mérési runtime indításának tiltását váltsa ki.
-- Az alkalmazás ugyanabból a onefile EXE-ből `terminal` argumentummal interaktív,
+- Az alkalmazás ugyanabból az onedir kiadásban levő EXE-ből `terminal` argumentummal interaktív,
   állapotot megőrző parancssori vezérlést biztosítson.
 - A terminálból elérhető legyen a státusz, csatlakozás, mérésindítás/-leállítás,
   vészleállítás, hibanyugtázás, leválasztás, kézi/automata szabályozás, mérési
   szakasz és adatrögzítési időköz beállítása.
 - A terminál mód alapértelmezetten és jelen kiadásban kizárólag szimulációt
-  vezérelhet; nem írhat CSV-t, nem hozhat létre NAS-feladatot és nem érhet el
-  fizikai kimenetet. A hardveres terminálvezérlés csak külön, később jóváhagyott,
+  vezérelhet; a szimulált rekordokat külön eredetjelölésű CSV-be menti, de nem
+  érhet el fizikai kimenetet. A hardveres terminálvezérlés csak külön, később jóváhagyott,
   a felderítést és explicit kezelői megerősítést megtartó terv alapján engedhető.
 - Külön előkészítési nézet a pumpák felügyelt vezérlésére.
 - Developer tesztmódban az eszközök külön-külön kapcsolhatók és kérdezhetők le;
@@ -205,7 +205,11 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   Mivel a nagyobb szelepnyitás csökkenti a besajtolási nyomást, az automatikus
   nyomásszabályozás alapértelmezett hatásiránya `REVERSE`: a célérték alatti
   nyomás záró, a célérték feletti nyomás nyitó beavatkozást kér.
-- A PID paraméterei módosíthatók és névvel menthető profilokba rendezhetők.
+- A vezérlési mód és a PID paraméterei futó mérés közben is módosíthatók. A mód a
+  következő vezérlési ciklus beállításaként, az érvényes PID-paramétercsomag pedig
+  a háttérszál következő felügyelt ciklushatárán, versenyhelyzet nélkül lépjen
+  életbe. Érvénytelen átmeneti mezőérték nem írhatja felül az utolsó érvényes PID-et.
+  A PID-beállítások névvel menthető profilokba rendezhetők.
 - A részletes PID-hangolás és a felügyelt manuális hardvervezérlés csak Developer
   módban jelenhet meg; a normál kezelői nézet az üzemi műveletekre korlátozódjon.
 - Developer módban a háttér-vezérlési ciklus időköze és watchdog-tűrése külön
@@ -219,10 +223,11 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 - Az NI nyomásbemeneteknél a ciklusonkénti mintaburst mediánját és az abból képzett
   EMA-szűrt nyomást külön kell megőrizni. A PID és a kijelzés a szűrt értéket, a
   kemény nyomás-interlock a szűretlen értéket használja.
-- Nyers mérési adat kizárólag explicit, megerősített hardvermódban menthető. A
-  szimuláció nem hozhat létre vagy módosíthat CSV-t, projekt-pillanatképet vagy
-  NAS-szinkronfeladatot, még akkor sem, ha a runtime perzisztálást kérne.
-- A **SZIMULÁCIÓ – nincs fizikai kimenet és nincs mérési adatmentés**, illetve a
+- A szimulációs mérési adatot az éles adattal azonos tartóssági, export- és
+  NAS-szinkronfolyamat kezeli, de a fizikai mérés fájljával nem keverheti. A fájlnév
+  `_simulation_live_raw.csv`, a hozzá tartozó pillanatképekben pedig kötelező a
+  `measurement_kind=simulation` eredetjelölés.
+- A **SZIMULÁCIÓ – nincs fizikai kimenet; adatmentés aktív, szimulált eredettel**, illetve a
   **HARDVER – fizikai berendezés vezérlése és mérési adatmentés** állapot mindig
   látható dashboard-sávban jelenjen meg.
 - A biztonsági hiba reteszelt, állandó dashboard-sávban maradjon meg biztonságos
@@ -237,7 +242,9 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   ismétlődjön.
 - Developer módban külön **Szimulációs mód** kapcsoló legyen. Az átváltás csak
   leválasztott, IDLE állapotban történhet; a szimulációs runtime fizikai kimenetet
-  és mérési perzisztenciát nem használhat.
+  nem használhat. A mérési perzisztencia, a fáziskezelés, az eseménymentés, az
+  export és a NAS-szinkron logikája egyezzen meg a hardvermérésével; kizárólag az
+  adatforrás és a kötelező szimulációs eredetjelölés térhet el.
 - Developer módban a szimuláció külön hibatesztelő beállítási oldalt kapjon.
   A pumpamodell explicit `LOCAL/REMOTE/CONFIGURED/RUNNING/HOLDING/STOPPED/FAULT`
   állapotokat, időfüggő nyomásrámpát, térfogyást és a PC-től független saját
@@ -260,6 +267,26 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   projekt-munkafüzetet az
   engedélyezett NAS-szinkron ugyanúgy tartós várólistán kezelje.
 - A NAS-ra írás ne blokkolja az adatgyűjtést; hálózati hiba esetén helyi várólista szükséges.
+- A központi Beállítások ablakban legyen NAS-célválasztás, háttérben futó
+  kapcsolat-/írhatósági próba, várólistastátusz és olvasható fájlrendszernézet.
+  A Windows-hitelesítést kell használni; jelszó nem kerülhet az alkalmazás
+  konfigurációjába.
 - A nyers és felhasználói magyar CSV pontosvesszős, tizedesvesszős formátumot használ;
   a felhasználói exportnál más elválasztó és tizedespont is választható.
+- Az export célútvonalát natív fájlválasztóval kell megadni, nem szerkeszthető
+  szöveges útvonalmezővel.
 - Az export nem helyettesíti a belső nyers adatforrást.
+- A mérési események egyedi azonosítóval, időbélyeggel, eltelt idővel,
+  állapot- és hardverkontextussal append-only `*.events.jsonl` oldalfájlban
+  maradnak meg. Ugyanaz az esemény jelenjen meg az aktuális és a teljes
+  diagramon; az Excel-export eseménylapot és marker-sorozatot tartalmazzon.
+Mérésindítási konfiguráció
+---------------------------------
+
+- `pump_startup/injection_startup_flow_ml_per_hour`: BES előkészítési
+  térfogatáram.
+- `pump_startup/injection_measurement_flow_ml_per_hour`: BES mérési
+  térfogatáram.
+- A korábbi `pump_startup/injection_target_flow_ml_per_hour` kulcs csak
+  migrációs fallback az előkészítési értékhez. Ha az új mérési kulcs
+  hiányzik, az aktív szakasz mentett cél-flow-ja az egyértelmű alapérték.

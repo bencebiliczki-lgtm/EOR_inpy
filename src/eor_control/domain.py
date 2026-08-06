@@ -31,6 +31,8 @@ class MeasurementSnapshot:
     quality: DataQuality = DataQuality.GOOD
     raw_line_pressure_bar: float | None = None
     raw_differential_pressure_bar: float | None = None
+    raw_line_voltage: float | None = None
+    raw_differential_voltage: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

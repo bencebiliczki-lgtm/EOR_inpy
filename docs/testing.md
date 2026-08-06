@@ -56,6 +56,12 @@ az ismeretlenül újabb sémaverzió elutasítását. A projekttörlési teszt e
 fázis-metaadatok kaszkádos törlését; a UI-teszt az INI-hivatkozások tisztítását és a
 nyers CSV-k változatlan megőrzését is igazolja.
 
+A NAS-kapcsolati teszt ideiglenes mappában ellenőrzi az írás–visszaolvasás–törlés
+kört és azt, hogy nem marad próbfájl. A UI-regresszió ellenőrzi a központi NAS
+beállítási oldalt, a csak olvasható útvonalkijelzést, a natív mappaválasztót, a
+tartós `nas/enabled` és `nas/target_path` kulcsokat, valamint hogy a CSV-export
+natív fájlmentő ablakot használ és megjegyzi az utolsó célmappát.
+
 Az időzónatesztek külön téli és nyári UTC-időponttal ellenőrzik az
 `Europe/Budapest` átváltást, valamint az UTC szerint előző napra eső, de magyar
 helyi idő szerint már következő napi projektmappa elnevezését.
@@ -102,19 +108,24 @@ A PID-profil tesztek lefedik a 4-es SQLite-sémára migrálást, a validációt,
 kis-/nagybetűtől független név szerinti felülírást, a betöltést és törlést. A
 UI-teszt ellenőrzi a személyre szabott mezők mentését, a kézi módosításkor történő
 „Egyéni beállítások” váltást és az alkalmazás újraindítása utáni visszatöltést.
+A runtime-regresszió ellenőrzi, hogy a sorba állított PID-csomagot pontosan a
+következő háttér-vezérlési ciklus alkalmazza. A UI-regresszió futó mérésnél
+ellenőrzi a kézi/automata mód azonnali runtime-frissítését, valamint a több
+mezőváltozást összevonó, valós idejű PID-frissítést.
 A mérési és adattárolási tesztek lefedik mindkét pumpa pozitív és negatív nettó
 térfogatváltozását, a számlálók újraindítását, a V1→V2 biztonsági mentéses
 migrációt, a fázisok első előfordulási sorrendjét, a fázisszűrést és a
 `víz → olaj → víz` szegmentálást. Az exporttesztek ellenőrzik az egyfázisú
 CSV-kimenetet, valamint azt, hogy a projekt Excel-fájljában minden lezárt fázis
 saját munkalapot kap és egy ismételt fázisfrissítés nem törli a többi lapot.
-A szimulációs mentéstiltási tesztek külön igazolják, hogy sem a szolgáltatási
-perzisztálási kérés, sem a writer közvetlen meghívása nem hoz létre rekordot,
-könyvtárat, üres CSV-t vagy NAS-feladatot. A UI-teszt a „NINCS ADATMENTÉS” jelölést
-és a szimuláció után változatlanul üres éles mérési előzményt is ellenőrzi.
+A szimulációs perzisztenciatesztek igazolják az eredetjelölt CSV és pillanatképek
+létrejöttét, valamint azt, hogy szimulált rekord nem kerül a fizikai mérés
+fájljába. A UI-teszt ellenőrzi az aktív szimulációs adatmentés jelölését és a
+mentett rekord megjelenését az előzménynézetben. A fázislezárási regresszió ugyanazt
+a writer-életciklust futtatja `live` és `simulation` eredettel, és mindkettőnél
+ellenőrzi az egyszeri lezárási eseményt és a nyers rekordok megmaradását.
 A Developer szimulációs mód tesztje ellenőrzi a hardvermódból visszaépített
-szimulációs eszközréteget, a kikapcsolt writert, az üres projektkönyvtárat és a
-felület módjelzését.
+szimulációs eszközréteget, az engedélyezett writert és a felület módjelzését.
 A dashboard értesítési tesztje igazolja az állandó mód- és riasztássáv jelenlétét,
 a háttérben vagy minimalizálva történő tálcagomb-figyelmeztetést, valamint hogy
 azonos eseménykulcs csak egy értesítést válthat ki. A riasztásbezárási tesztek
@@ -157,7 +168,8 @@ nem, a pumpaesemény viszont megjelenik. A felderítési összegzés láthatós�
 teszt ellenőrzi normál és Developer módban.
 
 A pumpavezérlési tesztek ellenőrzik a REMOTE–konfigurálás–RUN–STOP–LOCAL sorrendet,
-a pontos RUN-megerősítést, a konfigurálatlan indítás tiltását, a konfigurált interlock
+a belső RUN-engedélytoken ellenőrzését, a konfigurálatlan indítás tiltását, a
+konfigurált interlock
 határ alatti és pontos határértékű esetét, valamint a globális safe STOP
 állapotszinkronját. Külön teszt igazolja a B csatorna parancsutótagjait.
 Az NI-engedélyezési regresszió ellenőrzi a kezelői hardverengedély → NI fizikai
@@ -264,3 +276,21 @@ nem véges jelet, AO- és szelephibánál a központi STOP/SAFE útvonalat, a k�
 kihagyási indokot és a JSON round-tripet. A PID-tesztek ellenőrzik a holtsávban
 befagyó integrátort, az időalapú slew rate-et, szűrést, irányváltásszámlálást,
 oszcillációs hibát és az ugrásmentes kézi–automata átmenetet.
+Mérésindítási regressziók
+-------------------------------
+
+A fake pumpás tesztek a parancssorrendet is ellenőrzik: az első írás előtt
+mindkét pumpán sikeres olvasásnak kell történnie, olvasási hiba után pedig
+nem jelenhet meg `REMOTE`, `FLOW` vagy `RUN`. Külön teszt fedi a
+`STOP → FLOW → visszaolvasás → RUN` mérési flow-váltást, a 0,9 V-os
+véges jel elfogadását és a nem véges jel elutasítását. A kezdő BES- és
+KÖP-nyomásnak a teljes stabilitási időn át fenn kell maradnia, majd a BES
+pumpának az operátori döntésig STOP állapotban kell várnia. Az exportteszt
+ellenőrzi az eseményazonosító deduplikálását, az eseménylapot és a diagram
+marker-sorozatát.
+
+A `test_stable_profile.py` ellenőrzi a stabil profil sémáját, a hiányzó
+fizikai paraméterek mérésblokkoló hatását, a három pollingperiódusos
+STALE-ablakot, a csak hiányzó INI-kulcsokra alkalmazott migrációt és a COM3
+automatikus jelöltlistából való kizárását. A COM3 manuális szervizmódú
+felülbírálása külön teszteset.

@@ -73,7 +73,7 @@ def test_output_requires_exact_confirmation_and_range() -> None:
     assert backend.writes == [("Dev1/ao0", 2.0)]
 
 
-def test_safe_state_writes_configured_voltage_then_revokes_authorization() -> None:
+def test_safe_state_writes_configured_voltage_and_keeps_session_authorization() -> None:
     backend = FakeBackend()
     daq = NidaqmxDataAcquisition(backend, config())
     daq.authorize_output(NidaqmxDataAcquisition.HARDWARE_CONFIRMATION)
@@ -83,9 +83,9 @@ def test_safe_state_writes_configured_voltage_then_revokes_authorization() -> No
     daq.set_safe_state()
 
     assert backend.writes == [("Dev1/ao0", 1.0)]
-    assert not daq.output_authorized
-    with pytest.raises(PermissionError):
-        daq.write_voltage("valve_output", 2.0)
+    assert daq.output_authorized
+    daq.write_voltage("valve_output", 2.0)
+    assert backend.writes[-1] == ("Dev1/ao0", 2.0)
 
 
 def test_safe_state_does_not_write_before_hardware_authorization() -> None:

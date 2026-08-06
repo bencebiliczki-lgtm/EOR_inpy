@@ -1,4 +1,4 @@
-# PyInstaller onefile build for the offline Windows measurement workstation.
+# PyInstaller onedir build for the offline Windows measurement workstation.
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
@@ -12,6 +12,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(root / "img"), "img"),
+        (str(root / "config" / "stable-defaults.json"), "config"),
         (str(root / "docs" / "drivers_readme.txt"), "."),
     ] + package_metadata + timezone_data,
     hiddenimports=[
@@ -37,9 +38,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="EOR_Controller",
     debug=False,
     bootloader_ignore_signals=False,
@@ -47,4 +47,14 @@ exe = EXE(
     upx=True,
     console=True,
     icon=str(root / "img" / "icon.png"),
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name="EOR_Controller",
 )

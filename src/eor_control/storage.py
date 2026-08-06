@@ -51,7 +51,7 @@ class CsvMeasurementWriter:
         "quality",
         "safety_reasons",
     )
-    HEADER = (
+    V3_HEADER = (
         "recorded_at_utc",
         "monotonic_seconds",
         "jacket_pressure_bar",
@@ -70,6 +70,13 @@ class CsvMeasurementWriter:
         "active_stage",
         "quality",
         "safety_reasons",
+    )
+    HEADER = (
+        *V3_HEADER[:10],
+        "raw_line_voltage",
+        *V3_HEADER[10:12],
+        "raw_differential_voltage",
+        *V3_HEADER[12:],
     )
 
     def __init__(self, path: Path) -> None:
@@ -107,9 +114,15 @@ class CsvMeasurementWriter:
                 for row in rows
             ]
             header = tuple(rows[0])
-        if header not in (cls.LEGACY_HEADER, cls.V2_HEADER):
+        if header not in (cls.LEGACY_HEADER, cls.V2_HEADER, cls.V3_HEADER):
             raise ValueError("a meglévő mérési CSV fejléce nem támogatott")
-        backup_version = "v1" if header == cls.LEGACY_HEADER else "v2"
+        backup_version = (
+            "v1"
+            if header == cls.LEGACY_HEADER
+            else "v2"
+            if header == cls.V2_HEADER
+            else "v3"
+        )
         legacy_index = {name: index for index, name in enumerate(header)}
         converted = [list(cls.HEADER)]
         for row in rows[1:]:
@@ -128,6 +141,8 @@ class CsvMeasurementWriter:
                         if name == "raw_line_pressure_bar"
                         else row[legacy_index["differential_pressure_bar"]]
                         if name == "raw_differential_pressure_bar"
+                        else ""
+                        if name in {"raw_line_voltage", "raw_differential_voltage"}
                         else row[legacy_index[name]]
                     )
                     for name in cls.HEADER
@@ -160,8 +175,10 @@ class CsvMeasurementWriter:
                 self._hu(snapshot.injection_pump.flow_ml_per_hour),
                 self._hu(snapshot.injection_pump.remaining_volume_ml),
                 self._hu(record.injection_net_volume_ml),
+                self._hu(snapshot.raw_line_voltage),
                 self._hu(snapshot.raw_line_pressure_bar),
                 self._hu(snapshot.line_pressure_bar),
+                self._hu(snapshot.raw_differential_voltage),
                 self._hu(snapshot.raw_differential_pressure_bar),
                 self._hu(snapshot.differential_pressure_bar),
                 self._hu(snapshot.valve_percent),

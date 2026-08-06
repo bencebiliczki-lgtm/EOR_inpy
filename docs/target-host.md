@@ -58,9 +58,8 @@ ellenőrizni kell az eszköz nevét, az AI/AO csatornákat és a driver működ�
 ## Fejlesztési és kiadási következmények
 
 - A célplatform Windows 10 x64; a kiadást ezen kell validálni.
-- A kiadás PyInstaller `onefile` csomag: a célgépre az egyetlen EXE-t, valamint az
-  alkalmazás által külön kezelt írható konfigurációs és adatkönyvtárakat kell
-  telepíteni vagy létrehozni.
+- A kiadás PyInstaller `onedir` csomag. A teljes `dist/AFKI-EOR/` könyvtárat,
+  benne a verziózott stabil profilt kell a célgépre másolni.
 - Meg kell őrizni a régi CPU-val kompatibilis NumPy 1.26.4 korlátozást.
 - A felderítés nem tekintheti az összes COM-portot pumpaportnak; a port leírását
   meg kell jeleníteni vagy a kezelői kiválasztásnál figyelembe kell venni.

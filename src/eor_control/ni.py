@@ -231,26 +231,26 @@ class NidaqmxDataAcquisition:
         )
 
     def set_safe_state(self) -> None:
+        if self._output_authorized:
+            if self._config.valve_output_channel is None:
+                return
+            self._backend.write_voltage(
+                self._config.valve_output_channel, self._config.safe_output_voltage
+            )
+            self._log(
+                DiagnosticCategory.NI_VALVE,
+                "SAFE",
+                f"{self._config.valve_output_channel}={self._config.safe_output_voltage:.6f} V",
+            )
+
+    def close(self) -> None:
         try:
-            if self._output_authorized:
-                if self._config.valve_output_channel is None:
-                    return
-                self._backend.write_voltage(
-                    self._config.valve_output_channel, self._config.safe_output_voltage
-                )
-                self._log(
-                    DiagnosticCategory.NI_VALVE,
-                    "SAFE",
-                    f"{self._config.valve_output_channel}={self._config.safe_output_voltage:.6f} V",
-                )
+            self.set_safe_state()
         finally:
             self._output_authorized = False
             close_output = getattr(self._backend, "close_output", None)
             if callable(close_output):
                 close_output()
-
-    def close(self) -> None:
-        self.set_safe_state()
 
     def _validate_output(self, voltage: float) -> None:
         if not isfinite(voltage):

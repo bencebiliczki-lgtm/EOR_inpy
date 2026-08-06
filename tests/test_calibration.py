@@ -11,11 +11,18 @@ def test_one_to_five_volts_maps_to_zero_to_four_hundred_bar() -> None:
     assert calibration.convert(5.0) == pytest.approx(400.0)
 
 
-def test_out_of_range_voltage_is_rejected() -> None:
+def test_out_of_range_voltage_is_extrapolated_as_diagnostic_data() -> None:
     calibration = LinearCalibration(1.0, 5.0, 0.0, 400.0)
 
-    with pytest.raises(ValueError, match=r"0\.9 V.*1–5 V"):
-        calibration.convert(0.9)
+    assert calibration.convert(0.9) == pytest.approx(-10.0)
+    assert not calibration.is_inside_nominal_range(0.9)
+
+
+def test_non_finite_voltage_is_rejected() -> None:
+    calibration = LinearCalibration(1.0, 5.0, 0.0, 400.0)
+
+    with pytest.raises(ValueError, match="finite"):
+        calibration.convert(float("nan"))
 
 
 def test_invalid_calibration_range_is_rejected_at_configuration_time() -> None:

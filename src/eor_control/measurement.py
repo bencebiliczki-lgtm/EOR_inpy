@@ -126,13 +126,17 @@ class MeasurementService:
         if self._initial_injection_volume_ml is None:
             self._initial_injection_volume_ml = injection.remaining_volume_ml
 
-        line_pressure, raw_line_pressure = self._read_optional_pressure(
+        line_pressure, raw_line_pressure, raw_line_voltage = self._read_optional_pressure(
             self._channels.line_pressure,
             self._line_calibration,
             "line pressure input",
             "line_pressure",
         )
-        differential_pressure, raw_differential_pressure = self._read_optional_pressure(
+        (
+            differential_pressure,
+            raw_differential_pressure,
+            raw_differential_voltage,
+        ) = self._read_optional_pressure(
             self._channels.differential_pressure,
             self._differential_calibration,
             "differential pressure input",
@@ -150,6 +154,8 @@ class MeasurementService:
             quality=self._combined_quality(jacket_quality, injection_quality),
             raw_line_pressure_bar=raw_line_pressure,
             raw_differential_pressure_bar=raw_differential_pressure,
+            raw_line_voltage=raw_line_voltage,
+            raw_differential_voltage=raw_differential_voltage,
         )
         if use_line_pressure_for_control:
             if snapshot.line_pressure_bar is None:
@@ -191,9 +197,9 @@ class MeasurementService:
         calibration: LinearCalibration,
         label: str,
         filter_key: str,
-    ) -> tuple[float | None, float | None]:
+    ) -> tuple[float | None, float | None, float | None]:
         if channel is None:
-            return None, None
+            return None, None, None
         config = self._analog_filter_config
         read_many = getattr(self._daq, "read_voltages", None)
         samples = (
@@ -206,6 +212,7 @@ class MeasurementService:
             return (
                 calibration.convert(filtered.filtered_voltage),
                 calibration.convert(filtered.raw_voltage),
+                filtered.raw_voltage,
             )
         except ValueError as error:
             raise ValueError(f"{label}: {error}") from error

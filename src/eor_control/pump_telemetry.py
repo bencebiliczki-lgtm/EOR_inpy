@@ -29,6 +29,8 @@ class PollablePump(Protocol):
 
     def set_constant_flow(self, flow_ml_per_hour: float) -> None: ...
 
+    def read_configured_flow_ml_per_hour(self) -> float: ...
+
     def set_constant_pressure(self, pressure_bar: float) -> None: ...
 
     def set_pressure_limit(self, pressure_bar: float) -> None: ...
@@ -46,9 +48,9 @@ class PollablePump(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class PumpPollingIntervals:
-    pressure_seconds: float = 0.4
-    slow_telemetry_seconds: float = 1.5
-    pressure_stale_seconds: float = 2.0
+    pressure_seconds: float = 1.0
+    slow_telemetry_seconds: float = 1.0
+    pressure_stale_seconds: float = 3.0
     slow_telemetry_stale_seconds: float = 3.0
     startup_timeout_seconds: float = 3.0
 
@@ -273,6 +275,9 @@ class PollingPump:
     def set_constant_flow(self, flow_ml_per_hour: float) -> None:
         self._execute(lambda: self._pump.set_constant_flow(flow_ml_per_hour))
 
+    def read_configured_flow_ml_per_hour(self) -> float:
+        return self._execute(self._pump.read_configured_flow_ml_per_hour)
+
     def set_constant_pressure(self, pressure_bar: float) -> None:
         self._execute(lambda: self._pump.set_constant_pressure(pressure_bar))
 
@@ -320,8 +325,8 @@ class PollingPump:
                 self._condition.notify_all()
 
     def _execute(
-        self, operation: Callable[[], object], *, require_connected: bool = True
-    ) -> None:
+        self, operation: Callable[[], T], *, require_connected: bool = True
+    ) -> T:
         if require_connected:
             with self._condition:
                 if not self._connected:
@@ -331,7 +336,7 @@ class PollingPump:
             self._condition.notify_all()
         try:
             with self._command_lock:
-                operation()
+                return operation()
         finally:
             with self._condition:
                 self._pending_commands -= 1

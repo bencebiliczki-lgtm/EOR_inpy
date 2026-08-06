@@ -76,13 +76,15 @@ megnyitáskor biztonsági másolat mellett migrálódnak; korábbi fájlnál a r
 nyomásérték kerül mindkét új oszlopba, mert abból utólag nem állítható elő külön
 szűretlen jel.
 
-A szimulációs összeállításban a `MeasurementService.persistence_enabled=False` és
-a `ProjectMeasurementWriter.enabled=False` egymástól függetlenül tiltja a tartós
-írást. A letiltott writer a projekt és fázis útvonalát csak a korábbi éles adatok
-kereséséhez számítja ki, könyvtárat vagy üres fájlt sem hoz létre. Hardvermód
-aktiválásakor új, engedélyezett writer és `measurement_kind=live` konfigurációs
-pillanatkép készül. Az előzménynézet és a NAS csak `*_live_raw.csv` fájlokat gyűjt,
-ezért régi, nem jelölt szimulációs fájl nem keveredhet az éles adatok közé.
+A szimulációs összeállítás engedélyezett `MeasurementService`-t és
+`ProjectMeasurementWriter`-t használ, ezért ugyanazt az összeomlástűrő mentési,
+Excel-export és NAS-szinkronfolyamatot kapja, mint a hardvermérés. A két eredet nem
+keveredik: a szimulációs fájl `_simulation_live_raw.csv` végződésű, külön
+`project_simulation.json`, `config_snapshot_simulation.json` és
+`calibration_snapshot_simulation.json` készül `measurement_kind=simulation`
+jelöléssel. A hardveres fájl és pillanatkép továbbra is `live` jelölésű. A dashboard
+mindkét módhoz ugyanazon writer-gyárat és projektkiválasztási útvonalat használja;
+ebben az adatkezelési rétegben a mód csak az eredetjelölést határozza meg.
 
 A felhasználói CSV-export választható elválasztót és tizedesvesszőt támogat. A
 `ProjectMeasurementWriter` rekordot tartalmazó fázis lezárásakor egyszeri
@@ -99,6 +101,14 @@ alkalmazás- és hálózati hiba után is megmarad. A
 `BackgroundNasSynchronizer` külön szálon, ideiglenes fájl és atomikus csere
 használatával másol; revíziószám akadályozza meg, hogy másolás közben érkező frissebb
 rekord lekerüljön a várólistáról.
+
+A központi `NAS és tárhely` beállítási oldal csak a Windows által már elérhetővé
+tett UNC-megosztást vagy hálózati meghajtót választja ki; hitelesítő adatot nem
+tárol. A kapcsolatpróba háttérszálon könyvtárlistázást, szabadhely-lekérdezést és
+egy egyedi ideiglenes fájl `create → flush/fsync → read → delete` körét hajtja
+végre. A `QFileSystemModel` olvasható, de az alkalmazásból nem módosítható
+fájlrendszernézetet ad. Az exportcélokat natív fájl-/mappaválasztó adja vissza,
+kézzel szerkeszthető útvonalmező nélkül.
 
 ## Projektadatbázis
 
@@ -159,7 +169,13 @@ A szimulátoros dashboard az SQLite repositoryból választ projektet és aktív
 szakaszt; szakasz nélkül mérés nem indítható. A felületről projekt hozható létre,
 szakasz adható hozzá vagy nevezhető át, továbbá futás közben is módosíthatók a PID
 erősítések, a hatásirány és a kimeneti korlátok. A PID újrakonfigurálása az aktuális
-kimenetről inicializálja az integrált tagot. A leválasztás és a reteszelt hiba
+kimenetről inicializálja az integrált tagot. A UI 100 ms-os egyszeri időzítővel
+összevonja az egy szerkesztési művelethez tartozó mezőváltozásokat, majd validált
+`PidParameters` csomagot ad a `BackgroundControlRunner` váróhelyére. A runner ezt
+a következő vezérlési ciklus elején, ugyanazon cikluszáron belül alkalmazza; a Qt
+főszál nem vár hardver-I/O-ra. Érvénytelen átmeneti értéknél a korábbi PID marad
+aktív. Hardvermérés közbeni egyéni hangolás törli a következő mérésre vonatkozó
+fizikai PID-validáltság jelzőjét. A leválasztás és a reteszelt hiba
 biztonságos lezárása kizárólag az alkalmazási állapotgépen keresztül történik.
 Az aktív szakasz egyetlen `QComboBox` példánya az **Aktív projekt** összefoglaló
 kártyán jelenik meg. Ez a runtime, az INI-ben mentett utolsó szakasz és a
@@ -361,7 +377,8 @@ kapcsolatpróba és a kezelő `HARDVER mód aktiválása` művelete továbbra is
 az eltárolt mód önmagában nem engedélyez fizikai kimenetet. Bekapcsolása csak
 leállított mérésnél, az élő kapcsolat biztonságos lezárása után cserélheti le a
 hardveradaptereket szimulátorokra. Az új `MeasurementService` és
-`ProjectMeasurementWriter` külön-külön is tiltott perzisztenciával indul. A
+`ProjectMeasurementWriter` engedélyezett perzisztenciával, szimulált
+eredetjelöléssel indul. A
 kapcsoló kikapcsolása a meglévő, felderítést és kezelői megerősítést végző
 eszközbeállítási folyamatot nyitja meg; közvetlenül nem aktivál fizikai kimenetet.
 
@@ -374,8 +391,8 @@ egyszeri tüskét, befagyott jelet és kapcsolatvesztést, a
 irányt képes modellezni. A Developer beállítások **Szimuláció és hibateszt**
 oldala módosítja a futó szimulátor paramétereit és `SIMULATION` diagnosztikai
 eseménnyel naplózza a hibainjektálást. Ezek az objektumok csak
-`RunMode.SIMULATION` mellett érhetők el, és a mérési perzisztencia továbbra is
-tiltott.
+`RunMode.SIMULATION` mellett érhetők el; a mérési perzisztencia aktív, és a
+szimulált eredetet a fájlnév és a pillanatképek is megőrzik.
 
 A normál dashboardon nincs külön `Csatlakozás` és `Leválasztás`: a HARDVER mód
 aktiválása létrehozza a `PollingPump` workereket, megnyitja mindkét pyserial
@@ -425,7 +442,7 @@ Csak elfogadott jelentés után indul el az állapotgép és a háttér-runtime.
 
 ## Terminálos vezérlés
 
-Az `AFKI-EOR.exe terminal` ugyanabból a PyInstaller onefile kiadásból indít
+Az `AFKI-EOR.exe terminal` ugyanabból a PyInstaller onedir kiadásból indít
 interaktív parancssori munkamenetet. A `TerminalApplication` nem kommunikál
 közvetlenül eszközdriverrel: a `DeviceControlService`, `ControlLoop`,
 `BackgroundControlRunner`, `MeasurementService` és `SafetyMonitor` rétegeket
@@ -433,13 +450,12 @@ használja. Emiatt az állapotátmenetek, a reteszelt hiba és a safe-state vise
 azonos az alkalmazás többi részével.
 
 A terminál összeállítása szimulált pumpákat, DAQ-ot és szelepet, valamint
-`persistence_enabled=False` mérési szolgáltatást és eldobó writert használ. Így a
-terminálos szimuláció akkor sem készíthet fájlt, ha a háttér-runtime perzisztálást
-kér. A folyamatból kilépés és a `Ctrl+C` előbb leállítja a runtime-ot, safe-state-et
+engedélyezett, `measurement_kind=simulation` writerrel menti a rekordokat egy külön
+„Terminál szimuláció” projektbe. A folyamatból kilépés és a `Ctrl+C` előbb leállítja a runtime-ot, safe-state-et
 kér, majd leválasztja az eszközöket. Fizikai hardverösszeállítás nincs bekötve a
 terminál belépési pontjába.
 
-A Windows onefile EXE konzolos alrendszerrel készül, hogy a terminál mód szabályos
+A Windows onedir EXE konzolos alrendszerrel készül, hogy a terminál mód szabályos
 stdin/stdout kapcsolatot kapjon. Grafikus, dupla kattintásos indításnál a belépési
 pont csak a saját, külön létrehozott konzolablakát rejti el; egy már megnyitott
 PowerShell vagy parancssor konzolát nem zárja be.
@@ -449,14 +465,16 @@ PowerShell vagy parancssor konzolát nem zárja be.
 A `PumpControlService` külön alkalmazási állapotgépet tart fenn mindkét pumpához:
 helyi, remote, konfigurált és futó állapotot követ. Az írási parancsok csak sikeres
 hardveraktiválás után engedélyezettek. A kezelő `CONST FLOW` vagy `CONST PRESS`
-módot és célértéket állíthat, majd külön megerősítéssel indíthatja a pumpát.
+módot és célértéket állíthat, majd külön, alapértelmezetten elutasított gombos
+megerősítéssel indíthatja a pumpát; parancsszöveget nem kell begépelnie.
 
 Normál hardveres mérésindításkor külön ablak gyűjti be mindkét pumpa cél-
 kezdőnyomását, a köpeny nyomásfelépítési térfogatáramát és a besajtoló
 térfogatáramát. Az ablak csak akkor enged indítani, ha a tervezett köpenynyomás
 legalább a konfigurált biztonsági többlettel nagyobb a besajtoló kezdőnyomásánál.
 Az utoljára elfogadott értékeket a `QSettings` megőrzi, de minden mérés előtt újra
-megjelennek, és csak pontos kezelői megerősítéssel fogadhatók el. A `ml/h` értékeket
+megjelennek, és csak explicit gombos kezelői megerősítéssel fogadhatók el. A
+`ml/h` értékeket
 a teljes alkalmazási és pumpavezérlési réteg változatlanul `ml/h` egységben adja
 tovább. Az explicit indítási parancsnál a DASNET adapter előbb `ML/HR` egységre
 állítja az adott pumpacsatornát, majd az UI-ban megadott számértéket küldi ki.
@@ -532,3 +550,36 @@ tárolja a csak olvasásos kapcsolatpróbát. A `device_testing.py` hardverfügg
 A Qt `DeviceTestWizard` signalokon veszi át a háttérműveletek eredményét; hosszú
 szenzorteszt nem fut a UI-szálon. Funkcionális teszt és normál runtime nem futhat
 egyszerre, bezárás és kivétel ugyanazt a STOP/SAFE útvonalat használja.
+A mérésindítás állapotai és írási kapuja
+-----------------------------------------------
+
+Az alkalmazási mód (`HARDWARE`/`SIMULATION`), a hardverkapcsolat
+(`CONNECTED`/`PARTIAL`/`DISCONNECTED`) és a mérés állapota egymástól
+független. A mérési sorrend: `IDLE → PREPARING →
+WAITING_CONFIRMATION → RUNNING`; hiba esetén `STOPPED_BY_FAULT` következik,
+miközben az alkalmazás hardvermódban és a profil megmarad.
+
+A pumpaszolgáltatás írási kapuja mindkét pumpa teljes, friss
+`PRESS/FLOW/VOL/STATUS` állapotának sikeres lekérdezése. E kapu előtt nem
+adható ki `REMOTE`, `FLOW`, `PRESS`, `RUN` vagy analóg kimeneti parancs. A BES
+előkészítési flow-ja csak a kezdőnyomás felépítéséhez használható. A
+stabil kezdőnyomás után a KÖP pumpa a konfigurált nyomástartásban marad, a BES
+pumpa pedig STOP állapotba kerül. A PID és az adatmentés a nem időzített kezelői
+megerősítésig nem indul.
+
+A repositoryban rendelkezésre álló DASNET dokumentáció nem igazolja a
+futás közbeni közvetlen FLOW-átírást. Ezért a BES mérési flow induláskori
+és futás közbeni váltása konzervatívan `STOP → CONST FLOW/FLOW →
+SETFLOW visszaolvasás → RUN` sorrendű. Sikertelen visszaolvasásnál a régi
+alkalmazott érték marad a felületen, a rendszer pedig biztonságosan leáll.
+
+A kalibráció `voltage_min`/`voltage_max` pontjai nem biztonsági határok. A
+véges minták lineárisan extrapolálhatók (például a kb. 0,9 V-os nullpont),
+a névleges tartományon kívüliség diagnosztikai tulajdonság. `NaN`, nem
+véges, stale vagy DAQ-hibás adat továbbra is hibás minőségű.
+
+A hibák, figyelmeztetések és kezelői módosítások fázisonként egy
+`*.events.jsonl` append-only oldalfájlba kerülnek. Egy `event_id` egyetlen
+rekordot azonosít; az aktuális és a teljes mérési diagram ugyanazt a rekordot
+jeleníti meg. A fázis Excel-exportja az eseményeket külön munkalapon és a
+nyomásdiagram marker-sorozatában is megőrzi.

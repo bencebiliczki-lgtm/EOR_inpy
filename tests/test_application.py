@@ -63,10 +63,9 @@ class OutputAuthorizationAwareDaq(SimulatedDataAcquisition):
 
     def set_safe_state(self) -> None:
         super().set_safe_state()
-        self.output_authorized = False
 
 
-def test_hardware_connect_requires_ni_output_authorization_and_stop_revokes_both() -> None:
+def test_hardware_connect_requires_ni_output_authorization_and_stop_keeps_session() -> None:
     jacket = SimulatedPump()
     injection = SimulatedPump()
     daq = OutputAuthorizationAwareDaq()
@@ -87,10 +86,9 @@ def test_hardware_connect_requires_ni_output_authorization_and_stop_revokes_both
     control.stop()
 
     assert control.status.state is ApplicationState.READY
-    assert not control.status.hardware_authorized
-    assert not daq.output_authorized
-    with pytest.raises(PermissionError, match="explicit operator"):
-        control.start()
+    assert control.status.hardware_authorized
+    assert daq.output_authorized
+    control.start()
 
 
 def test_emergency_stop_is_latched_until_acknowledged() -> None:
@@ -108,7 +106,7 @@ def test_emergency_stop_is_latched_until_acknowledged() -> None:
         control.start()
 
     control.acknowledge_fault()
-    assert control.status.state is ApplicationState.IDLE
+    assert control.status.state is ApplicationState.READY
 
 
 def test_safe_state_logs_every_action_and_result(tmp_path: Path) -> None:
@@ -138,7 +136,7 @@ def test_safe_state_logs_every_action_and_result(tmp_path: Path) -> None:
     }
 
 
-def test_hardware_authorization_is_cleared_on_disconnect_and_fault_acknowledgement() -> None:
+def test_hardware_authorization_is_cleared_only_on_disconnect() -> None:
     control, *_ = service(RunMode.HARDWARE)
     control.authorize_hardware(DeviceControlService.HARDWARE_CONFIRMATION)
     control.connect()
@@ -149,7 +147,7 @@ def test_hardware_authorization_is_cleared_on_disconnect_and_fault_acknowledgeme
     control.connect()
     control.emergency_stop()
     control.acknowledge_fault()
-    assert not control.status.hardware_authorized
+    assert control.status.hardware_authorized
 
 
 class FailingPump(SimulatedPump):

@@ -1,4 +1,5 @@
 from io import StringIO
+from pathlib import Path
 
 from eor_control.terminal import TerminalApplication, run_terminal
 
@@ -33,7 +34,7 @@ def test_terminal_emergency_stop_requires_acknowledgement() -> None:
         assert snapshot.state == "fault"
         assert snapshot.fault_reason == "kezelői próba"
         terminal.execute("acknowledge")
-        assert terminal.snapshot().state == "idle"
+        assert terminal.snapshot().state == "ready"
     finally:
         terminal.close()
 
@@ -51,10 +52,11 @@ def test_terminal_rejects_invalid_control_settings() -> None:
     assert "injection vagy line" in messages
 
 
-def test_run_terminal_accepts_a_scripted_session() -> None:
+def test_run_terminal_accepts_a_scripted_session(tmp_path: Path) -> None:
     input_stream = StringIO("status\nconnect\nstart\nstop\ndisconnect\nexit\n")
     output_stream = StringIO()
-    assert run_terminal(input_stream, output_stream) == 0
+    assert run_terminal(input_stream, output_stream, data_root=tmp_path) == 0
+    assert tuple(tmp_path.rglob("*_simulation_live_raw.csv"))
     output = output_stream.getvalue()
     assert "AFKI EOR terminál" in output
     assert "Állapot=IDLE" in output

@@ -114,6 +114,20 @@ class IscoPump:
             )
         return flow * 60.0 if unit == "ML/MIN" else flow
 
+    def read_configured_flow_ml_per_hour(self) -> float:
+        """Read the documented SETFLOW target for command verification."""
+        self._require_connected()
+        command = self._channel_command("SETFLOW")
+        response = self._client.command(command).message
+        flow, reported_unit = _parse_measurement_parts(response, command=command)
+        unit = (reported_unit or self._config.flow_unit).upper()
+        if unit not in {"ML/MIN", "ML/HR"}:
+            raise ValueError(
+                f"unexpected ISCO unit {unit!r} for {command}; "
+                "expected ML/MIN or ML/HR"
+            )
+        return flow * 60.0 if unit == "ML/MIN" else flow
+
     def read_remaining_volume_ml(self) -> float:
         self._require_connected()
         return self._read_measurement(

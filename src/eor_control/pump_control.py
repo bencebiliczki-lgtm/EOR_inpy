@@ -29,6 +29,8 @@ class ControllablePump(Protocol):
 
     def set_constant_flow(self, flow_ml_per_hour: float) -> None: ...
 
+    def read_configured_flow_ml_per_hour(self) -> float: ...
+
     def set_constant_pressure(self, pressure_bar: float) -> None: ...
 
     def set_pressure_limit(self, pressure_bar: float) -> None: ...
@@ -314,6 +316,12 @@ class PumpControlService:
         for role in PumpRole:
             self._require_connected(role)
 
+        # This is the write barrier for measurement startup.  A complete,
+        # fresh read of both pumps must succeed before REMOTE/FLOW/PRESS/RUN.
+        # Keeping it in this service makes the guarantee independent of UI
+        # timing and dialog behaviour.
+        self.statuses()
+
         def require_application_safe() -> None:
             if startup_safety_check is not None:
                 reasons = startup_safety_check()
@@ -384,11 +392,13 @@ class PumpControlService:
 
             injection_deadline = monotonic() + pressure_buildup_timeout_seconds
             jacket_holding = False
+            targets_stable_since: float | None = None
             while True:
                 require_application_safe()
                 statuses = self.statuses()
                 jacket_pressure = statuses[PumpRole.JACKET].pressure_bar
                 injection_pressure = statuses[PumpRole.INJECTION].pressure_bar
+                now = monotonic()
                 if (
                     jacket_pressure >= jacket_target_pressure_bar
                     and not jacket_holding
@@ -405,8 +415,13 @@ class PumpControlService:
                     jacket_pressure >= jacket_target_pressure_bar
                     and injection_pressure >= injection_start_pressure_bar
                 ):
-                    break
-                if monotonic() >= injection_deadline:
+                    if targets_stable_since is None:
+                        targets_stable_since = now
+                    if now - targets_stable_since >= margin_stability_seconds:
+                        break
+                else:
+                    targets_stable_since = None
+                if now >= injection_deadline:
                     raise TimeoutError(
                         "pump startup targets were not reached: "
                         f"jacket {jacket_pressure:.2f}/"
@@ -417,6 +432,11 @@ class PumpControlService:
                 sleep(polling_interval_seconds)
 
             require_application_safe()
+            # Do not keep injecting startup flow while operator confirmation is
+            # pending.  The jacket pump retains its configured pressure hold;
+            # the BES pump is deliberately stopped until the independently
+            # configured measurement flow is verified and RUN is re-issued.
+            self.stop(PumpRole.INJECTION)
         except Exception as error:
             stop_errors = self.stop_all()
             if stop_errors:
@@ -424,6 +444,66 @@ class PumpControlService:
                     f"{error}; pump startup rollback errors: {'; '.join(stop_errors)}"
                 ) from error
             raise
+
+    def apply_measurement_flow(
+        self,
+        flow_ml_per_hour: float,
+        *,
+        verification_tolerance_ml_per_hour: float = 1e-6,
+    ) -> float:
+        """Apply and verify the BES measurement flow with a documented sequence.
+
+        The available 260D documentation in this repository does not establish
+        that changing FLOW while RUN is safe.  Therefore this uses the explicit
+        STOP -> CONST FLOW/FLOW -> SETFLOW readback -> RUN sequence.
+        """
+        self._require_authorized()
+        self._require_connected(PumpRole.INJECTION)
+        if not isfinite(flow_ml_per_hour) or flow_ml_per_hour <= 0.0:
+            raise ValueError("measurement flow must be positive and finite")
+        if (
+            not isfinite(verification_tolerance_ml_per_hour)
+            or verification_tolerance_ml_per_hour < 0.0
+        ):
+            raise ValueError("flow verification tolerance must be finite and nonnegative")
+        pump = self._pumps[PumpRole.INJECTION]
+        state = self._states[PumpRole.INJECTION]
+        if not state.remote:
+            raise RuntimeError("injection pump must be in REMOTE mode")
+
+        pump.request_stop()
+        self._states[PumpRole.INJECTION] = PumpPreparationState(
+            remote=True,
+            configured=state.configured,
+            running=False,
+            mode=state.mode,
+            target=state.target,
+        )
+        pump.set_constant_flow(flow_ml_per_hour)
+        readback = pump.read_configured_flow_ml_per_hour()
+        if (
+            not isfinite(readback)
+            or abs(readback - flow_ml_per_hour) > verification_tolerance_ml_per_hour
+        ):
+            raise RuntimeError(
+                "BES flow verification failed: "
+                f"requested={flow_ml_per_hour:.7g} ml/h, "
+                f"readback={readback:.7g} ml/h"
+            )
+        pump.run()
+        self._states[PumpRole.INJECTION] = PumpPreparationState(
+            remote=True,
+            configured=True,
+            running=True,
+            mode=PumpOperatingMode.CONSTANT_FLOW,
+            target=readback,
+        )
+        self._log(
+            PumpRole.INJECTION.value,
+            f"measurement flow applied and verified target={readback:.7g} ml/h",
+            level="WARNING",
+        )
+        return readback
 
     def stop(self, role: PumpRole) -> None:
         self._require_authorized()

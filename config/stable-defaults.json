@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "profile_name": "AFKI-EOR Stabil alapbeállítások",
+  "modified_at_utc": "2026-08-06T00:00:00+00:00",
+  "validation_status": "NOT_PHYSICALLY_VALIDATED",
+  "units": {
+    "pressure": "bar",
+    "flow": "ml/h",
+    "voltage": "V",
+    "time": "s",
+    "frequency": "Hz"
+  },
+  "acquisition": {
+    "daq_sample_rate_hz": 10,
+    "control_update_rate_hz": 5,
+    "recording_interval_seconds": 1.0,
+    "ui_numeric_refresh_rate_hz": 2,
+    "plot_refresh_rate_hz": 2,
+    "hardware_status_poll_interval_seconds": 1.0,
+    "stale_timeout_seconds": 3.0,
+    "serial_command_timeout_seconds": 2.0,
+    "serial_command_retries": 2
+  },
+  "ui": {
+    "live_plot_window_minutes": 10,
+    "maximum_visible_plot_points_per_series": 2000
+  },
+  "storage": {
+    "local_first": true,
+    "flush_interval_seconds": 5.0,
+    "nas_sync_during_measurement": false
+  },
+  "devices": {
+    "pumps": {
+      "jacket": {"port": null, "baud_rate": null, "unit_id": null, "channel": null},
+      "injection": {"port": null, "baud_rate": null, "unit_id": null, "channel": null}
+    },
+    "ni_device": {
+      "device_name": null,
+      "terminal_configuration": null,
+      "channels": {
+        "differential_pressure": null,
+        "line_pressure": null,
+        "valve_output": null
+      }
+    }
+  },
+  "calibration": {
+    "line_pressure": {
+      "nominal_voltage_min_v": 1.0,
+      "nominal_voltage_max_v": 5.0,
+      "pressure_min_bar": 0.0,
+      "pressure_max_bar": 400.0,
+      "measured_zero_voltage_v": null
+    },
+    "differential_pressure": null
+  },
+  "safety": {
+    "injection_max_pressure_bar": null,
+    "jacket_max_pressure_bar": null,
+    "differential_max_pressure_bar": null,
+    "pressure_overshoot_shutdown_bar": null,
+    "jacket_minimum_margin_bar": 20.0,
+    "valve_safe_output_v": null,
+    "valve_direction_validated": false,
+    "pump_shutdown_validated": false
+  },
+  "pid": {
+    "enabled_on_startup": false,
+    "control_source": null,
+    "kp": null,
+    "ki": null,
+    "kd": null,
+    "output_rate_limit_v_per_second": null,
+    "integral_limit": null,
+    "derivative_filter_enabled": true,
+    "bumpless_start": true,
+    "anti_windup": true
+  },
+  "measurement": {
+    "injection_start_pressure_bar": null,
+    "jacket_start_pressure_bar": null,
+    "injection_startup_flow_ml_per_hour": null,
+    "injection_measurement_flow_ml_per_hour": null,
+    "control_target_pressure_bar": null,
+    "start_pressure_tolerance_bar": 1.0,
+    "start_pressure_stability_seconds": 5.0,
+    "recording_interval_seconds": 1.0
+  }
+}

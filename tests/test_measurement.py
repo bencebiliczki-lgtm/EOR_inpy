@@ -112,7 +112,7 @@ def test_non_persistent_control_sample_is_not_written() -> None:
     assert writer.records == []
 
 
-def test_simulation_persistence_policy_never_writes_records() -> None:
+def test_explicitly_disabled_persistence_never_writes_records() -> None:
     measurement_service, _, _, _, writer = service(persistence_enabled=False)
 
     record = measurement_service.sample_once(
@@ -165,15 +165,16 @@ def test_connection_error_requests_safe_state() -> None:
     assert daq.safe_state_requested
 
 
-def test_out_of_range_sensor_error_identifies_input_and_voltage() -> None:
+def test_out_of_range_finite_sensor_voltage_is_preserved_without_safe_state() -> None:
     measurement_service, _, _, daq, _ = service()
-    daq.inputs["line_pressure"] = -1.188189
+    daq.inputs["line_pressure"] = 0.9
 
-    with pytest.raises(
-        ValueError,
-        match=r"line pressure input: voltage -1\.18819 V.*1–5 V",
-    ):
-        measurement_service.sample_once(active_stage="water", valve_percent=0.0)
+    record = measurement_service.sample_once(active_stage="water", valve_percent=0.0)
+
+    assert record.snapshot.raw_line_voltage == pytest.approx(0.9)
+    assert record.snapshot.line_pressure_bar == pytest.approx(-10.0)
+    assert record.safety_reasons == ()
+    assert not daq.safe_state_requested
 
 
 def test_service_telemetry_keeps_valid_sensor_when_other_sensor_is_missing() -> None:

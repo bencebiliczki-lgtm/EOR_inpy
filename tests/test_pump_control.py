@@ -28,6 +28,9 @@ class FakePump:
     def set_constant_flow(self, target: float) -> None:
         self.commands.append(f"FLOW={target}")
 
+    def read_configured_flow_ml_per_hour(self) -> float:
+        return float(self.commands[-1].split("=", 1)[1])
+
     def set_constant_pressure(self, target: float) -> None:
         self.commands.append(f"PRESS={target}")
 
@@ -108,9 +111,118 @@ def test_measurement_start_preserves_hourly_flow_targets() -> None:
         "PRESS=120.0",
         "RUN",
     ]
-    assert injection.commands == ["REMOTE", "FLOW=1000.0", "RUN"]
+    assert injection.commands == ["REMOTE", "FLOW=1000.0", "RUN", "STOP"]
     assert control.state(PumpRole.JACKET).running
-    assert control.state(PumpRole.INJECTION).running
+    assert not control.state(PumpRole.INJECTION).running
+
+
+def test_startup_targets_must_remain_stable_before_confirmation_state() -> None:
+    class ChangingPump(FakePump):
+        reads: int = 0
+
+        def read_status(self) -> PumpStatus:
+            self.reads += 1
+            if self.reads == 6:
+                self.pressure = 99.0
+            return super().read_status()
+
+    jacket = FakePump(120.0, [])
+    injection = ChangingPump(100.0, [])
+    control = PumpControlService(jacket_pump=jacket, injection_pump=injection)
+    control.authorize(PumpControlService.AUTHORIZATION)
+    control.connect(PumpRole.JACKET)
+    control.connect(PumpRole.INJECTION)
+    jacket.commands.clear()
+    injection.commands.clear()
+
+    with pytest.raises(TimeoutError, match="targets were not reached"):
+        control.start_measurement_pumps(
+            jacket_target_pressure_bar=120.0,
+            jacket_buildup_flow_ml_per_hour=60.0,
+            injection_start_pressure_bar=100.0,
+            injection_target_flow_ml_per_hour=10.0,
+            confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+            margin_stability_seconds=0.01,
+            pressure_buildup_timeout_seconds=0.02,
+            polling_interval_seconds=0.001,
+        )
+
+    assert injection.commands[-1] == "STOP"
+
+
+def test_measurement_start_reads_both_pumps_before_first_write() -> None:
+    class OrderedPump(FakePump):
+        def read_status(self) -> PumpStatus:
+            self.commands.append("READ")
+            return super().read_status()
+
+    jacket = OrderedPump(120.0, [])
+    injection = OrderedPump(100.0, [])
+    control = PumpControlService(jacket_pump=jacket, injection_pump=injection)
+    control.authorize(PumpControlService.AUTHORIZATION)
+    control.connect(PumpRole.JACKET)
+    control.connect(PumpRole.INJECTION)
+    jacket.commands.clear()
+    injection.commands.clear()
+
+    control.start_measurement_pumps(
+        jacket_target_pressure_bar=120.0,
+        jacket_buildup_flow_ml_per_hour=60.0,
+        injection_start_pressure_bar=100.0,
+        injection_target_flow_ml_per_hour=10.0,
+        confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+    )
+
+    assert jacket.commands[0] == "READ"
+    assert injection.commands[0] == "READ"
+    assert jacket.commands.index("READ") < jacket.commands.index("FLOW=60.0")
+    assert injection.commands.index("READ") < injection.commands.index("FLOW=10.0")
+
+
+def test_failed_initial_read_sends_no_startup_write() -> None:
+    class ReadFailingPump(FakePump):
+        def read_status(self) -> PumpStatus:
+            self.commands.append("READ")
+            raise ConnectionError("pressure unavailable")
+
+    jacket = FakePump(120.0, [])
+    injection = ReadFailingPump(100.0, [])
+    control = PumpControlService(jacket_pump=jacket, injection_pump=injection)
+    control.authorize(PumpControlService.AUTHORIZATION)
+    control.connect(PumpRole.JACKET)
+    with pytest.raises(ConnectionError):
+        control.connect(PumpRole.INJECTION)
+    injection.connected = True
+    control._connected[PumpRole.INJECTION] = True
+    jacket.commands.clear()
+    injection.commands.clear()
+
+    with pytest.raises(ConnectionError, match="pressure unavailable"):
+        control.start_measurement_pumps(
+            jacket_target_pressure_bar=120.0,
+            jacket_buildup_flow_ml_per_hour=60.0,
+            injection_start_pressure_bar=100.0,
+            injection_target_flow_ml_per_hour=10.0,
+            confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+        )
+
+    assert all(command == "READ" for command in injection.commands)
+    assert not any(
+        command in {"REMOTE", "RUN"} or command.startswith("FLOW=")
+        for command in jacket.commands + injection.commands
+    )
+
+
+def test_measurement_flow_uses_stop_set_verify_run_sequence() -> None:
+    control, _, injection = service()
+    prepare(control, PumpRole.INJECTION)
+    control.run(PumpRole.INJECTION, PumpControlService.RUN_INJECTION_CONFIRMATION)
+    injection.commands.clear()
+
+    applied = control.apply_measurement_flow(25.0)
+
+    assert applied == pytest.approx(25.0)
+    assert injection.commands == ["STOP", "FLOW=25.0", "RUN"]
 
 
 def test_measurement_start_programs_both_hardware_pressure_limits() -> None:
@@ -273,7 +385,7 @@ def test_margin_may_fall_after_injection_run_while_jacket_holds_fixed_target() -
     )
 
     assert jacket.commands[-3:] == ["STOP", "PRESS=120.0", "RUN"]
-    assert injection.commands[-1] == "RUN"
+    assert injection.commands[-2:] == ["RUN", "STOP"]
     assert jacket.pressure - injection.pressure == pytest.approx(15.0)
     assert control.state(PumpRole.JACKET).mode is PumpOperatingMode.CONSTANT_PRESSURE
     assert control.state(PumpRole.JACKET).target == pytest.approx(120.0)

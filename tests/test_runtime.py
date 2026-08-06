@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from time import sleep
 
-from eor_control.control import ControlMode, PressureSource
+from eor_control.control import ControlMode, PidParameters, PressureSource
 from eor_control.runtime import BackgroundControlRunner, RuntimeSettings
 
 
@@ -11,6 +11,7 @@ class FakeControlLoop:
     persist_flags: list[bool] = field(default_factory=list)
     hold_cycles: int = 0
     safe_state_count: int = 0
+    configured_pid: list[PidParameters] = field(default_factory=list)
 
     def execute_once(self, **arguments: object) -> object:
         self.persist_flags.append(bool(arguments["persist"]))
@@ -20,6 +21,9 @@ class FakeControlLoop:
 
     def request_safe_state(self) -> None:
         self.safe_state_count += 1
+
+    def configure_pid(self, parameters: PidParameters) -> None:
+        self.configured_pid.append(parameters)
 
     def supervise_hold_once(self, **_arguments: object) -> object:
         self.hold_cycles += 1
@@ -101,3 +105,19 @@ def test_pause_holds_control_and_persistence_while_supervision_continues() -> No
 
     assert not runner.paused
     assert len(loop.persist_flags) > persisted_at_pause
+
+
+def test_pid_update_is_applied_by_the_next_background_control_cycle() -> None:
+    loop = FakeControlLoop()
+    runner = BackgroundControlRunner(
+        loop,  # type: ignore[arg-type]
+        control_interval_seconds=0.02,
+    )
+    parameters = PidParameters(2.5, 0.2, 0.1)
+
+    runner.start(settings())
+    runner.update_pid(parameters)
+    sleep(0.06)
+    runner.stop()
+
+    assert loop.configured_pid == [parameters]

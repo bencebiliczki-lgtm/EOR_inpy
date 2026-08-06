@@ -4,7 +4,7 @@ from math import isfinite
 from threading import Event, Lock, Thread
 from time import monotonic
 
-from eor_control.control import ControlMode, PressureSource
+from eor_control.control import ControlMode, PidParameters, PressureSource
 from eor_control.control_loop import ControlCycleResult, ControlLoop
 
 
@@ -38,7 +38,7 @@ class BackgroundControlRunner:
         self,
         control_loop: ControlLoop,
         *,
-        control_interval_seconds: float = 0.1,
+        control_interval_seconds: float = 0.2,
         watchdog_tolerance_seconds: float = 0.05,
         on_cycle: Callable[[ControlCycleResult], None] | None = None,
         on_fault: Callable[[str], None] | None = None,
@@ -53,6 +53,7 @@ class BackgroundControlRunner:
         self._on_cycle = on_cycle
         self._on_fault = on_fault
         self._settings: RuntimeSettings | None = None
+        self._pending_pid_parameters: PidParameters | None = None
         self._settings_lock = Lock()
         self._cycle_lock = Lock()
         self._stop_event = Event()
@@ -98,6 +99,11 @@ class BackgroundControlRunner:
         with self._settings_lock:
             self._settings = settings
 
+    def update_pid(self, parameters: PidParameters) -> None:
+        """Queue validated PID parameters for the next supervised control cycle."""
+        with self._settings_lock:
+            self._pending_pid_parameters = parameters
+
     def stop(self, timeout_seconds: float = 2.0) -> None:
         self._stop_event.set()
         self._pause_event.clear()
@@ -115,6 +121,12 @@ class BackgroundControlRunner:
                 raise RuntimeError("control runner has no settings")
             return self._settings
 
+    def _take_pending_pid(self) -> PidParameters | None:
+        with self._settings_lock:
+            parameters = self._pending_pid_parameters
+            self._pending_pid_parameters = None
+            return parameters
+
     def _run(self) -> None:
         next_control = monotonic()
         next_record = next_control
@@ -131,6 +143,9 @@ class BackgroundControlRunner:
                 paused = self._pause_event.is_set()
                 persist = not paused and started >= next_record
                 with self._cycle_lock:
+                    pending_pid = self._take_pending_pid()
+                    if pending_pid is not None:
+                        self._control_loop.configure_pid(pending_pid)
                     result = (
                         self._control_loop.supervise_hold_once(
                             active_stage=settings.active_stage,

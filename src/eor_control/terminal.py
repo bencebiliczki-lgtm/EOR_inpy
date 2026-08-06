@@ -1,5 +1,7 @@
 import shlex
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock
 from typing import TextIO
 
@@ -13,6 +15,7 @@ from eor_control.control import (
     ValveController,
 )
 from eor_control.control_loop import ControlCycleResult, ControlLoop
+from eor_control.data_management import ProjectMeasurementWriter
 from eor_control.domain import MeasurementRecord
 from eor_control.measurement import MeasurementService
 from eor_control.runtime import BackgroundControlRunner, RuntimeSettings
@@ -52,7 +55,12 @@ class TerminalSnapshot:
 class TerminalApplication:
     """Interactive terminal facade over the same safety and control services as the UI."""
 
-    def __init__(self, output: TextIO) -> None:
+    def __init__(
+        self,
+        output: TextIO,
+        *,
+        simulation_data_root: Path | None = None,
+    ) -> None:
         self._output = output
         self._jacket = SimulatedPump(pressure_bar=120.0, flow_ml_per_hour=10.0)
         self._injection = SimulatedPump(
@@ -68,6 +76,25 @@ class TerminalApplication:
             injection_pump=self._injection,
             daq=self._daq,
         )
+        writer: DisabledMeasurementWriter | ProjectMeasurementWriter
+        if simulation_data_root is None:
+            writer = DisabledMeasurementWriter()
+            persistence_enabled = False
+        else:
+            writer = ProjectMeasurementWriter(
+                simulation_data_root, measurement_kind="simulation"
+            )
+            writer.select_project_with_metadata(
+                900_001,
+                "Terminál szimuláció",
+                configuration={
+                    "mode": "simulation",
+                    "measurement_kind": "simulation",
+                    "interface": "terminal",
+                },
+                stage_name="Terminál szimuláció",
+            )
+            persistence_enabled = True
         measurement = MeasurementService(
             jacket_pump=self._jacket,
             injection_pump=self._injection,
@@ -75,8 +102,8 @@ class TerminalApplication:
             line_calibration=LinearCalibration(1.0, 5.0, 0.0, 400.0),
             differential_calibration=LinearCalibration(1.0, 5.0, 0.0, 40.0),
             safety_monitor=SafetyMonitor(SafetyLimits(400.0, 350.0, 50.0)),
-            writer=DisabledMeasurementWriter(),
-            persistence_enabled=False,
+            writer=writer,
+            persistence_enabled=persistence_enabled,
         )
         self._loop = ControlLoop(
             measurement=measurement,
@@ -343,10 +370,26 @@ class TerminalApplication:
         self._output.flush()
 
 
-def run_terminal(input_stream: TextIO, output_stream: TextIO) -> int:
-    terminal = TerminalApplication(output_stream)
+def run_terminal(
+    input_stream: TextIO,
+    output_stream: TextIO,
+    *,
+    data_root: Path | None = None,
+) -> int:
+    root = (
+        data_root
+        if data_root is not None
+        else (
+            Path(sys.executable).resolve().parent
+            if bool(getattr(sys, "frozen", False))
+            else Path(__file__).resolve().parents[2]
+        )
+        / "data"
+    )
+    terminal = TerminalApplication(output_stream, simulation_data_root=root)
     output_stream.write(
-        "AFKI EOR terminál — SZIMULÁCIÓ, NINCS ADATMENTÉS, NINCS FIZIKAI KIMENET\n"
+        "AFKI EOR terminál — SZIMULÁCIÓ, ADATMENTÉS AKTÍV, "
+        "NINCS FIZIKAI KIMENET\n"
         "Parancslista: help\n"
     )
     output_stream.flush()

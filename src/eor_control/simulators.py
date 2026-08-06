@@ -177,6 +177,12 @@ class SimulatedPump:
         self.target_pressure_bar = None
         self.state = SimulatedPumpState.CONFIGURED
 
+    def read_configured_flow_ml_per_hour(self) -> float:
+        self._require_connected()
+        if self.mode is not SimulatedPumpMode.CONSTANT_FLOW:
+            raise RuntimeError("simulated pump is not configured for constant flow")
+        return self.flow_ml_per_hour
+
     def set_constant_pressure(self, pressure_bar: float) -> None:
         self._require_configurable()
         self._validate_target(pressure_bar, "pressure")

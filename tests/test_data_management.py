@@ -3,8 +3,11 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from eor_control.data_management import (
     BackgroundNasSynchronizer,
+    MeasurementEvent,
     MeasurementTable,
     NasSyncQueue,
     ProjectMeasurementWriter,
@@ -14,9 +17,13 @@ from eor_control.data_management import (
     measurement_stage_segments,
     measurement_stages,
     project_excel_path,
+    read_measurement_events,
     read_measurement_table,
     read_measurement_tables,
     safe_filename,
+)
+from eor_control.data_management import (
+    test_nas_connection as probe_nas_connection,
 )
 from eor_control.domain import MeasurementRecord, MeasurementSnapshot, PumpStatus
 from eor_control.storage import CsvMeasurementWriter
@@ -78,6 +85,32 @@ def test_project_writer_creates_portable_json_snapshots(tmp_path: Path) -> None:
     assert json.loads(
         (source.parent / "config_snapshot.json").read_text(encoding="utf-8")
     ) == {"interval": 5}
+
+
+def test_simulation_writer_persists_with_unambiguous_provenance(tmp_path: Path) -> None:
+    writer = ProjectMeasurementWriter(tmp_path, measurement_kind="simulation")
+    source = writer.select_project_with_metadata(
+        7,
+        "Kőzet A",
+        configuration={"mode": "simulation", "measurement_kind": "simulation"},
+        stage_name="víz",
+    )
+
+    writer.write(record("víz"))
+    writer.close()
+
+    assert source.name == "Kőzet_A_víz_simulation_live_raw.csv"
+    assert len(read_measurement_table(source).rows) == 1
+    project = json.loads(
+        (source.parent / "project_simulation.json").read_text(encoding="utf-8")
+    )
+    assert project["measurement_kind"] == "simulation"
+    assert json.loads(
+        (source.parent / "config_snapshot_simulation.json").read_text(
+            encoding="utf-8"
+        )
+    )["mode"] == "simulation"
+    assert project_excel_path(source, "víz").name == "Kőzet_A_simulation.xlsx"
 
 
 def test_project_folder_uses_hungarian_calendar_date(tmp_path: Path) -> None:
@@ -210,6 +243,44 @@ def test_project_excel_uses_one_charted_worksheet_per_stage(tmp_path: Path) -> N
     assert len(refreshed["víz"]._charts) == 1
 
 
+def test_measurement_event_is_stored_once_and_exported_as_chart_marker(
+    tmp_path: Path,
+) -> None:
+    from openpyxl import load_workbook
+
+    writer = ProjectMeasurementWriter(tmp_path)
+    source = writer.select_project(1, "Esemény", stage_name="víz")
+    writer.write(record("víz"))
+    event = MeasurementEvent(
+        event_id="evt-1",
+        recorded_at_utc="2026-07-13T12:30:05+00:00",
+        elapsed_seconds=5.0,
+        event_type="operator",
+        severity="info",
+        error_code="FLOW_CHANGED",
+        description="BES mérési flow módosítva",
+        active_stage="víz",
+        affected_hardware="injection_pump",
+        injection_pressure_bar=100.25,
+        current_flow_ml_per_hour=12.0,
+        target_flow_ml_per_hour=20.0,
+        valve_output_percent=45.0,
+        measurement_state="running",
+    )
+
+    writer.write_event(event)
+    writer.write_event(event)
+    destination = project_excel_path(source, "víz")
+    export_measurement_excel(source, destination, stage_name="víz")
+
+    assert read_measurement_events((source,)) == (event,)
+    workbook = load_workbook(destination, read_only=False)
+    event_sheet = workbook["víz események"]
+    assert event_sheet.max_row == 2
+    assert event_sheet["A2"].value == "evt-1"
+    assert len(workbook["víz"]._charts[0].series) == 6
+
+
 def test_project_writer_creates_one_raw_csv_per_measurement_stage(
     tmp_path: Path,
 ) -> None:
@@ -228,12 +299,14 @@ def test_project_writer_creates_one_raw_csv_per_measurement_stage(
     assert read_measurement_table(phase_paths[0]).column("active_stage") == ("olaj",)
 
 
-def test_project_writer_reports_each_completed_measurement_stage_once(
-    tmp_path: Path,
+@pytest.mark.parametrize("measurement_kind", ["live", "simulation"])
+def test_both_measurement_kinds_use_the_same_stage_completion_pipeline(
+    tmp_path: Path, measurement_kind: str
 ) -> None:
     completed: list[tuple[Path, str]] = []
     writer = ProjectMeasurementWriter(
-        tmp_path,
+        tmp_path / measurement_kind,
+        measurement_kind=measurement_kind,
         phase_completed=lambda path, stage: completed.append((path, stage)),
     )
     water_path = writer.select_project(1, "Projekt", stage_name="víz")
@@ -247,6 +320,8 @@ def test_project_writer_reports_each_completed_measurement_stage_once(
     assert completed == [(water_path, "víz"), (oil_path, "olaj")]
     assert writer.complete_current_phase() is None
     assert completed == [(water_path, "víz"), (oil_path, "olaj")]
+    assert len(read_measurement_table(water_path).rows) == 1
+    assert len(read_measurement_table(oil_path).rows) == 1
 
 
 def test_multiple_phase_files_are_combined_only_for_reading(tmp_path: Path) -> None:
@@ -302,5 +377,26 @@ def test_nas_queue_survives_failure_and_resynchronizes(tmp_path: Path) -> None:
     synchronizer.configure(enabled=True, target_root=nas_target)
     synchronizer.sync_pending_once()
     assert synchronizer.pending_count == 0
-    assert (nas_target / "projects" / "measurement.csv").read_text(encoding="utf-8") == "first"
+    assert (nas_target / "projects" / "measurement.csv").read_text(
+        encoding="utf-8"
+    ) == "first"
     synchronizer.close()
+
+
+def test_nas_connection_probe_verifies_read_write_and_cleans_up(tmp_path: Path) -> None:
+    target = tmp_path / "nas"
+    target.mkdir()
+    (target / "existing.txt").write_text("adat", encoding="utf-8")
+
+    result = probe_nas_connection(target)
+
+    assert result.writable
+    assert result.target_root == target
+    assert result.free_bytes > 0
+    assert result.visible_entries == ("existing.txt",)
+    assert not tuple(target.glob(".eor-write-test-*.tmp"))
+
+
+def test_nas_connection_probe_rejects_missing_target(tmp_path: Path) -> None:
+    with pytest.raises(ConnectionError, match="nem érhető el"):
+        probe_nas_connection(tmp_path / "missing")

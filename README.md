@@ -52,8 +52,10 @@ diagramon láthatók. A nyers rekordok projektenként és mérési
 fázisonként elkülönítve a
 `data/projects/<év>/<dátum>_<projektazonosító>_<projektnév>/<projektnév>_<fázis>_live_raw.csv`
 fájlokba kerülnek.
-Szimulációs módban a mért értékek csak élőben jelennek meg: nyers CSV, projekt-
-pillanatkép és NAS-feladat nem készül. A dashboard felső, állandó szöveges sávja
+Szimulációs módban a mért értékek az éles adatkezelési útvonalon mentődnek,
+exportálódnak és – ha engedélyezett – NAS-szinkronba kerülnek. Az eredet egyértelmű:
+a fájlnév `_simulation_live_raw.csv`, a külön szimulációs projekt- és konfigurációs
+pillanatkép pedig `measurement_kind=simulation` jelölést tartalmaz. A dashboard felső, állandó szöveges sávja
 mindig megkülönbözteti a szimulációt a hardvermódtól; alatta az aktív, reteszelt
 riasztás a kiváltó okkal, automatikus művelettel és következő kezelői lépéssel
 megmarad a biztonságos bezárásig. A bezárás aktív hibánál friss szenzor- és
@@ -61,7 +63,8 @@ biztonsági ellenőrzést futtat; veszélyes állapotban nem oldja fel a reteszt
 Minimalizált vagy háttérben lévő ablaknál a Windows
 tálcagomb is figyelmeztet.
 A Developer mód bekapcsolása után a `Developer` → `Szimulációs mód` kapcsolóval
-lehet visszatérni a mentés nélküli szimulációhoz. A váltás leállított mérésnél
+lehet visszatérni a fizikai kimenet nélküli, de az éles méréssel azonos módon
+mentett, exportált és NAS-szinkronizált szimulációhoz. A váltás leállított mérésnél
 biztonságosan lezárja az élő hardverkapcsolatot. A kapcsoló kikapcsolása az eszközbeállítási
 ablakot nyitja meg; az éles mód továbbra is felderítést és külön megerősítést kér.
 A `Developer` → `Szimuláció és hibateszt…` oldal állítható pumpanyomás-rámpát,
@@ -96,7 +99,9 @@ rendezhetők. A profil a `Kp`, `Ki`, `Kd`, hatásirány, kimeneti minimum/maximu
 nyomásforrás értékeket tárolja. A profilok közös SQLite-adatok: kiválaszthatók,
 felülírhatók és megerősítés után törölhetők. Egy mentett profil kézi módosítása
 automatikusan **Egyéni beállítások** állapotra vált; az utoljára kiválasztott profil
-alkalmazásindításkor visszatöltődik.
+alkalmazásindításkor visszatöltődik. Futó mérés közben a módváltás és az érvényes
+PID-mezőmódosítás a következő háttér-vezérlési ciklusban lép életbe; az átmenetileg
+érvénytelen mezőérték nem kerül a szelepvezérlésbe.
 
 A dashboardon a vonali és differenciálnyomás-csatorna kétpontos kalibrációja,
 valamint a köpeny-, besajtolási és differenciálnyomás-határ és a minimális
@@ -194,8 +199,9 @@ kezelhető minden hozzáadott ISCO pumpa és a szelep. Az ablak élőben mutatja
 szelepírás előtt a manuális biztonsági profil a megcélzott eszköz kapcsolatát,
 saját visszajelzését és határértékét ellenőrzi. A `CSATLAKOZÁS + REMOTE` egyetlen
 műveletként azonosítja a pumpát és REMOTE módba állítja, ezt követi az
-üzemmód/célérték beállítása, majd az adott pumpa `RUN`. Mindkét RUN külön pontos
-megerősítő szöveget kér. Az ablak bezárása minden pumpán megkísérli a STOP-ot,
+üzemmód/célérték beállítása, majd az adott pumpa `RUN`. Mindkét RUN külön,
+alapértelmezetten elutasított gombos megerősítést kér; begépelendő parancsszöveg
+nincs. Az ablak bezárása minden pumpán megkísérli a STOP-ot,
 bontja a kapcsolatot és lezárja a COM-portokat.
 
 A `Projekt` → `Adatkezelés és export…` ablak pontosvesszős vagy más elválasztójú,
@@ -204,8 +210,15 @@ CSV-jéből. A diagramot is tartalmazó Excel-fájl automatikusan, csak a méré
 fázis lezárásakor készül el; futó fázisból nem indítható kézi Excel-export.
 Projektenként egy munkafüzet készül, amelyben minden lezárt szakasz saját,
 szűrhető adatokkal és beágyazott nyomás-/szelepdiagrammal rendelkező munkalapot
-kap. Ugyanitt kapcsolható be a NAS-mentés. Az elkészült projekt-Excel is a
-háttérben futó NAS-sorba kerül; sikertelen
+kap. Az export helyét natív Windows fájlmentő ablakban kell kiválasztani; az
+alkalmazás megjegyzi az utoljára használt exportmappát.
+
+A NAS a `Beállítások` → `NAS és tárhely` oldalon kezelhető. A célmappa natív
+Windows mappaválasztóval adható meg, az alkalmazásba nem kell útvonalat vagy
+jelszót begépelni. A hitelesítést a Windows munkamenet/Hitelesítőadat-kezelő
+biztosítja. Az oldal külön kapcsolat-, olvasási és ideiglenes fájlos írási
+tesztet, távoli fájlrendszernézetet, várólistastátuszt és kézi szinkront kínál.
+Az elkészült projekt-Excel is a háttérben futó NAS-sorba kerül; sikertelen
 hálózati művelet SQLite-várólistán marad, és a program automatikusan újrapróbálja.
 
 A dashboard középső részén az **Élő mérés** és a **Teljes mérés** fülek között lehet
@@ -249,13 +262,14 @@ felismert NI-eszközök kimeneti parancs nélküli ellenőrzése:
 .\AFKI-EOR.exe diagnose-ni
 ```
 
-A PyInstaller `onefile` csomag egyetlen `dist/EOR_Controller.exe` fájlba kerül. A
+A PyInstaller `onedir` csomag a `dist/EOR_Controller/` könyvtárba kerül. A
 beállítások, projektek és várólisták az EXE-től független, írható `config/` és
 `data/` könyvtárakban maradnak; a program futásához nem szükséges internet. Az
 NI-DAQmx és a soros adapter Windows-drivereit a célgépen külön kell telepíteni.
 
-A GitHub Actions Windows workflow az `AFKI-EOR.spec` alapján egyfájlos
-`dist/AFKI-EOR.exe` kiadást készít és ezt csomagolja a célgépre feltöltött ZIP-be.
+A GitHub Actions Windows workflow az `AFKI-EOR.spec` alapján `onedir`
+`dist/AFKI-EOR/` onedir kiadást készít, és a teljes könyvtárat csomagolja
+a célgépre feltöltött ZIP-be.
 A Windows EXE erőforrásikonja, az alkalmazásablak és a tálcagomb az `img/icon.png`
 képet használja. A stabil `AFKI.EOR.Control` Windows AppUserModelID megakadályozza,
 hogy futás közben a Python alapikonja jelenjen meg a tálcán.
@@ -271,3 +285,5 @@ kompatibilitását az OptiPlex célgépen indított próba igazolja.
 ## Dokumentáció
 
 A fejlesztés előtt olvasd el az `AGENTS.md` és a `docs/` fájlokat. A még nem tisztázott kérdések a `docs/open-questions.md` dokumentumban találhatók.
+A verziózott szoftveres kiinduló profil, migráció, onedir build és helyszíni
+ellenőrzőlista a `docs/stable-profile.md` dokumentumban található.

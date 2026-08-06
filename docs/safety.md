@@ -5,7 +5,8 @@
 A mérésindítás nem kerülheti meg a pumpák külön fizikai engedélyezését: a kezelőnek
 mindkét kezdőnyomást, a pumpák saját hardveres nyomáshatárát és a két indítási
 térfogatáramot tartalmazó pumpaterv
-megjelenítése után pontos indítási megerősítést kell megadnia. Már a bevitelkor
+megjelenítése után explicit, alapértelmezetten elutasított gombos indítási
+megerősítést kell adnia. Begépelendő parancsszöveg nincs. Már a bevitelkor
 teljesülnie kell a tervezett köpeny–besajtoló nyomástöbbletnek. A köpenypumpa állandó áramú
 nyomásfelépítési szakaszában kizárólag a minimális köpeny–besajtolás
 nyomáskülönbség ellenőrzése van függőben; a besajtolópumpa ekkor még nem futhat.

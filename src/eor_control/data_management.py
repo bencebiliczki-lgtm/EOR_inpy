@@ -7,11 +7,12 @@ import shutil
 import sqlite3
 from collections.abc import Callable, Iterable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import sleep
+from uuid import uuid4
 
 from eor_control.domain import MeasurementRecord
 from eor_control.storage import CsvMeasurementWriter
@@ -37,6 +38,52 @@ class MeasurementTable:
         except ValueError as error:
             raise KeyError(name) from error
         return tuple(row[index] for row in self.rows)
+
+
+@dataclass(frozen=True, slots=True)
+class MeasurementEvent:
+    """One durable operator/fault marker shared by every measurement view."""
+
+    event_id: str
+    recorded_at_utc: str
+    elapsed_seconds: float
+    event_type: str
+    severity: str
+    error_code: str
+    description: str
+    active_stage: str
+    affected_hardware: str
+    jacket_pressure_bar: float | None = None
+    injection_pressure_bar: float | None = None
+    line_pressure_bar: float | None = None
+    differential_pressure_bar: float | None = None
+    current_flow_ml_per_hour: float | None = None
+    target_flow_ml_per_hour: float | None = None
+    valve_output_percent: float | None = None
+    measurement_state: str = "idle"
+
+
+def measurement_event_path(source: Path) -> Path:
+    return source.with_suffix(".events.jsonl")
+
+
+def read_measurement_events(paths: Iterable[Path]) -> tuple[MeasurementEvent, ...]:
+    events: dict[str, MeasurementEvent] = {}
+    for source in dict.fromkeys(paths):
+        path = measurement_event_path(source)
+        if not path.is_file():
+            continue
+        with path.open(encoding="utf-8") as file:
+            for line_number, line in enumerate(file, start=1):
+                try:
+                    payload = json.loads(line)
+                    event = MeasurementEvent(**payload)
+                except (TypeError, ValueError, json.JSONDecodeError) as error:
+                    raise ValueError(
+                        f"érvénytelen mérési esemény: {path}:{line_number}: {error}"
+                    ) from error
+                events[event.event_id] = event
+    return tuple(sorted(events.values(), key=lambda event: event.recorded_at_utc))
 
 
 def measurement_stages(table: MeasurementTable) -> tuple[str, ...]:
@@ -105,6 +152,7 @@ def read_measurement_table(path: Path) -> MeasurementTable:
     if header in (
         CsvMeasurementWriter.LEGACY_HEADER,
         CsvMeasurementWriter.V2_HEADER,
+        CsvMeasurementWriter.V3_HEADER,
     ):
         legacy_index = {name: index for index, name in enumerate(header)}
         converted_rows: list[list[str]] = [list(CsvMeasurementWriter.HEADER)]
@@ -122,6 +170,8 @@ def read_measurement_table(path: Path) -> MeasurementTable:
                         if name == "raw_line_pressure_bar"
                         else row[legacy_index["differential_pressure_bar"]]
                         if name == "raw_differential_pressure_bar"
+                        else ""
+                        if name in {"raw_line_voltage", "raw_differential_voltage"}
                         else row[legacy_index[name]]
                     )
                     for name in CsvMeasurementWriter.HEADER
@@ -180,15 +230,22 @@ def export_measurement_csv(
 
 def project_excel_path(source: Path, stage_name: str) -> Path:
     """Return the single project workbook path for a stage raw-data file."""
-    suffix = f"_{safe_filename(stage_name)}_live_raw.csv"
-    if not source.name.endswith(suffix):
+    stage = safe_filename(stage_name)
+    live_suffix = f"_{stage}_live_raw.csv"
+    simulation_suffix = f"_{stage}_simulation_live_raw.csv"
+    if source.name.endswith(simulation_suffix):
+        project_name = source.name[: -len(simulation_suffix)]
+        workbook_suffix = "_simulation"
+    elif source.name.endswith(live_suffix):
+        project_name = source.name[: -len(live_suffix)]
+        workbook_suffix = ""
+    else:
         raise ValueError(
             "a mérési szakasz fájlneve nem illeszkedik a projekt-exporthoz"
         )
-    project_name = source.name[: -len(suffix)]
     if not project_name:
         raise ValueError("a projekt Excel-fájlneve nem lehet üres")
-    return source.with_name(f"{project_name}.xlsx")
+    return source.with_name(f"{project_name}{workbook_suffix}.xlsx")
 
 
 def _excel_sheet_title(stage_name: str) -> str:
@@ -210,6 +267,7 @@ def export_measurement_excel(
     try:
         from openpyxl import Workbook  # type: ignore[import-untyped]
         from openpyxl.chart import LineChart, Reference  # type: ignore[import-untyped]
+        from openpyxl.chart.series_factory import SeriesFactory  # type: ignore[import-untyped]
         from openpyxl.reader.excel import load_workbook  # type: ignore[import-untyped]
     except ImportError as error:
         raise RuntimeError(
@@ -273,6 +331,44 @@ def export_measurement_excel(
         chart.width = 24
         sheet.add_chart(chart, "T2")
 
+    events = read_measurement_events((source,))
+    event_title = _excel_sheet_title(f"{stage_name} események")
+    if event_title in workbook.sheetnames:
+        workbook.remove(workbook[event_title])
+    if events:
+        event_sheet = workbook.create_sheet(event_title, sheet_index + 1)
+        event_header = tuple(MeasurementEvent.__dataclass_fields__)
+        event_sheet.append(event_header)
+        for event in events:
+            event_sheet.append([getattr(event, name) for name in event_header])
+        event_sheet.freeze_panes = "A2"
+        event_sheet.auto_filter.ref = event_sheet.dimensions
+        for column in event_sheet.columns:
+            event_sheet.column_dimensions[column[0].column_letter].width = min(
+                42, max(len(str(cell.value or "")) for cell in column) + 2
+            )
+    if table.rows and events:
+        chart = sheet._charts[0]
+        elapsed_column = event_header.index("elapsed_seconds") + 1
+        marker_column = event_header.index("injection_pressure_bar") + 1
+        values = Reference(
+            event_sheet,
+            min_col=marker_column,
+            min_row=2,
+            max_row=len(events) + 1,
+        )
+        categories = Reference(
+            event_sheet,
+            min_col=elapsed_column,
+            min_row=2,
+            max_row=len(events) + 1,
+        )
+        marker_series = SeriesFactory(values, title="Események", xvalues=categories)
+        marker_series.graphicalProperties.noFill = True
+        marker_series.marker.symbol = "diamond"
+        marker_series.marker.size = 9
+        chart.series.append(marker_series)
+
     temporary = destination.with_suffix(f"{destination.suffix}.tmp")
     workbook.save(temporary)
     os.replace(temporary, destination)
@@ -285,6 +381,55 @@ class NasQueueItem:
     revision: int
     attempts: int
     last_error: str
+
+
+@dataclass(frozen=True, slots=True)
+class NasConnectionTestResult:
+    target_root: Path
+    writable: bool
+    free_bytes: int
+    visible_entries: tuple[str, ...]
+
+
+def test_nas_connection(target_root: Path) -> NasConnectionTestResult:
+    """Verify an existing NAS folder using the current Windows credentials.
+
+    The probe performs a real create/read/delete round trip.  It never creates
+    the target directory and never stores authentication material.
+    """
+    target = target_root.expanduser()
+    if not target.exists():
+        raise ConnectionError(f"a NAS célmappa nem érhető el: {target}")
+    if not target.is_dir():
+        raise NotADirectoryError(f"a NAS célútvonal nem mappa: {target}")
+    try:
+        visible_entries = tuple(
+            sorted((item.name for item in target.iterdir()), key=str.casefold)[:100]
+        )
+        free_bytes = shutil.disk_usage(target).free
+    except OSError as error:
+        raise ConnectionError(f"a NAS mappa nem olvasható: {error}") from error
+
+    probe = target / f".eor-write-test-{uuid4().hex}.tmp"
+    try:
+        with probe.open("x+b") as file:
+            payload = b"EOR NAS write test\n"
+            file.write(payload)
+            file.flush()
+            os.fsync(file.fileno())
+            file.seek(0)
+            if file.read() != payload:
+                raise OSError("a NAS próba visszaolvasott tartalma eltér")
+    except OSError as error:
+        raise PermissionError(f"a NAS célmappa nem írható: {error}") from error
+    finally:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError as error:
+            raise PermissionError(
+                f"a NAS próbfájl nem távolítható el: {probe}: {error}"
+            ) from error
+    return NasConnectionTestResult(target, True, free_bytes, visible_entries)
 
 
 class NasSyncQueue:
@@ -409,6 +554,12 @@ class BackgroundNasSynchronizer:
     def pending_count(self) -> int:
         return len(self._queue.pending())
 
+    @property
+    def pending_errors(self) -> tuple[str, ...]:
+        return tuple(
+            item.last_error for item in self._queue.pending() if item.last_error
+        )
+
     def configure(self, *, enabled: bool, target_root: Path | None) -> None:
         if enabled and target_root is None:
             raise ValueError("engedélyezett NAS-mentéshez célmappa szükséges")
@@ -484,11 +635,15 @@ class ProjectMeasurementWriter:
         nas_sync: BackgroundNasSynchronizer | None = None,
         *,
         enabled: bool = True,
+        measurement_kind: str = "live",
         phase_completed: Callable[[Path, str], None] | None = None,
     ) -> None:
+        if measurement_kind not in {"live", "simulation"}:
+            raise ValueError("unsupported measurement kind")
         self._data_root = data_root
         self._nas_sync = nas_sync
         self._enabled = enabled
+        self._measurement_kind = measurement_kind
         self._phase_completed = phase_completed
         self._writer: CsvMeasurementWriter | None = None
         self._path: Path | None = None
@@ -507,6 +662,13 @@ class ProjectMeasurementWriter:
     @property
     def persistence_enabled(self) -> bool:
         return self._enabled
+
+    def set_phase_completed_callback(
+        self, callback: Callable[[Path, str], None] | None
+    ) -> None:
+        """Attach the UI export callback after the dashboard has been constructed."""
+        with self._lock:
+            self._phase_completed = callback
 
     @property
     def phase_paths(self) -> tuple[Path, ...]:
@@ -545,8 +707,8 @@ class ProjectMeasurementWriter:
         )
         relative_folder = Path("projects") / str(local_timestamp.year) / folder
         project_file_prefix = safe_filename(project_name)
-        relative_path = relative_folder / (
-            f"{project_file_prefix}_{safe_filename(stage_name)}_live_raw.csv"
+        relative_path = relative_folder / self._raw_filename(
+            project_file_prefix, stage_name
         )
         path = self._data_root / relative_path
         completed_phase: tuple[Path, str] | None = None
@@ -596,17 +758,18 @@ class ProjectMeasurementWriter:
         calibration_snapshot: dict[str, object],
         stages: list[dict[str, object]],
     ) -> None:
+        marker = "" if self._measurement_kind == "live" else "_simulation"
         documents = {
-            "project.json": {
+            f"project{marker}.json": {
                 "id": project_id,
                 "name": project_name,
-                "measurement_kind": "live",
+                "measurement_kind": self._measurement_kind,
                 "created_at_utc": created_at.astimezone(UTC).isoformat(),
                 "notes": notes,
                 "stages": stages,
             },
-            "config_snapshot.json": configuration,
-            "calibration_snapshot.json": calibration_snapshot,
+            f"config_snapshot{marker}.json": configuration,
+            f"calibration_snapshot{marker}.json": calibration_snapshot,
         }
         folder = self._data_root / relative_folder
         folder.mkdir(parents=True, exist_ok=True)
@@ -644,6 +807,28 @@ class ProjectMeasurementWriter:
         if self._nas_sync is not None:
             self._nas_sync.enqueue(path, Path(*relative_path.parts[1:]))
 
+    def write_event(self, event: MeasurementEvent) -> Path:
+        """Append a single durable event without duplicating it per diagram."""
+        if not self._enabled:
+            raise RuntimeError("a mérési eseménymentés nincs engedélyezve")
+        with self._lock:
+            if self._path is None or self._relative_path is None:
+                raise RuntimeError("a mérési esemény előtt projektet kell kiválasztani")
+            path = measurement_event_path(self._path)
+            relative_path = measurement_event_path(self._relative_path)
+            existing_ids = {
+                item.event_id for item in read_measurement_events((self._path,))
+            }
+            if event.event_id not in existing_ids:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8", newline="\n") as file:
+                    file.write(json.dumps(asdict(event), ensure_ascii=False) + "\n")
+                    file.flush()
+                    os.fsync(file.fileno())
+        if self._nas_sync is not None:
+            self._nas_sync.enqueue(path, Path(*relative_path.parts[1:]))
+        return path
+
     def _open_phase_locked(self, stage_name: str) -> tuple[Path, str] | None:
         if self._relative_folder is None or self._project_file_prefix is None:
             raise RuntimeError("a mérés előtt projektet kell kiválasztani")
@@ -656,8 +841,8 @@ class ProjectMeasurementWriter:
             )
             else None
         )
-        relative_path = self._relative_folder / (
-            f"{self._project_file_prefix}_{safe_filename(stage_name)}_live_raw.csv"
+        relative_path = self._relative_folder / self._raw_filename(
+            self._project_file_prefix, stage_name
         )
         path = self._data_root / relative_path
         if self._writer is not None:
@@ -668,6 +853,13 @@ class ProjectMeasurementWriter:
         self._stage_name = stage_name
         self._phase_has_records = False
         return completed_phase
+
+    def _raw_filename(self, project_file_prefix: str, stage_name: str) -> str:
+        marker = "_simulation" if self._measurement_kind == "simulation" else ""
+        return (
+            f"{project_file_prefix}_{safe_filename(stage_name)}"
+            f"{marker}_live_raw.csv"
+        )
 
     def complete_current_phase(self) -> Path | None:
         completed_phase: tuple[Path, str] | None = None

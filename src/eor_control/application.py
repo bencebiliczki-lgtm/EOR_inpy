@@ -17,12 +17,29 @@ class ApplicationState(StrEnum):
     FAULT = "fault"
 
 
+class HardwareConnectionState(StrEnum):
+    CONNECTED = "connected"
+    PARTIAL = "partial"
+    DISCONNECTED = "disconnected"
+
+
+class MeasurementState(StrEnum):
+    IDLE = "idle"
+    PREPARING = "preparing"
+    WAITING_CONFIRMATION = "waiting_confirmation"
+    RUNNING = "running"
+    PAUSED = "paused"
+    STOPPED_BY_FAULT = "stopped_by_fault"
+
+
 @dataclass(frozen=True, slots=True)
 class ApplicationStatus:
     state: ApplicationState
     mode: RunMode
     fault_reason: str | None = None
     hardware_authorized: bool = False
+    connection: HardwareConnectionState = HardwareConnectionState.DISCONNECTED
+    measurement: MeasurementState = MeasurementState.IDLE
 
 
 class DeviceControlService:
@@ -47,6 +64,8 @@ class DeviceControlService:
         self._state = ApplicationState.IDLE
         self._fault_reason: str | None = None
         self._hardware_authorized = False
+        self._connection = HardwareConnectionState.DISCONNECTED
+        self._measurement = MeasurementState.IDLE
 
     @property
     def status(self) -> ApplicationStatus:
@@ -55,6 +74,8 @@ class DeviceControlService:
             mode=self._mode,
             fault_reason=self._fault_reason,
             hardware_authorized=self._hardware_authorized,
+            connection=self._connection,
+            measurement=self._measurement,
         )
 
     @property
@@ -88,6 +109,7 @@ class DeviceControlService:
             self._enter_fault(f"device connection failed: {error}")
             raise
         self._state = ApplicationState.READY
+        self._connection = HardwareConnectionState.CONNECTED
 
     def start(self) -> None:
         if self._state is not ApplicationState.READY:
@@ -103,6 +125,16 @@ class DeviceControlService:
                 if callable(start_simulation):
                     start_simulation()
         self._state = ApplicationState.RUNNING
+        self._measurement = MeasurementState.PREPARING
+
+    def set_measurement_state(self, state: MeasurementState) -> None:
+        if state is MeasurementState.RUNNING and self._state is not ApplicationState.RUNNING:
+            raise RuntimeError("devices must be running before measurement runtime starts")
+        self._measurement = state
+
+    def set_connection_state(self, state: HardwareConnectionState) -> None:
+        """Update read-only connection health without changing application mode."""
+        self._connection = state
 
     def stop(self) -> None:
         if self._state not in (ApplicationState.READY, ApplicationState.RUNNING):
@@ -113,11 +145,7 @@ class DeviceControlService:
             self._state = ApplicationState.FAULT
         else:
             self._state = ApplicationState.READY
-            if self._mode is RunMode.HARDWARE:
-                # The DAQ safe-state revokes its independent physical-output
-                # authorization. Do not leave the application-level hardware
-                # authorization looking valid after that point.
-                self._hardware_authorized = False
+            self._measurement = MeasurementState.IDLE
 
     def emergency_stop(self, reason: str = "manual emergency stop") -> None:
         self._enter_fault(reason)
@@ -126,13 +154,12 @@ class DeviceControlService:
         if self._state is not ApplicationState.FAULT:
             raise RuntimeError("there is no fault to acknowledge")
         self._fault_reason = None
-        self._state = ApplicationState.IDLE
+        self._state = ApplicationState.READY
+        self._measurement = MeasurementState.IDLE
         for pump in (self._jacket_pump, self._injection_pump):
             acknowledge = getattr(pump, "acknowledge_stop_latch", None)
             if callable(acknowledge):
                 acknowledge()
-        if self._mode is RunMode.HARDWARE:
-            self._hardware_authorized = False
 
     def disconnect(self) -> None:
         errors: list[str] = []
@@ -147,6 +174,8 @@ class DeviceControlService:
             except Exception as error:
                 errors.append(f"{label} disconnect failed: {error}")
         self._hardware_authorized = False
+        self._connection = HardwareConnectionState.DISCONNECTED
+        self._measurement = MeasurementState.IDLE
         if errors:
             self._fault_reason = "; ".join(errors)
             self._state = ApplicationState.FAULT
@@ -177,6 +206,7 @@ class DeviceControlService:
         details = "; ".join(errors)
         self._fault_reason = f"{reason}; safe-state errors: {details}" if errors else reason
         self._state = ApplicationState.FAULT
+        self._measurement = MeasurementState.STOPPED_BY_FAULT
 
     def _request_safe_state(self, safety_rule: str) -> tuple[str, ...]:
         errors: list[str] = []

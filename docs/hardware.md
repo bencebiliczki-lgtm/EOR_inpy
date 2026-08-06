@@ -109,8 +109,10 @@ jeltartományuk 1–5 V, a vonali érzékelő alapértelmezett leképezése 0–
 
 A `ni.py` logikai `line_pressure`, `differential_pressure` és `valve_output`
 csatornákat köt konfigurált NI fizikai csatornákhoz. A fizikai analóg kimenet külön,
-pontos megerősítő szöveg nélkül tiltott. A safe-state feszültséget és az engedélyezett
-kimeneti tartományt kötelező konfigurálni; a kód nem választ helyettük alapértelmezett
+alapértelmezetten elutasított gombos kezelői megerősítés nélkül tiltott; a
+szolgáltatási réteg belső engedélytokenje nem kezelői beviteli mező. A safe-state
+feszültséget és az engedélyezett kimeneti tartományt kötelező konfigurálni; a kód
+nem választ helyettük alapértelmezett
 fizikai biztonsági állapotot. Az `AnalogValveActuator` explicit 0%/100%
 kalibrációból számít feszültséget, így a fordított szelepkarakterisztika is kezelhető.
 

@@ -178,6 +178,8 @@ class HardwareConfiguration:
     line_pressure_enabled: bool = True
     differential_pressure_enabled: bool = True
     valve_output_enabled: bool = True
+    serial_command_timeout_seconds: float = 2.0
+    serial_command_retries: int = 2
 
     def __post_init__(self) -> None:
         if (
@@ -192,6 +194,8 @@ class HardwareConfiguration:
                 self.jacket_unit_id,
                 self.jacket_channel,
                 self.baud_rate,
+                self.serial_command_timeout_seconds,
+                self.serial_command_retries,
             )
         if self.injection_pump_enabled:
             IscoSerialConfig(
@@ -199,6 +203,8 @@ class HardwareConfiguration:
                 self.injection_unit_id,
                 self.injection_channel,
                 self.baud_rate,
+                self.serial_command_timeout_seconds,
+                self.serial_command_retries,
             )
         NidaqConfig(
             self.line_pressure_channel if self.line_pressure_enabled else None,
@@ -231,6 +237,8 @@ class HardwareConfiguration:
             self.jacket_unit_id,
             self.jacket_channel,
             self.baud_rate,
+            self.serial_command_timeout_seconds,
+            self.serial_command_retries,
         )
 
     def injection_config(self) -> IscoSerialConfig:
@@ -241,6 +249,8 @@ class HardwareConfiguration:
             self.injection_unit_id,
             self.injection_channel,
             self.baud_rate,
+            self.serial_command_timeout_seconds,
+            self.serial_command_retries,
         )
 
     def ni_config(self) -> NidaqConfig:
@@ -327,6 +337,8 @@ def connection_configuration_fingerprint(
             configuration.jacket_unit_id,
             configuration.jacket_channel,
             configuration.baud_rate,
+            configuration.serial_command_timeout_seconds,
+            configuration.serial_command_retries,
         ),
         HardwareTestDevice.INJECTION_PUMP: (
             configuration.injection_pump_enabled,
@@ -334,6 +346,8 @@ def connection_configuration_fingerprint(
             configuration.injection_unit_id,
             configuration.injection_channel,
             configuration.baud_rate,
+            configuration.serial_command_timeout_seconds,
+            configuration.serial_command_retries,
         ),
         HardwareTestDevice.LINE_PRESSURE: (
             configuration.line_pressure_enabled,

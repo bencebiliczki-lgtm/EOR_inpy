@@ -13,6 +13,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(root / "img"), "img"),
+        (str(root / "config" / "stable-defaults.json"), "config"),
         (str(root / "docs" / "drivers_readme.txt"), "."),
     ] + package_metadata + timezone_data,
     hiddenimports=[
@@ -38,9 +39,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="AFKI-EOR",
     debug=False,
     bootloader_ignore_signals=False,
@@ -55,4 +55,14 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name="AFKI-EOR",
 )

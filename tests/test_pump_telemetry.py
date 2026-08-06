@@ -117,8 +117,9 @@ def slow_intervals() -> PumpPollingIntervals:
 def test_default_pressure_stale_window_covers_observed_serial_jitter() -> None:
     intervals = PumpPollingIntervals()
 
-    assert intervals.pressure_seconds == pytest.approx(0.4)
-    assert intervals.pressure_stale_seconds == pytest.approx(2.0)
+    assert intervals.pressure_seconds == pytest.approx(1.0)
+    assert intervals.pressure_stale_seconds == pytest.approx(3.0)
+    assert intervals.pressure_stale_seconds >= 3.0 * intervals.pressure_seconds
     assert intervals.slow_telemetry_stale_seconds == pytest.approx(3.0)
 
 
