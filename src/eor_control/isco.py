@@ -119,7 +119,15 @@ class IscoPump:
         self._require_connected()
         command = self._channel_command("SETFLOW")
         response = self._client.command(command).message
-        flow, reported_unit = _parse_measurement_parts(response, command=command)
+        accepted_keys = {
+            command.upper(),
+            self._channel_command("FLOW").upper(),
+        }
+        flow, reported_unit = _parse_measurement_parts(
+            response,
+            command=command,
+            accepted_keys=accepted_keys,
+        )
         unit = (reported_unit or self._config.flow_unit).upper()
         if unit not in {"ML/MIN", "ML/HR"}:
             raise ValueError(
@@ -228,13 +236,21 @@ def parse_measurement(response: str, *, command: str, expected_unit: str) -> flo
 
 
 def _parse_measurement_parts(
-    response: str, *, command: str
+    response: str,
+    *,
+    command: str,
+    accepted_keys: set[str] | None = None,
 ) -> tuple[float, str | None]:
     match = _MEASUREMENT_PATTERN.fullmatch(response)
     if match is None:
         raise ValueError(f"invalid ISCO {command} response: {response!r}")
     key = match.group("key")
-    if key is not None and key.upper() != command.upper():
+    allowed = (
+        {command.upper()}
+        if accepted_keys is None
+        else {accepted.upper() for accepted in accepted_keys}
+    )
+    if key is not None and key.upper() not in allowed:
         raise ValueError(f"unexpected ISCO response key {key!r} for {command}")
     value = float(match.group("value"))
     if not isfinite(value):

@@ -2340,6 +2340,44 @@ def test_active_hardware_ready_state_refreshes_dashboard_without_measurement(
     window.close()
 
 
+def test_hardware_preparation_progress_refreshes_dashboard_values(
+    tmp_path: Path,
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        tmp_path / "projects.sqlite3",
+    )
+    window._run_mode = RunMode.HARDWARE
+    window._preflight_active = True
+    window._devices.start()
+    snapshot = MeasurementSnapshot(
+        recorded_at=datetime(2026, 8, 6, 10, 30, tzinfo=UTC),
+        monotonic_seconds=1.0,
+        jacket_pump=PumpStatus(135.125, 4.0, 249.0),
+        injection_pump=PumpStatus(104.75, 3.0, 248.0),
+        line_pressure_bar=88.625,
+        differential_pressure_bar=1.375,
+        valve_percent=0.0,
+        quality=DataQuality.GOOD,
+    )
+    record = MeasurementRecord(snapshot, 0.0, "Előkészítés")
+
+    window._measurement_pump_startup_progress(record)
+
+    assert window._last_hardware_status_record is record
+    assert window._jacket_label.text() == "135.125 bar"
+    assert window._injection_label.text() == "104.750 bar"
+    assert window._line_label.text() == "88.625 bar"
+    assert window._delta_label.text() == "1.375 bar"
+    assert window._pressure_margin_label.text() == "30.375 bar"
+    assert not window._times
+    window._preflight_active = False
+    window._run_mode = RunMode.SIMULATION
+    window._devices.stop()
+    window.close()
+
+
 def test_valve_card_always_shows_current_safe_or_commanded_state(
     tmp_path: Path,
 ) -> None:

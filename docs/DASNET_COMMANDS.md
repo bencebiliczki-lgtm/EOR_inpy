@@ -104,6 +104,12 @@ Lehetséges `MODE` jelölések: `P` állandó nyomás, `F` állandó áramlás, 
 | `MFLOWA`, `MFLOWB`, `MFLOWC`, `MFLOWD` | Maximális áramlási korlát lekérdezése. |
 | `RLIMITA`, `RLIMITB`, `RLIMITC`, `RLIMITD` | Utántöltési térfogatáram-korlát lekérdezése. |
 
+Firmware-kompatibilitási megjegyzés: a fizikai 260D a `SETFLOWx` lekérdezésre
+`FLOWx=érték` kulccsal is válaszolhat. Az alkalmazás ennél a lekérdezésnél csak
+az azonos csatornához tartozó `SETFLOWx` vagy `FLOWx` kulcsot fogadja el, majd a
+véges numerikus értéket, a mértékegységet és a kért célértékkel való egyezést is
+ellenőrzi.
+
 ### Nyomás
 
 | Parancs | Leírás |

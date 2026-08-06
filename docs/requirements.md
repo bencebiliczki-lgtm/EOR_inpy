@@ -131,6 +131,11 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   nyomásbemenetek aktuális értékét és a szelep biztonságos alapállapotát. Ez a
   szolgáltatási nézet ne írjon mérési rekordot és ne adjon pontot a mérési
   grafikonhoz; blokkoló I/O nem futhat a Qt UI-szálán.
+- A pumpák `PREPARING` előkészítési állapotában a biztonsági mintavételekből
+  folyamatosan frissüljön a dashboard két pumpanyomása, vonali és
+  differenciálnyomása, valamint a köpeny–besajtolás nyomáskülönbsége. Az
+  előkészítési kijelzés nem indíthatja el idő előtt a PID-et, az adatmentést vagy
+  a mérési grafikon pontgyűjtését.
 - A mérés kezelői gombjai: **Mérés indítása**, **Mérés
   szüneteltetése/folytatása** és **Mérés leállítása**. Szünetben a PID és az
   adatmentés álljon, de a biztonsági felügyelet fusson tovább és a fizikai

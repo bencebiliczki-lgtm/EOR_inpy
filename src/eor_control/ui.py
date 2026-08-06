@@ -1358,6 +1358,7 @@ class RuntimeBridge(QObject):
     fault_raised = Signal(str)
     preflight_completed = Signal(object)
     preflight_failed = Signal(str)
+    pump_startup_progress = Signal(object)
     pump_startup_completed = Signal()
     pump_startup_failed = Signal(str)
     flow_change_completed = Signal(float)
@@ -5962,6 +5963,9 @@ class DashboardWindow(QMainWindow):
         self._runtime_bridge.preflight_failed.connect(
             self._measurement_preflight_failed
         )
+        self._runtime_bridge.pump_startup_progress.connect(
+            self._measurement_pump_startup_progress
+        )
         self._runtime_bridge.pump_startup_completed.connect(
             self._measurement_pump_startup_completed
         )
@@ -9925,6 +9929,18 @@ class DashboardWindow(QMainWindow):
                 active_stage = runtime_settings.active_stage
 
                 def execute() -> None:
+                    def startup_safety_check() -> tuple[str, ...]:
+                        if (
+                            self._devices.status.state
+                            is not ApplicationState.RUNNING
+                        ):
+                            return ("measurement pump startup was cancelled",)
+                        record = self._control_loop.observe_pump_startup_once(
+                            active_stage=active_stage
+                        )
+                        self._runtime_bridge.pump_startup_progress.emit(record)
+                        return record.safety_reasons
+
                     try:
                         pump_control.start_measurement_pumps(
                             jacket_target_pressure_bar=(
@@ -9953,14 +9969,7 @@ class DashboardWindow(QMainWindow):
                                 plan.margin_stability_seconds
                             ),
                             confirmation=confirmation,
-                            startup_safety_check=lambda: (
-                                ("measurement pump startup was cancelled",)
-                                if self._devices.status.state
-                                is not ApplicationState.RUNNING
-                                else self._control_loop.observe_pump_startup_once(
-                                    active_stage=active_stage
-                                ).safety_reasons
-                            ),
+                            startup_safety_check=startup_safety_check,
                         )
                     except Exception as error:
                         self._runtime_bridge.pump_startup_failed.emit(str(error))
@@ -9996,6 +10005,20 @@ class DashboardWindow(QMainWindow):
         # RUNNING is the terminal state of startup: the acquisition/control
         # worker must be active before the public measurement state advances.
         self._devices.set_measurement_state(MeasurementState.RUNNING)
+
+    def _measurement_pump_startup_progress(self, result: object) -> None:
+        if not isinstance(result, MeasurementRecord):
+            return
+        status = self._devices.status
+        if (
+            not self._preflight_active
+            or self._run_mode is not RunMode.HARDWARE
+            or status.state is not ApplicationState.RUNNING
+            or status.measurement is not MeasurementState.PREPARING
+        ):
+            return
+        self._last_hardware_status_record = result
+        self._apply_idle_hardware_record(result)
 
     def _measurement_pump_startup_completed(self) -> None:
         if (

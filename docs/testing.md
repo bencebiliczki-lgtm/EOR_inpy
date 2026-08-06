@@ -263,6 +263,9 @@ adatait, valamint a pontok törlését a dashboard alaphelyzetbe állításakor.
 Az aktív hardver-dashboard regressziója `READY` állapotban, futó mérés nélkül
 ellenőrzi az élő pumpa- és NI-értékeket, a SAFE szelepállapotot, továbbá azt,
 hogy a szolgáltatási frissítés nem hoz létre grafikonpontot.
+Az előkészítési dashboard regressziója `PREPARING` állapotban ellenőrzi a két
+pumpanyomás, a vonali és differenciálnyomás, valamint a nyomáskülönbség élő
+frissítését, miközben a mérési grafikon pufferében még nem keletkezik pont.
 
 A Developer vezérlésiciklus-beállítás tesztje ellenőrzi a ciklusidő és a
 watchdog-tűrés tartós mentését, valamint a számított végrehajtási határidőt.
@@ -306,6 +309,9 @@ KÖP-nyomásnak a teljes stabilitási időn át fenn kell maradnia, majd a BES
 pumpának az operátori döntésig STOP állapotban kell várnia. Az exportteszt
 ellenőrzi az eseményazonosító deduplikálását, az eseménylapot és a diagram
 marker-sorozatát.
+A SETFLOW firmware-kompatibilitási teszt elfogadja az azonos csatornájú
+`FLOWx=érték` választ, de elutasítja a másik csatorna kulcsát, a hibás
+mértékegységet, a nem véges értéket és a tolerancián kívüli célértéket.
 
 A `test_stable_profile.py` ellenőrzi a stabil profil sémáját, a hiányzó
 fizikai paraméterek mérésblokkoló hatását, a három pollingperiódusos

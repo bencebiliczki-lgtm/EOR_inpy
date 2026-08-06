@@ -596,6 +596,9 @@ futás közbeni közvetlen FLOW-átírást. Ezért a BES mérési flow indulásk
 és futás közbeni váltása konzervatívan `STOP → CONST FLOW/FLOW →
 SETFLOW visszaolvasás → RUN` sorrendű. Sikertelen visszaolvasásnál a régi
 alkalmazott érték marad a felületen, a rendszer pedig biztonságosan leáll.
+A 260D firmware a `SETFLOWx` lekérdezés célértékét `FLOWx=érték` kulccsal is
+visszaadhatja. Ezt kizárólag az azonos csatornájú SETFLOW-visszaolvasás fogadja
+el; a közös mérési parser többi parancsának kulcsellenőrzése szigorú marad.
 
 A kalibráció `voltage_min`/`voltage_max` pontjai nem biztonsági határok. A
 véges minták lineárisan extrapolálhatók (például a kb. 0,9 V-os nullpont),

@@ -78,6 +78,35 @@ def test_status_queries_documented_fields_and_converts_flow_to_hour() -> None:
     assert client.commands[-4:] == ["PRESSA", "FLOWA", "VOLA", "STATUSA"]
 
 
+def test_setflow_accepts_flowa_firmware_response() -> None:
+    pump, client = connected_pump()
+    client.responses["SETFLOWA"] = ["FLOWA=0.001 ML/HR"]
+
+    value = pump.read_configured_flow_ml_per_hour()
+
+    assert value == pytest.approx(0.001)
+    assert client.commands[-1] == "SETFLOWA"
+
+
+@pytest.mark.parametrize(
+    ("response", "error"),
+    [
+        ("FLOWB=0.001 ML/HR", "response key"),
+        ("FLOWA=0.001 BAR", "unexpected ISCO unit"),
+        ("FLOWA=NaN ML/HR", "invalid ISCO"),
+    ],
+)
+def test_setflow_firmware_response_remains_strict(
+    response: str,
+    error: str,
+) -> None:
+    pump, client = connected_pump()
+    client.responses["SETFLOWA"] = [response]
+
+    with pytest.raises(ValueError, match=error):
+        pump.read_configured_flow_ml_per_hour()
+
+
 def test_non_260d_identity_is_rejected() -> None:
     client = ScriptedClient({"RSVP": ["READY"], "IDENTIFY": ["MODEL 500D PUMP"]})
 

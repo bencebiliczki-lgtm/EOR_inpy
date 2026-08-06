@@ -12,6 +12,7 @@ class FakePump:
     pressure: float
     commands: list[str]
     connected: bool = False
+    configured_flow_readback: float | None = None
 
     def connect(self) -> None:
         self.connected = True
@@ -29,6 +30,8 @@ class FakePump:
         self.commands.append(f"FLOW={target}")
 
     def read_configured_flow_ml_per_hour(self) -> float:
+        if self.configured_flow_readback is not None:
+            return self.configured_flow_readback
         return float(self.commands[-1].split("=", 1)[1])
 
     def set_constant_pressure(self, target: float) -> None:
@@ -223,6 +226,20 @@ def test_measurement_flow_uses_stop_set_verify_run_sequence() -> None:
 
     assert applied == pytest.approx(25.0)
     assert injection.commands == ["STOP", "FLOW=25.0", "RUN"]
+
+
+def test_measurement_flow_rejects_firmware_readback_outside_tolerance() -> None:
+    control, _, injection = service()
+    prepare(control, PumpRole.INJECTION)
+    control.run(PumpRole.INJECTION, PumpControlService.RUN_INJECTION_CONFIRMATION)
+    injection.commands.clear()
+    injection.configured_flow_readback = 24.0
+
+    with pytest.raises(RuntimeError, match="flow verification failed"):
+        control.apply_measurement_flow(25.0)
+
+    assert injection.commands == ["STOP", "FLOW=25.0"]
+    assert not control.state(PumpRole.INJECTION).running
 
 
 def test_measurement_start_programs_both_hardware_pressure_limits() -> None:
