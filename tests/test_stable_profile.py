@@ -35,7 +35,7 @@ def test_stable_software_timing_has_three_poll_stale_window() -> None:
 
     assert acquisition["recording_interval_seconds"] == 1.0
     assert acquisition["hardware_status_poll_interval_seconds"] == 1.0
-    assert acquisition["stale_timeout_seconds"] == 3.0
+    assert acquisition["stale_timeout_seconds"] == 6.0
     assert float(acquisition["stale_timeout_seconds"]) >= 3.0 * float(
         acquisition["hardware_status_poll_interval_seconds"]
     )
@@ -48,7 +48,7 @@ def test_migration_applies_only_missing_software_values() -> None:
     applied = apply_missing_software_settings(target, profile)
 
     assert target["recording/interval_seconds"] == 2.0
-    assert target["hardware/stale_timeout_seconds"] == 3.0
+    assert target["hardware/stale_timeout_seconds"] == 6.0
     assert "recording/interval_seconds" not in applied
     assert "hardware/stale_timeout_seconds" in applied
 

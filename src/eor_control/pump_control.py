@@ -253,8 +253,8 @@ class PumpControlService:
             )
             if margin < self._minimum_margin:
                 raise PermissionError(
-                    f"jacket pressure margin is {margin:.2f} bar; "
-                    f"at least {self._minimum_margin:.2f} bar is required"
+                    f"jacket pressure margin is {margin:.3f} bar; "
+                    f"at least {self._minimum_margin:.3f} bar is required"
                 )
         self._pumps[role].run()
         self._states[role] = PumpPreparationState(
@@ -366,8 +366,8 @@ class PumpControlService:
                     margin_stable_since = None
                 if now >= deadline:
                     raise TimeoutError(
-                        f"jacket pressure margin remained {margin:.2f} bar; "
-                        f"at least {self._minimum_margin:.2f} bar must be stable "
+                        f"jacket pressure margin remained {margin:.3f} bar; "
+                        f"at least {self._minimum_margin:.3f} bar must be stable "
                         f"for {margin_stability_seconds:.2f} s"
                     )
                 sleep(polling_interval_seconds)
@@ -424,10 +424,10 @@ class PumpControlService:
                 if now >= injection_deadline:
                     raise TimeoutError(
                         "pump startup targets were not reached: "
-                        f"jacket {jacket_pressure:.2f}/"
-                        f"{jacket_target_pressure_bar:.2f} bar, injection "
-                        f"{injection_pressure:.2f}/"
-                        f"{injection_start_pressure_bar:.2f} bar"
+                        f"jacket {jacket_pressure:.3f}/"
+                        f"{jacket_target_pressure_bar:.3f} bar, injection "
+                        f"{injection_pressure:.3f}/"
+                        f"{injection_start_pressure_bar:.3f} bar"
                     )
                 sleep(polling_interval_seconds)
 

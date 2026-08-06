@@ -509,7 +509,7 @@ class PhysicalHardwareConnectionTester:
             result = DeviceConnectionResult(
                 device,
                 True,
-                f"{pump.identified_model}; {status.pressure_bar:.2f} bar; "
+                f"{pump.identified_model}; {status.pressure_bar:.3f} bar; "
                 f"{status.flow_ml_per_hour:.3f} ml/h",
             )
         except Exception as error:

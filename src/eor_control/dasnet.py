@@ -1,5 +1,7 @@
 from dataclasses import dataclass
+from math import isfinite
 from threading import Lock
+from time import monotonic
 from typing import Protocol
 
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
@@ -18,6 +20,8 @@ class DasnetFrameError(DasnetError):
 
 
 class SerialConnection(Protocol):
+    timeout: float | None
+
     def write(self, data: bytes) -> int: ...
 
     def read_until(self, expected: bytes = b"\n", size: int | None = None) -> bytes: ...
@@ -201,17 +205,47 @@ class DasnetClient:
         raise last_error
 
     def _read_response_frame(self) -> bytes:
-        """Collect a possibly fragmented response across bounded serial reads."""
+        """Collect a fragmented response within one serial-timeout budget.
+
+        ``pyserial.read_until`` already waits for the configured timeout.  Calling
+        it four times with the full timeout made one DASNET attempt last four
+        timeout windows and could starve the safety-critical pressure poll.
+        Test doubles without a ``timeout`` attribute keep the bounded fragment
+        count behaviour.
+        """
         response = bytearray()
-        for _ in range(self._response_reads_per_attempt):
-            remaining = 512 - len(response)
-            if remaining <= 0:
-                break
-            chunk = self._connection.read_until(b"\r", remaining)
-            if chunk:
-                response.extend(chunk)
-                if response.endswith(b"\r"):
+        configured_timeout = getattr(self._connection, "timeout", None)
+        timeout_budget = (
+            float(configured_timeout)
+            if isinstance(configured_timeout, (int, float))
+            and isfinite(float(configured_timeout))
+            and float(configured_timeout) > 0.0
+            else None
+        )
+        deadline = None if timeout_budget is None else monotonic() + timeout_budget
+        try:
+            for _ in range(self._response_reads_per_attempt):
+                remaining = 512 - len(response)
+                if remaining <= 0:
                     break
+                if deadline is not None:
+                    remaining_seconds = deadline - monotonic()
+                    if remaining_seconds <= 0.0:
+                        break
+                    self._connection.timeout = remaining_seconds
+                chunk = self._connection.read_until(b"\r", remaining)
+                if chunk:
+                    response.extend(chunk)
+                    if response.endswith(b"\r"):
+                        break
+                elif deadline is not None:
+                    # A real serial read returning no bytes consumed its bounded
+                    # wait window; retry the DASNET command instead of opening
+                    # another full fragment-read window.
+                    break
+        finally:
+            if timeout_budget is not None:
+                self._connection.timeout = configured_timeout
         return bytes(response)
 
     def close(self) -> None:

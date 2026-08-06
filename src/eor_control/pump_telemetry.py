@@ -50,7 +50,7 @@ class PollablePump(Protocol):
 class PumpPollingIntervals:
     pressure_seconds: float = 1.0
     slow_telemetry_seconds: float = 1.0
-    pressure_stale_seconds: float = 3.0
+    pressure_stale_seconds: float = 6.0
     slow_telemetry_stale_seconds: float = 3.0
     startup_timeout_seconds: float = 3.0
 
@@ -64,8 +64,8 @@ class PumpPollingIntervals:
         )
         if not all(isfinite(value) and value > 0.0 for value in values):
             raise ValueError("pump polling intervals must be positive and finite")
-        if self.pressure_stale_seconds < self.pressure_seconds:
-            raise ValueError("pump pressure stale limit must cover one polling interval")
+        if self.pressure_stale_seconds < 3.0 * self.pressure_seconds:
+            raise ValueError("pump pressure stale limit must cover three polling intervals")
         if self.slow_telemetry_stale_seconds < self.slow_telemetry_seconds:
             raise ValueError("slow pump telemetry stale limit must cover one polling interval")
 
@@ -268,24 +268,36 @@ class PollingPump:
         )
 
     def enter_remote(self) -> None:
-        self._execute(self._pump.enter_remote)
+        self._execute(self._pump.enter_remote, refresh_pressure=True)
         with self._condition:
             self._stop_latched = False
 
     def set_constant_flow(self, flow_ml_per_hour: float) -> None:
-        self._execute(lambda: self._pump.set_constant_flow(flow_ml_per_hour))
+        self._execute(
+            lambda: self._pump.set_constant_flow(flow_ml_per_hour),
+            refresh_pressure=True,
+        )
 
     def read_configured_flow_ml_per_hour(self) -> float:
-        return self._execute(self._pump.read_configured_flow_ml_per_hour)
+        return self._execute(
+            self._pump.read_configured_flow_ml_per_hour,
+            refresh_pressure=True,
+        )
 
     def set_constant_pressure(self, pressure_bar: float) -> None:
-        self._execute(lambda: self._pump.set_constant_pressure(pressure_bar))
+        self._execute(
+            lambda: self._pump.set_constant_pressure(pressure_bar),
+            refresh_pressure=True,
+        )
 
     def set_pressure_limit(self, pressure_bar: float) -> None:
-        self._execute(lambda: self._pump.set_pressure_limit(pressure_bar))
+        self._execute(
+            lambda: self._pump.set_pressure_limit(pressure_bar),
+            refresh_pressure=True,
+        )
 
     def run(self) -> None:
-        self._execute(self._pump.run)
+        self._execute(self._pump.run, refresh_pressure=True)
         with self._condition:
             self._stop_latched = False
 
@@ -296,17 +308,21 @@ class PollingPump:
             # Latch before I/O: a LOCAL MODE response or a timeout must not create
             # an endless STOP/reply loop in subsequent fault handling paths.
             self._stop_latched = True
-        self._execute(self._pump.request_stop, require_connected=False)
+        self._execute(
+            self._pump.request_stop,
+            require_connected=False,
+            refresh_pressure=False,
+        )
 
     def acknowledge_stop_latch(self) -> None:
         with self._condition:
             self._stop_latched = False
 
     def clear(self) -> None:
-        self._execute(self._pump.clear)
+        self._execute(self._pump.clear, refresh_pressure=True)
 
     def return_local(self) -> None:
-        self._execute(self._pump.return_local)
+        self._execute(self._pump.return_local, refresh_pressure=False)
 
     def disconnect(self) -> None:
         with self._condition:
@@ -325,7 +341,11 @@ class PollingPump:
                 self._condition.notify_all()
 
     def _execute(
-        self, operation: Callable[[], T], *, require_connected: bool = True
+        self,
+        operation: Callable[[], T],
+        *,
+        require_connected: bool = True,
+        refresh_pressure: bool = False,
     ) -> T:
         if require_connected:
             with self._condition:
@@ -336,7 +356,15 @@ class PollingPump:
             self._condition.notify_all()
         try:
             with self._command_lock:
-                return operation()
+                result = operation()
+                pressure = (
+                    self._pump.read_pressure_bar()
+                    if refresh_pressure
+                    else None
+                )
+            if pressure is not None:
+                self._update("pressure", pressure)
+            return result
         finally:
             with self._condition:
                 self._pending_commands -= 1
@@ -397,6 +425,7 @@ class PollingPump:
                         action_result="DEADLINE_MISSED",
                         level="WARNING",
                     )
+                log_health = False
                 try:
                     if field == "pressure":
                         self._update(
@@ -423,7 +452,7 @@ class PollingPump:
                     else:
                         self._read("STATUS", self._pump.read_operating_status)
                         self._update(field, None)
-                        self._log_telemetry_health()
+                        log_health = True
                         next_status = (
                             monotonic() + self._intervals.slow_telemetry_seconds
                         )
@@ -442,6 +471,23 @@ class PollingPump:
                         next_volume = retry_at
                     else:
                         next_status = retry_at
+                finally:
+                    if field != "pressure" and not self._stop_event.is_set():
+                        # A slow FLOW/VOLA/STATUS transaction owns the same serial
+                        # line as PRESS. Refresh pressure immediately afterwards so
+                        # its age cannot accumulate across slow-field polls.
+                        try:
+                            self._update(
+                                "pressure",
+                                self._read("PRESS", self._pump.read_pressure_bar),
+                            )
+                        except Exception as pressure_error:
+                            self._record_field_error("pressure", pressure_error)
+                        next_pressure = (
+                            monotonic() + self._intervals.pressure_seconds
+                        )
+                    if log_health:
+                        self._log_telemetry_health()
         except Exception as error:
             with self._condition:
                 if not self._stop_event.is_set():

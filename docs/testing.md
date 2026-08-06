@@ -225,8 +225,13 @@ Eszközbeállításokat. A Developer manuális ablak élő hardvermódból megny
 a telemetria közben kiadott több parancs veszteség nélkül, sorrendben lefut, majd
 végrehajtás után látható sikerállapotot kap. A DASNET-tesztek külön ellenőrzik,
 hogy a soros timeouttal darabolt válasz a következő olvasási ablakból kiegészül.
-Külön regresszió rögzíti, hogy a 400 ms-os nyomáspolling 2 másodperces `STALE`
-határa lefedi a célgépen mért, legfeljebb 1,4 másodperces normál soros késést.
+Külön regresszió rögzíti, hogy a nyomás `STALE` határa legalább három
+pollingperiódust és a soros timeout/próbálkozási keretet lefedi. A DASNET-teszt
+ellenőrzi, hogy a töredékes válaszolvasás egy próbálkozáson belül nem nyit több
+teljes timeoutablakot, a pumpatelemetria-regresszió pedig valós blokkolási idővel
+igazolja, hogy egymást követő lassú mezők nem teszik STALE-lé a friss nyomást.
+Külön teszt ellenőrzi, hogy a sikeres REMOTE, konfigurációs és RUN parancsok
+mindegyike azonnali nyomáscache-frissítést eredményez.
 Külön telemetriateszt igazolja, hogy FLOW/VOLA timeout mellett a nyomáspolling
 tovább fut, a nyomás minősége `GOOD` marad, míg a kapcsolat `DEGRADED` állapotot
 és mezőszintű hibát ad.

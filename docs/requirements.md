@@ -165,7 +165,8 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 - Developer/szerviz módban a közös Beállítások ablak külön
   **Pumpatelemetria / STALE** oldala szerkessze a nyomás- és lassú polling
   időközét, a két mezőcsoport STALE-határát és a kezdő telemetria timeoutját.
-  STALE-határ nem lehet rövidebb a hozzá tartozó polling időköznél. A felület
+  Nyomás-STALE-határ nem lehet rövidebb három pollingperiódusnál, illetve a
+  soros timeout/próbálkozási keret plusz két pollingperiódusnál. A felület
   jelezze, hogy a nyomás STALE-határának növelése késlelteti a kapcsolatvesztés
   felismerését; az értékek csak a következő hardveraktiváláskor lépjenek életbe.
 - A köpenynyomás felépülése alatt minden egyéb szenzor-, kapcsolat- és
@@ -187,6 +188,10 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   is minden, az aktív mérési profilban kötelező eszköz szükséges. A vonali
   nyomásmérő opcionális; hiányában nem olvasható és nem választható PID-forrásnak,
   de a besajtolópumpa nyomásáról szabályozott mérést nem blokkolhatja.
+- A vezetett szelepteszt sikeres irányellenőrzését az alkalmazás az aktuális
+  NI kimeneti csatornához és a szelep 0/100%-os feszültségleképezéséhez
+  kötve mentse. A csatorna vagy a leképezés módosítása után az irányt
+  ismét fizikailag ellenőrizni kell.
 - A hozzáadott eszközök listája projektenként tárolódjon és a
   Projektbeállításokban kapcsolatpróba vagy helyszíni validáció nélkül legyen
   szerkeszthető. Az Eszközbeállítások a kiválasztott projekt profilját használja;

@@ -301,7 +301,7 @@ def test_measurement_start_safety_failure_stops_both_pumps() -> None:
 def test_measurement_start_pressure_timeout_never_runs_injection() -> None:
     control, jacket, injection = service(jacket_pressure=119.0)
 
-    with pytest.raises(TimeoutError, match="margin remained 19.00 bar"):
+    with pytest.raises(TimeoutError, match="margin remained 19.000 bar"):
         control.start_measurement_pumps(
             jacket_target_pressure_bar=120.0,
             jacket_buildup_flow_ml_per_hour=60.0,
@@ -320,7 +320,7 @@ def test_measurement_start_pressure_timeout_never_runs_injection() -> None:
 def test_measurement_start_waits_for_injection_start_pressure() -> None:
     control, jacket, injection = service(injection_pressure=99.0)
 
-    with pytest.raises(TimeoutError, match="injection 99.00/100.00 bar"):
+    with pytest.raises(TimeoutError, match="injection 99.000/100.000 bar"):
         control.start_measurement_pumps(
             jacket_target_pressure_bar=120.0,
             jacket_buildup_flow_ml_per_hour=60.0,
@@ -348,7 +348,7 @@ def test_measurement_start_rechecks_margin_immediately_before_injection_run() ->
             jacket.pressure = 119.0
         return ()
 
-    with pytest.raises(PermissionError, match="is 19.00 bar"):
+    with pytest.raises(PermissionError, match="is 19.000 bar"):
         control.start_measurement_pumps(
             jacket_target_pressure_bar=120.0,
             jacket_buildup_flow_ml_per_hour=60.0,
@@ -395,7 +395,7 @@ def test_injection_run_requires_twenty_bar_jacket_margin() -> None:
     control, _, injection = service(jacket_pressure=119.9)
     prepare(control, PumpRole.INJECTION)
 
-    with pytest.raises(PermissionError, match="at least 20.00 bar"):
+    with pytest.raises(PermissionError, match="at least 20.000 bar"):
         control.run(PumpRole.INJECTION, PumpControlService.RUN_INJECTION_CONFIRMATION)
 
     assert "RUN" not in injection.commands

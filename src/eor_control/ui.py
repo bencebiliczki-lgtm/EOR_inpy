@@ -3155,7 +3155,7 @@ class PumpControlDialog(ResizableDialog):
             for role, status in result.items():
                 if isinstance(role, PumpRole) and isinstance(status, PumpStatus):
                     self._status_labels[role].setText(
-                        f"{status.pressure_bar:.2f} bar | "
+                        f"{status.pressure_bar:.3f} bar | "
                         f"{status.flow_ml_per_hour:.3f} ml/h | "
                         f"{status.remaining_volume_ml:.3f} ml"
                     )
@@ -3269,7 +3269,7 @@ class PumpControlDialog(ResizableDialog):
                 status = result.pump_statuses.get(role)
                 if status is not None:
                     self._status_labels[role].setText(
-                        f"KAPCSOLÓDVA | {status.pressure_bar:.2f} bar | "
+                        f"KAPCSOLÓDVA | {status.pressure_bar:.3f} bar | "
                         f"{status.flow_ml_per_hour:.3f} ml/h | "
                         f"{status.remaining_volume_ml:.3f} ml"
                     )
@@ -3285,7 +3285,7 @@ class PumpControlDialog(ResizableDialog):
             self._line_pressure_status.setText(
                 "NINCS HOZZÁADVA"
                 if "line_pressure" not in self._enabled_pressure_inputs
-                else f"KAPCSOLÓDVA | {line_pressure:.2f} bar"
+                else f"KAPCSOLÓDVA | {line_pressure:.3f} bar"
                 if line_pressure is not None
                 else "NINCS KAPCSOLAT — "
                 + result.pressure_errors.get("line_pressure", "ismeretlen hiba")
@@ -3293,7 +3293,7 @@ class PumpControlDialog(ResizableDialog):
             self._differential_pressure_status.setText(
                 "NINCS HOZZÁADVA"
                 if "differential_pressure" not in self._enabled_pressure_inputs
-                else f"KAPCSOLÓDVA | {differential_pressure:.2f} bar"
+                else f"KAPCSOLÓDVA | {differential_pressure:.3f} bar"
                 if differential_pressure is not None
                 else "NINCS KAPCSOLAT — "
                 + result.pressure_errors.get(
@@ -3421,24 +3421,24 @@ class PumpControlDialog(ResizableDialog):
     def _update_live_values(self, record: MeasurementRecord) -> None:
         snapshot = record.snapshot
         self._status_labels[PumpRole.JACKET].setText(
-            f"{snapshot.jacket_pump.pressure_bar:.2f} bar | "
+            f"{snapshot.jacket_pump.pressure_bar:.3f} bar | "
             f"{snapshot.jacket_pump.flow_ml_per_hour:.3f} ml/h | "
             f"{snapshot.jacket_pump.remaining_volume_ml:.3f} ml"
         )
         self._status_labels[PumpRole.INJECTION].setText(
-            f"{snapshot.injection_pump.pressure_bar:.2f} bar | "
+            f"{snapshot.injection_pump.pressure_bar:.3f} bar | "
             f"{snapshot.injection_pump.flow_ml_per_hour:.3f} ml/h | "
             f"{snapshot.injection_pump.remaining_volume_ml:.3f} ml"
         )
         self._line_pressure_status.setText(
             "NINCS HOZZÁADVA"
             if snapshot.line_pressure_bar is None
-            else f"{snapshot.line_pressure_bar:.2f} bar"
+            else f"{snapshot.line_pressure_bar:.3f} bar"
         )
         self._differential_pressure_status.setText(
             "NINCS HOZZÁADVA"
             if snapshot.differential_pressure_bar is None
-            else f"{snapshot.differential_pressure_bar:.2f} bar"
+            else f"{snapshot.differential_pressure_bar:.3f} bar"
         )
         self._valve_status.setText(f"{snapshot.valve_percent:.1f} %")
         if record.safety_reasons:
@@ -3829,8 +3829,17 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         return field
 
     def selected_intervals(self) -> PumpPollingIntervals:
+        pressure_poll = self.pressure_poll.value()
+        minimum_pressure_stale = self.minimum_pressure_stale_seconds(
+            self._settings, pressure_poll
+        )
+        if self.pressure_stale.value() < minimum_pressure_stale:
+            raise ValueError(
+                "pump pressure stale limit must cover the configured DASNET "
+                f"timeout/retry budget ({minimum_pressure_stale:.3f} s)"
+            )
         return PumpPollingIntervals(
-            pressure_seconds=self.pressure_poll.value(),
+            pressure_seconds=pressure_poll,
             slow_telemetry_seconds=self.slow_poll.value(),
             pressure_stale_seconds=self.pressure_stale.value(),
             slow_telemetry_stale_seconds=self.slow_stale.value(),
@@ -3838,7 +3847,13 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         )
 
     @classmethod
-    def intervals(cls, settings: QSettings) -> PumpPollingIntervals:
+    def intervals(
+        cls,
+        settings: QSettings,
+        *,
+        command_timeout_seconds: float | None = None,
+        command_attempts: int | None = None,
+    ) -> PumpPollingIntervals:
         defaults = PumpPollingIntervals()
 
         def value(field: str, fallback: float) -> float:
@@ -3850,18 +3865,40 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
                 return fallback
             return parsed if isfinite(parsed) else fallback
 
+        pressure_stale_fallback = defaults.pressure_stale_seconds
+        if not settings.contains(cls.SETTINGS["pressure_stale_seconds"]):
+            try:
+                legacy_pressure_stale = float(
+                    str(
+                        settings.value(
+                            "hardware/stale_timeout_seconds",
+                            defaults.pressure_stale_seconds,
+                        )
+                    )
+                )
+            except (TypeError, ValueError):
+                legacy_pressure_stale = defaults.pressure_stale_seconds
+            if isfinite(legacy_pressure_stale):
+                pressure_stale_fallback = legacy_pressure_stale
+        pressure_seconds = value("pressure_seconds", defaults.pressure_seconds)
+        configured_pressure_stale = value(
+            "pressure_stale_seconds", pressure_stale_fallback
+        )
+        minimum_pressure_stale = cls.minimum_pressure_stale_seconds(
+            settings,
+            pressure_seconds,
+            command_timeout_seconds=command_timeout_seconds,
+            command_attempts=command_attempts,
+        )
         try:
             return PumpPollingIntervals(
-                pressure_seconds=value(
-                    "pressure_seconds", defaults.pressure_seconds
-                ),
+                pressure_seconds=pressure_seconds,
                 slow_telemetry_seconds=value(
                     "slow_telemetry_seconds",
                     defaults.slow_telemetry_seconds,
                 ),
-                pressure_stale_seconds=value(
-                    "pressure_stale_seconds",
-                    defaults.pressure_stale_seconds,
+                pressure_stale_seconds=max(
+                    configured_pressure_stale, minimum_pressure_stale
                 ),
                 slow_telemetry_stale_seconds=value(
                     "slow_telemetry_stale_seconds",
@@ -3873,7 +3910,53 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
                 ),
             )
         except ValueError:
-            return defaults
+            return PumpPollingIntervals(
+                pressure_seconds=defaults.pressure_seconds,
+                slow_telemetry_seconds=defaults.slow_telemetry_seconds,
+                pressure_stale_seconds=max(
+                    defaults.pressure_stale_seconds,
+                    cls.minimum_pressure_stale_seconds(
+                        settings,
+                        defaults.pressure_seconds,
+                        command_timeout_seconds=command_timeout_seconds,
+                        command_attempts=command_attempts,
+                    ),
+                ),
+                slow_telemetry_stale_seconds=(
+                    defaults.slow_telemetry_stale_seconds
+                ),
+                startup_timeout_seconds=defaults.startup_timeout_seconds,
+            )
+
+    @staticmethod
+    def minimum_pressure_stale_seconds(
+        settings: QSettings,
+        pressure_seconds: float,
+        *,
+        command_timeout_seconds: float | None = None,
+        command_attempts: int | None = None,
+    ) -> float:
+        try:
+            timeout = (
+                float(command_timeout_seconds)
+                if command_timeout_seconds is not None
+                else float(
+                    str(settings.value("hardware/serial_command_timeout_seconds", 2.0))
+                )
+            )
+            attempts = (
+                int(command_attempts)
+                if command_attempts is not None
+                else int(str(settings.value("hardware/serial_command_retries", 2)))
+            )
+        except (TypeError, ValueError):
+            timeout, attempts = 2.0, 2
+        if not isfinite(timeout) or timeout <= 0.0 or attempts < 1:
+            timeout, attempts = 2.0, 2
+        return max(
+            3.0 * pressure_seconds,
+            timeout * attempts + 2.0 * pressure_seconds,
+        )
 
     def _refresh_validation(self, *_args: object) -> None:
         try:
@@ -3903,6 +3986,9 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         }
         for field, value in values.items():
             self._settings.setValue(self.SETTINGS[field], value)
+        self._settings.setValue(
+            "hardware/stale_timeout_seconds", intervals.pressure_stale_seconds
+        )
         self._settings.sync()
         self.accept()
 
@@ -5255,7 +5341,7 @@ class MeasurementPumpStartupDialog(ResizableDialog):
         layout = QVBoxLayout(self)
         explanation = QLabel(
             "A köpenypumpa a megadott térfogatárammal építi fel a nyomást. "
-            f"Ha a legalább {minimum_jacket_margin_bar:g} bar "
+            f"Ha a legalább {minimum_jacket_margin_bar:.3f} bar "
             "köpenynyomás-többlet a megadott ideig stabil, "
             "a besajtolópumpa is elindul, és a két pumpa együtt halad a "
             "kezdőértékek felé. A köpeny a célján STOP után nyomástartásra vált. "
@@ -5271,7 +5357,7 @@ class MeasurementPumpStartupDialog(ResizableDialog):
         self.jacket_target_pressure = QDoubleSpinBox()
         self.jacket_target_pressure.setObjectName("startup_jacket_target_pressure")
         self.jacket_target_pressure.setRange(0.0, maximum_jacket_pressure_bar)
-        self.jacket_target_pressure.setDecimals(2)
+        self.jacket_target_pressure.setDecimals(3)
         self.jacket_target_pressure.setSuffix(" bar")
         self.jacket_target_pressure.setValue(defaults.jacket_target_pressure_bar)
 
@@ -5289,7 +5375,7 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             "startup_injection_start_pressure"
         )
         self.injection_start_pressure.setRange(0.0, maximum_injection_pressure_bar)
-        self.injection_start_pressure.setDecimals(2)
+        self.injection_start_pressure.setDecimals(3)
         self.injection_start_pressure.setSuffix(" bar")
         self.injection_start_pressure.setValue(
             defaults.injection_start_pressure_bar
@@ -5314,7 +5400,7 @@ class MeasurementPumpStartupDialog(ResizableDialog):
         self.jacket_pressure_limit = QDoubleSpinBox()
         self.jacket_pressure_limit.setObjectName("startup_jacket_pressure_limit")
         self.jacket_pressure_limit.setRange(0.01, maximum_jacket_pressure_bar)
-        self.jacket_pressure_limit.setDecimals(2)
+        self.jacket_pressure_limit.setDecimals(3)
         self.jacket_pressure_limit.setSuffix(" bar")
         self.jacket_pressure_limit.setValue(
             defaults.jacket_pressure_limit_bar or maximum_jacket_pressure_bar
@@ -5327,7 +5413,7 @@ class MeasurementPumpStartupDialog(ResizableDialog):
         self.injection_pressure_limit.setRange(
             0.01, maximum_injection_pressure_bar
         )
-        self.injection_pressure_limit.setDecimals(2)
+        self.injection_pressure_limit.setDecimals(3)
         self.injection_pressure_limit.setSuffix(" bar")
         self.injection_pressure_limit.setValue(
             defaults.injection_pressure_limit_bar
@@ -5415,8 +5501,8 @@ class MeasurementPumpStartupDialog(ResizableDialog):
         )
         margin_ok = margin >= self._minimum_jacket_margin_bar
         self.margin_status.setText(
-            f"Tervezett köpenynyomás-többlet: {margin:g} bar; "
-            f"szükséges: legalább {self._minimum_jacket_margin_bar:g} bar."
+            f"Tervezett köpenynyomás-többlet: {margin:.3f} bar; "
+            f"szükséges: legalább {self._minimum_jacket_margin_bar:.3f} bar."
         )
         self.margin_status.setStyleSheet(
             "color:#1b7f3a;font-weight:700"
@@ -7450,7 +7536,7 @@ class DashboardWindow(QMainWindow):
             "stage": self._active_stage_label.text(),
             "control_mode": self._mode.currentText(),
             "pressure_source": self._source.currentText(),
-            "setpoint": f"{self._setpoint.value():g} bar",
+            "setpoint": f"{self._setpoint.value():.3f} bar",
             "recording_interval": f"{self._recording_interval.value()} s",
             "last_update": (
                 format_hungarian_time(snapshot.recorded_at, "%Y-%m-%d %H:%M:%S")
@@ -7477,17 +7563,18 @@ class DashboardWindow(QMainWindow):
             "valve_connection": self._connection_labels["valve"].text(),
             "valve_output": self._valve_label.text(),
             "line_calibration": (
-                f"{line[0]:g}–{line[1]:g} V → {line[2]:g}–{line[3]:g} bar"
+                f"{line[0]:g}–{line[1]:g} V → {line[2]:.3f}–{line[3]:.3f} bar"
             ),
             "delta_calibration": (
-                f"{delta[0]:g}–{delta[1]:g} V → {delta[2]:g}–{delta[3]:g} bar"
+                f"{delta[0]:g}–{delta[1]:g} V → "
+                f"{delta[2]:.3f}–{delta[3]:.3f} bar"
             ),
-            "max_jacket": f"{self._max_jacket.value():g} bar",
-            "max_injection": f"{self._max_injection.value():g} bar",
-            "max_line": f"{self._max_line.value():g} bar",
-            "max_delta": f"{self._max_delta.value():g} bar",
-            "minimum_margin": f"{self._minimum_margin.value():g} bar",
-            "max_overshoot": f"{self._max_overshoot.value():g} bar",
+            "max_jacket": f"{self._max_jacket.value():.3f} bar",
+            "max_injection": f"{self._max_injection.value():.3f} bar",
+            "max_line": f"{self._max_line.value():.3f} bar",
+            "max_delta": f"{self._max_delta.value():.3f} bar",
+            "minimum_margin": f"{self._minimum_margin.value():.3f} bar",
+            "max_overshoot": f"{self._max_overshoot.value():.3f} bar",
         }
 
     def _refresh_active_hardware_status(self) -> None:
@@ -7615,9 +7702,9 @@ class DashboardWindow(QMainWindow):
 
     def _apply_idle_hardware_record(self, record: MeasurementRecord) -> None:
         snapshot = record.snapshot
-        self._jacket_label.setText(f"{snapshot.jacket_pump.pressure_bar:.1f} bar")
+        self._jacket_label.setText(f"{snapshot.jacket_pump.pressure_bar:.3f} bar")
         self._injection_label.setText(
-            f"{snapshot.injection_pump.pressure_bar:.1f} bar"
+            f"{snapshot.injection_pump.pressure_bar:.3f} bar"
         )
         self._jacket_remaining_label.setText(
             f"Maradék folyadék: "
@@ -7652,12 +7739,12 @@ class DashboardWindow(QMainWindow):
             True if configuration is None else configuration.valve_output_enabled
         )
         self._line_label.setText(
-            f"{snapshot.line_pressure_bar:.1f} bar"
+            f"{snapshot.line_pressure_bar:.3f} bar"
             if line_enabled and snapshot.line_pressure_bar is not None
             else "Nincs hozzáadva"
         )
         self._delta_label.setText(
-            f"{snapshot.differential_pressure_bar:.1f} bar"
+            f"{snapshot.differential_pressure_bar:.3f} bar"
             if delta_enabled and snapshot.differential_pressure_bar is not None
             else "Nincs hozzáadva"
         )
@@ -7689,7 +7776,7 @@ class DashboardWindow(QMainWindow):
             snapshot.jacket_pump.pressure_bar
             - snapshot.injection_pump.pressure_bar
         )
-        self._pressure_margin_label.setText(f"{margin:.1f} bar")
+        self._pressure_margin_label.setText(f"{margin:.3f} bar")
         self._pressure_margin_label.setStyleSheet(
             "background:transparent;font-size:20px;font-weight:700;color:#66788a"
         )
@@ -8222,7 +8309,9 @@ class DashboardWindow(QMainWindow):
                 ),
                 name="jacket-direct",
                 intervals=PumpTelemetrySettingsDialog.intervals(
-                    self._user_settings
+                    self._user_settings,
+                    command_timeout_seconds=hardware.serial_command_timeout_seconds,
+                    command_attempts=hardware.serial_command_retries,
                 ),
             )
             if hardware.jacket_pump_enabled
@@ -8238,7 +8327,11 @@ class DashboardWindow(QMainWindow):
                     ),
                     name="injection-direct",
                     intervals=PumpTelemetrySettingsDialog.intervals(
-                        self._user_settings
+                        self._user_settings,
+                        command_timeout_seconds=(
+                            hardware.serial_command_timeout_seconds
+                        ),
+                        command_attempts=hardware.serial_command_retries,
                     ),
                 )
                 if hardware.injection_pump_enabled
@@ -8488,6 +8581,7 @@ class DashboardWindow(QMainWindow):
                 parent=self,
             )
             wizard.exec()
+            self._store_valve_direction_test_result(configuration, session)
             emergency_passed = any(
                 result.device
                 == FunctionalTestDevice.EMERGENCY_AND_COMMUNICATION.value
@@ -8515,6 +8609,64 @@ class DashboardWindow(QMainWindow):
                 self._devices.disconnect()
             self._refresh_state()
 
+    @staticmethod
+    def _valve_direction_configuration_hash(
+        configuration: HardwareConfiguration,
+    ) -> str:
+        """Identify the physical AO mapping whose direction was verified."""
+        return configuration_hash(
+            {
+                "valve_output_channel": configuration.valve_output_channel,
+                "safe_output_voltage": configuration.safe_output_voltage,
+                "valve_zero_percent_voltage": (
+                    configuration.valve_zero_percent_voltage
+                ),
+                "valve_hundred_percent_voltage": (
+                    configuration.valve_hundred_percent_voltage
+                ),
+            }
+        )
+
+    def _store_valve_direction_test_result(
+        self,
+        configuration: HardwareConfiguration,
+        session: FunctionalDeviceTestSession,
+    ) -> None:
+        valve_attempted = any(
+            result.device == FunctionalTestDevice.HANBAY_VALVE.value
+            for result in session.report.device_results
+        )
+        if session.valve_complete:
+            self._user_settings.setValue(
+                "hardware/valve_direction_validated", True
+            )
+            self._user_settings.setValue(
+                "hardware/valve_direction_validation_hash",
+                self._valve_direction_configuration_hash(configuration),
+            )
+        elif valve_attempted:
+            self._user_settings.setValue(
+                "hardware/valve_direction_validated", False
+            )
+            self._user_settings.remove(
+                "hardware/valve_direction_validation_hash"
+            )
+
+    def _valve_direction_is_validated(self) -> bool:
+        configuration = self._active_hardware_configuration
+        if configuration is None or not self._setting_bool(
+            "hardware/valve_direction_validated", False
+        ):
+            return False
+        stored_hash = str(
+            self._user_settings.value(
+                "hardware/valve_direction_validation_hash", ""
+            )
+        )
+        return stored_hash == self._valve_direction_configuration_hash(
+            configuration
+        )
+
     def _activate_hardware(
         self,
         configuration: HardwareConfiguration,
@@ -8536,7 +8688,11 @@ class DashboardWindow(QMainWindow):
                 ),
                 name="jacket",
                 intervals=PumpTelemetrySettingsDialog.intervals(
-                    self._user_settings
+                    self._user_settings,
+                    command_timeout_seconds=(
+                        configuration.serial_command_timeout_seconds
+                    ),
+                    command_attempts=configuration.serial_command_retries,
                 ),
                 diagnostics=self._diagnostics,
                 diagnostic_category=DiagnosticCategory.JACKET_PUMP,
@@ -8554,7 +8710,11 @@ class DashboardWindow(QMainWindow):
                     ),
                     name="injection",
                     intervals=PumpTelemetrySettingsDialog.intervals(
-                        self._user_settings
+                        self._user_settings,
+                        command_timeout_seconds=(
+                            configuration.serial_command_timeout_seconds
+                        ),
+                        command_attempts=configuration.serial_command_retries,
                     ),
                     diagnostics=self._diagnostics,
                     diagnostic_category=DiagnosticCategory.INJECTION_PUMP,
@@ -9148,7 +9308,7 @@ class DashboardWindow(QMainWindow):
                 details.append(stage.fluid)
             if stage.target_pressure_bar is not None:
                 self._setpoint.setValue(stage.target_pressure_bar)
-                details.append(f"cél: {stage.target_pressure_bar:g} bar")
+                details.append(f"cél: {stage.target_pressure_bar:.3f} bar")
             if stage.target_flow_ml_per_hour is not None:
                 details.append(f"áram: {stage.target_flow_ml_per_hour:g} ml/h")
             self._active_stage_label.setToolTip("; ".join(details))
@@ -9809,8 +9969,8 @@ class DashboardWindow(QMainWindow):
         prompt.setWindowTitle("Kezdőnyomás elérve")
         prompt.setText(
             "A kezdőnyomás elérve. Elindítod a mérést?\n"
-            f"Aktuális BES nyomás: {current_pressure:.2f} bar\n"
-            f"Célérték: {plan.injection_start_pressure_bar:.2f} bar"
+            f"Aktuális BES nyomás: {current_pressure:.3f} bar\n"
+            f"Célérték: {plan.injection_start_pressure_bar:.3f} bar"
         )
         start_button = prompt.addButton(
             "Mérés indítása", QMessageBox.ButtonRole.AcceptRole
@@ -9819,7 +9979,7 @@ class DashboardWindow(QMainWindow):
             "Előkészítés megszakítása", QMessageBox.ButtonRole.RejectRole
         )
         prompt.exec()
-        if prompt.clickedButton() is not start_button:
+        if prompt.clickedButton() != start_button:
             self._preflight_active = False
             try:
                 self._devices.stop()
@@ -10123,9 +10283,7 @@ class DashboardWindow(QMainWindow):
                 else "",
             )
             physical_flags = {
-                "szelepirány": self._setting_bool(
-                    "hardware/valve_direction_validated", False
-                ),
+                "szelepirány": self._valve_direction_is_validated(),
                 "biztonsági nyomáshatárok": self._setting_bool(
                     "safety/limits_validated", False
                 ),
@@ -10163,7 +10321,7 @@ class DashboardWindow(QMainWindow):
         line_pressure_text = (
             "nincs hozzáadva"
             if snapshot.line_pressure_bar is None
-            else f"{snapshot.line_pressure_bar:.1f} bar"
+            else f"{snapshot.line_pressure_bar:.3f} bar"
         )
         sensors_ok = (
             snapshot.jacket_pump.connected
@@ -10175,8 +10333,8 @@ class DashboardWindow(QMainWindow):
             "Aktuális szenzoradatok",
             PreflightStatus.PASSED if sensors_ok else PreflightStatus.FAILED,
             f"Minőség: {snapshot.quality.value}; köpeny: "
-            f"{snapshot.jacket_pump.pressure_bar:.1f} bar; besajtolás: "
-            f"{snapshot.injection_pump.pressure_bar:.1f} bar; vonali: "
+            f"{snapshot.jacket_pump.pressure_bar:.3f} bar; besajtolás: "
+            f"{snapshot.injection_pump.pressure_bar:.3f} bar; vonali: "
             f"{line_pressure_text}.",
             "Ellenőrizze a szenzorokat és a pumpakapcsolatokat."
             if not sensors_ok
@@ -10275,8 +10433,8 @@ class DashboardWindow(QMainWindow):
             "pressure_margin",
             "Köpeny–besajtolás nyomáskülönbség",
             margin_status,
-            f"Aktuális: {actual_margin:.1f} bar; szükséges: legalább "
-            f"{required_margin:.1f} bar.",
+            f"Aktuális: {actual_margin:.3f} bar; szükséges: legalább "
+            f"{required_margin:.3f} bar.",
             (
                 "A program először csak a köpenypumpát indítja el, és a "
                 "besajtolópumpát a szükséges különbség eléréséig tiltja."
@@ -10463,8 +10621,8 @@ class DashboardWindow(QMainWindow):
         self._set_connection("line_daq", True)
         self._set_connection("delta_daq", True)
         self._set_connection("valve", result.command.enabled)
-        self._jacket_label.setText(f"{snapshot.jacket_pump.pressure_bar:.1f} bar")
-        self._injection_label.setText(f"{snapshot.injection_pump.pressure_bar:.1f} bar")
+        self._jacket_label.setText(f"{snapshot.jacket_pump.pressure_bar:.3f} bar")
+        self._injection_label.setText(f"{snapshot.injection_pump.pressure_bar:.3f} bar")
         self._jacket_remaining_label.setText(
             f"Maradék folyadék: {snapshot.jacket_pump.remaining_volume_ml:.1f} ml"
         )
@@ -10485,18 +10643,18 @@ class DashboardWindow(QMainWindow):
         self._line_label.setText(
             "Nincs hozzáadva"
             if snapshot.line_pressure_bar is None
-            else f"{snapshot.line_pressure_bar:.1f} bar"
+            else f"{snapshot.line_pressure_bar:.3f} bar"
         )
         self._delta_label.setText(
             "Nincs hozzáadva"
             if snapshot.differential_pressure_bar is None
-            else f"{snapshot.differential_pressure_bar:.1f} bar"
+            else f"{snapshot.differential_pressure_bar:.3f} bar"
         )
         margin = (
             snapshot.jacket_pump.pressure_bar
             - snapshot.injection_pump.pressure_bar
         )
-        self._pressure_margin_label.setText(f"{margin:.1f} bar")
+        self._pressure_margin_label.setText(f"{margin:.3f} bar")
         self._pressure_margin_label.setStyleSheet(
             "background:transparent;font-size:20px;font-weight:700;color:#66788a"
         )
@@ -10624,8 +10782,8 @@ class DashboardWindow(QMainWindow):
             f"Idő: {format_hungarian_time(snapshot.recorded_at, '%Y-%m-%d %H:%M:%S %Z')}\n"
             f"Szakasz: {result.record.active_stage}\n"
             f"Ok: {reason}\n"
-            f"Köpeny: {snapshot.jacket_pump.pressure_bar:.2f} bar\n"
-            f"Besajtolás: {snapshot.injection_pump.pressure_bar:.2f} bar"
+            f"Köpeny: {snapshot.jacket_pump.pressure_bar:.3f} bar\n"
+            f"Besajtolás: {snapshot.injection_pump.pressure_bar:.3f} bar"
         )
         self._alarm_points.append(
             {
@@ -11126,9 +11284,7 @@ class DashboardWindow(QMainWindow):
                 )
             )
         )
-        valve_direction_validated = self._setting_bool(
-            "hardware/valve_direction_validated", False
-        )
+        valve_direction_validated = self._valve_direction_is_validated()
         safety_validated = self._setting_bool("safety/limits_validated", False)
         calibration_validated = self._setting_bool(
             "calibration/profile_validated", False

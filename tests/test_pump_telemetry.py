@@ -84,6 +84,21 @@ class SlowTelemetryFailurePump(SlowPollablePump):
 
 
 @dataclass
+class BlockingSlowTelemetryPump(SlowPollablePump):
+    slow_delay_seconds: float = 0.12
+
+    def read_flow_ml_per_hour(self) -> float:
+        self.calls["flow"] += 1
+        sleep(self.slow_delay_seconds)
+        return 12.0
+
+    def read_remaining_volume_ml(self) -> float:
+        self.calls["volume"] += 1
+        sleep(self.slow_delay_seconds)
+        return 240.0
+
+
+@dataclass
 class ToggleFieldFailurePump(SlowPollablePump):
     failed_field: str | None = None
     failed_fields: set[str] = field(default_factory=set)
@@ -108,7 +123,7 @@ def slow_intervals() -> PumpPollingIntervals:
     return PumpPollingIntervals(
         pressure_seconds=10.0,
         slow_telemetry_seconds=10.0,
-        pressure_stale_seconds=20.0,
+        pressure_stale_seconds=30.0,
         slow_telemetry_stale_seconds=20.0,
         startup_timeout_seconds=1.0,
     )
@@ -118,7 +133,7 @@ def test_default_pressure_stale_window_covers_observed_serial_jitter() -> None:
     intervals = PumpPollingIntervals()
 
     assert intervals.pressure_seconds == pytest.approx(1.0)
-    assert intervals.pressure_stale_seconds == pytest.approx(3.0)
+    assert intervals.pressure_stale_seconds == pytest.approx(6.0)
     assert intervals.pressure_stale_seconds >= 3.0 * intervals.pressure_seconds
     assert intervals.slow_telemetry_stale_seconds == pytest.approx(3.0)
 
@@ -179,6 +194,28 @@ def test_slow_field_failure_does_not_make_pressure_stale_or_stop_worker() -> Non
     pump.disconnect()
 
 
+def test_blocking_slow_fields_cannot_accumulate_pressure_age_to_stale() -> None:
+    raw = BlockingSlowTelemetryPump(delay_seconds=0.0)
+    intervals = PumpPollingIntervals(
+        pressure_seconds=0.02,
+        slow_telemetry_seconds=0.03,
+        pressure_stale_seconds=0.2,
+        slow_telemetry_stale_seconds=0.5,
+        startup_timeout_seconds=1.0,
+    )
+    pump = PollingPump(raw, name="test", intervals=intervals)
+    pump.connect()
+    sleep(0.22)
+
+    telemetry = pump.read_telemetry()
+
+    assert telemetry.pressure.quality is DataQuality.GOOD
+    assert telemetry.pressure.age_seconds is not None
+    assert telemetry.pressure.age_seconds < intervals.pressure_stale_seconds
+    assert raw.calls["pressure"] >= 2
+    pump.disconnect()
+
+
 def test_failed_stop_is_latched_until_acknowledgement() -> None:
     raw = SlowPollablePump(delay_seconds=0.0, fail_stop=True)
     pump = PollingPump(raw, name="test", intervals=slow_intervals())
@@ -196,6 +233,21 @@ def test_failed_stop_is_latched_until_acknowledgement() -> None:
     pump.disconnect()
 
 
+def test_successful_control_commands_refresh_pressure_cache() -> None:
+    raw = SlowPollablePump(delay_seconds=0.0)
+    pump = PollingPump(raw, name="test", intervals=slow_intervals())
+    pump.connect()
+    pressure_reads_after_connect = raw.calls["pressure"]
+
+    pump.enter_remote()
+    pump.set_constant_flow(10.0)
+    pump.run()
+
+    assert raw.calls["pressure"] == pressure_reads_after_connect + 3
+    assert pump.read_telemetry().pressure.quality is DataQuality.GOOD
+    pump.disconnect()
+
+
 @pytest.mark.parametrize("failed_field", ["pressure", "flow", "volume"])
 def test_each_field_logs_single_stale_transition_and_recovery(
     tmp_path: Path, failed_field: str
@@ -206,7 +258,7 @@ def test_each_field_logs_single_stale_transition_and_recovery(
     intervals = PumpPollingIntervals(
         pressure_seconds=0.02,
         slow_telemetry_seconds=0.03,
-        pressure_stale_seconds=0.05,
+        pressure_stale_seconds=0.06,
         slow_telemetry_stale_seconds=0.05,
         startup_timeout_seconds=1.0,
     )
@@ -239,8 +291,11 @@ def test_each_field_logs_single_stale_transition_and_recovery(
         and dict(event.fields)["new_quality"] == DataQuality.STALE.value
     ]
     assert len(stale_events) == 1
-    assert float(dict(stale_events[0].fields)["age_ms"]) >= 50.0
-    assert dict(stale_events[0].fields)["stale_limit_ms"] == "50.0"
+    expected_stale_ms = 60.0 if failed_field == "pressure" else 50.0
+    assert float(dict(stale_events[0].fields)["age_ms"]) >= expected_stale_ms
+    assert dict(stale_events[0].fields)["stale_limit_ms"] == str(
+        expected_stale_ms
+    )
 
     raw.failed_field = None
     recovery_deadline = monotonic() + 1.0
@@ -276,7 +331,7 @@ def test_multiple_fields_log_distinct_stale_transitions_in_order(
     intervals = PumpPollingIntervals(
         pressure_seconds=0.02,
         slow_telemetry_seconds=0.03,
-        pressure_stale_seconds=0.05,
+        pressure_stale_seconds=0.06,
         slow_telemetry_stale_seconds=0.05,
         startup_timeout_seconds=1.0,
     )

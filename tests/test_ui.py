@@ -3,6 +3,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import sleep
+from types import SimpleNamespace
 
 import pytest
 
@@ -56,7 +57,10 @@ from eor_control.data_management import (  # noqa: E402
 )
 from eor_control.device_testing import (  # noqa: E402
     DeviceTestReport,
+    DeviceTestResult,
+    DeviceTestStatus,
     FunctionalDeviceTestSession,
+    FunctionalTestDevice,
 )
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger  # noqa: E402
 from eor_control.domain import (  # noqa: E402
@@ -577,7 +581,7 @@ def test_pump_telemetry_stale_settings_are_validated_and_persisted(
     dialog = PumpTelemetrySettingsDialog(settings)
     dialog.pressure_poll.setValue(0.5)
     dialog.slow_poll.setValue(2.0)
-    dialog.pressure_stale.setValue(2.5)
+    dialog.pressure_stale.setValue(5.5)
     dialog.slow_stale.setValue(5.0)
     dialog.startup_timeout.setValue(8.0)
 
@@ -586,9 +590,28 @@ def test_pump_telemetry_stale_settings_are_validated_and_persisted(
 
     assert intervals.pressure_seconds == pytest.approx(0.5)
     assert intervals.slow_telemetry_seconds == pytest.approx(2.0)
-    assert intervals.pressure_stale_seconds == pytest.approx(2.5)
+    assert intervals.pressure_stale_seconds == pytest.approx(5.5)
+    assert float(settings.value("hardware/stale_timeout_seconds")) == pytest.approx(
+        5.5
+    )
     assert intervals.slow_telemetry_stale_seconds == pytest.approx(5.0)
     assert intervals.startup_timeout_seconds == pytest.approx(8.0)
+
+
+def test_pump_telemetry_uses_serial_budget_and_legacy_stale_setting(
+    tmp_path: Path,
+) -> None:
+    settings = QSettings(
+        str(tmp_path / "legacy-stale.ini"), QSettings.Format.IniFormat
+    )
+    settings.setValue("hardware/stale_timeout_seconds", 7.0)
+    settings.setValue("hardware/serial_command_timeout_seconds", 2.0)
+    settings.setValue("hardware/serial_command_retries", 2)
+
+    intervals = PumpTelemetrySettingsDialog.intervals(settings)
+
+    assert intervals.pressure_stale_seconds == pytest.approx(7.0)
+    assert not settings.contains("developer/pump_pressure_stale_seconds")
 
 
 def test_pump_telemetry_menu_rejects_stale_limit_below_poll_interval(
@@ -845,9 +868,9 @@ def test_manual_control_retains_partial_pump_status_when_sensor_is_missing() -> 
         sleep(0.01)
 
     assert "KAPCSOLÓDVA" in dialog._status_labels[PumpRole.JACKET].text()
-    assert "120.00 bar" in dialog._status_labels[PumpRole.JACKET].text()
+    assert "120.000 bar" in dialog._status_labels[PumpRole.JACKET].text()
     assert "NINCS KAPCSOLAT" in dialog._status_labels[PumpRole.INJECTION].text()
-    assert dialog._line_pressure_status.text() == "KAPCSOLÓDVA | 12.50 bar"
+    assert dialog._line_pressure_status.text() == "KAPCSOLÓDVA | 12.500 bar"
     assert "sensor is not connected" in dialog._differential_pressure_status.text()
     assert "RÉSZLEGES KAPCSOLAT" in dialog._safety_status.text()
     assert "manuális biztonsági profil" in dialog._safety_status.text()
@@ -968,6 +991,66 @@ def test_guided_ao_write_uses_button_confirmation_without_text_entry(
     assert operation().status.value == "PASSED"
     assert voltages == [1.0]
     dialog.close()
+
+
+def test_successful_guided_valve_test_persists_direction_for_current_mapping(
+    tmp_path: Path,
+) -> None:
+    application()
+    settings = QSettings(
+        str(tmp_path / "valve-direction.ini"), QSettings.Format.IniFormat
+    )
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        tmp_path / "projects.sqlite3",
+        settings=settings,
+    )
+    configuration = HardwareConfiguration(
+        jacket_port="COM1",
+        jacket_unit_id=1,
+        jacket_channel="A",
+        injection_port="COM2",
+        injection_unit_id=2,
+        injection_channel="A",
+        baud_rate=9600,
+        line_pressure_channel="Dev1/ai0",
+        differential_pressure_channel="Dev1/ai1",
+        valve_output_channel="Dev1/ao0",
+        safe_output_voltage=1.0,
+        valve_zero_percent_voltage=1.0,
+        valve_hundred_percent_voltage=5.0,
+    )
+    window._active_hardware_configuration = configuration
+    report = DeviceTestReport.create(
+        application_version="test", configuration_hash="full-profile-hash"
+    )
+    report.device_results.append(
+        DeviceTestResult(
+            device=FunctionalTestDevice.HANBAY_VALVE.value,
+            test_type="position_step",
+            status=DeviceTestStatus.PASSED,
+        )
+    )
+    successful_session = SimpleNamespace(report=report, valve_complete=True)
+
+    window._store_valve_direction_test_result(  # type: ignore[arg-type]
+        configuration, successful_session
+    )
+
+    assert window._valve_direction_is_validated()
+    window._active_hardware_configuration = replace(
+        configuration, valve_hundred_percent_voltage=4.0
+    )
+    assert not window._valve_direction_is_validated()
+
+    window._active_hardware_configuration = configuration
+    failed_session = SimpleNamespace(report=report, valve_complete=False)
+    window._store_valve_direction_test_result(  # type: ignore[arg-type]
+        configuration, failed_session
+    )
+    assert not window._valve_direction_is_validated()
+    assert not settings.contains("hardware/valve_direction_validation_hash")
+    window.close()
 
 
 def test_text_labels_have_no_theme_background_fill() -> None:
@@ -2176,8 +2259,15 @@ def test_active_hardware_ready_state_refreshes_dashboard_without_measurement(
     assert window._devices.status.state is ApplicationState.READY
     assert not window._runtime.running
     assert window._last_cycle_result is None
-    assert window._jacket_label.text() == "120.0 bar"
-    assert window._injection_label.text() == "100.0 bar"
+    jacket_text = window._jacket_label.text()
+    injection_text = window._injection_label.text()
+    jacket_value, jacket_unit = jacket_text.split()
+    injection_value, injection_unit = injection_text.split()
+    assert jacket_unit == injection_unit == "bar"
+    assert len(jacket_value.rsplit(".", 1)[1]) == 3
+    assert len(injection_value.rsplit(".", 1)[1]) == 3
+    assert float(jacket_value) == pytest.approx(120.0, abs=0.01)
+    assert float(injection_value) == pytest.approx(100.0, abs=0.01)
     assert window._connection_labels["jacket"].text() == "KAPCSOLÓDVA"
     assert window._connection_labels["line_daq"].text() == "KAPCSOLÓDVA — ÉLŐ"
     assert window._valve_label.text() == "SAFE — mérés nem fut"
@@ -2853,9 +2943,9 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert overview.value_labels["project"].text() == "UI project"
     assert overview.value_labels["stage"].text() == "Water stage"
     assert overview.value_labels["line_calibration"].text() == (
-        "1–5 V → 0–400 bar"
+        "1–5 V → 0.000–400.000 bar"
     )
-    assert overview.value_labels["minimum_margin"].text() == "10 bar"
+    assert overview.value_labels["minimum_margin"].text() == "10.000 bar"
     overview.close()
     window._manual_output.setValue(33.0)
     window._recording_interval.setValue(7)

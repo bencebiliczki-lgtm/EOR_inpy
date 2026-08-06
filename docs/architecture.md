@@ -281,16 +281,24 @@ tüskeszűrő is átengedi, de a nyers biztonsági ág már az első burstben ak
 
 A fizikai ISCO pumpák blokkoló DASNET-forgalma nem a vezérlési szálon fut. A
 `PollingPump` pumpánként külön worker szálon frissít időbélyegzett cache-t: a
-`PRESS` alapértelmezetten 400 ms-onként, a `FLOW`, `VOLA` és `STATUS` egymáshoz
-képest eltolva 1,5 másodpercenként kerül lekérdezésre. A gyors mérés–biztonság–PID
+`PRESS` alapértelmezetten 1 másodpercenként, a `FLOW`, `VOLA` és `STATUS`
+egymáshoz képest eltolva kerül lekérdezésre. Minden lassú mezőtranzakció után
+azonnali `PRESS` frissítés történik, ezért több lassú lekérdezés nem tudja
+egymás után öregíteni a biztonságkritikus nyomáscache-t. A gyors mérés–biztonság–PID
 ciklus kizárólag ezt a cache-t olvassa. Az első teljes adatkészletre csak a
 kapcsolatfelépítés vár; a `RSVP` és `IDENTIFY` kizárólag a pumpa `connect()`
 életciklusában fut. Kommunikációs hiba után a worker nem próbál automatikus
-újraazonosítást. A 400 ms-os nyomáspolling `STALE` határa 2 másodperc, ami
-lefedi a célgépen parancssorozatok közben naplózott 1,0–1,4 másodperces normál
-soros késést; a lassú telemetria határa 3 másodperc. A cache kommunikációs
+újraazonosítást. A nyomás `STALE` határa legalább három pollingperiódus,
+valamint a konfigurált soros timeout/próbálkozási keret és két pollingperiódus
+összege; az alapérték ezért 6 másodperc. Egy DASNET-próbálkozáson belül a
+töredékes válasz olvasása összesen csak egy soros timeoutablakot használhat.
+A lassú telemetria határa 3 másodperc. A cache kommunikációs
 hibánál `DISCONNECTED`, a határidőn túl frissítetlen adatnál `STALE` minőséget
 kap, és mindkettő a meglévő biztonsági reteszt aktiválja.
+A REMOTE, konfigurációs és RUN műveletek sikeres befejezése után a
+`PollingPump` ugyanazon kizárólagos soros tulajdonlás alatt `PRESS` visszaolvasást
+végez. Ez megakadályozza, hogy a mérésindítási vagy flow-váltási
+parancssorozat több lépésen keresztül frissítetlen nyomást hagyjon a cache-ben.
 
 ## Felhasználói beállítások
 

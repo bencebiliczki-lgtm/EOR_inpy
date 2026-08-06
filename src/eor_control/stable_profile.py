@@ -141,7 +141,7 @@ def validate_stable_profile(profile: StableProfile) -> StableProfileValidation:
         "ui_numeric_refresh_rate_hz": 2.0,
         "plot_refresh_rate_hz": 2.0,
         "hardware_status_poll_interval_seconds": 1.0,
-        "stale_timeout_seconds": 3.0,
+        "stale_timeout_seconds": 6.0,
         "serial_command_timeout_seconds": 2.0,
         "serial_command_retries": 2.0,
     }
@@ -166,16 +166,25 @@ def validate_stable_profile(profile: StableProfile) -> StableProfileValidation:
             )
     poll = acquisition.get("hardware_status_poll_interval_seconds")
     stale = acquisition.get("stale_timeout_seconds")
+    serial_timeout = acquisition.get("serial_command_timeout_seconds")
+    serial_attempts = acquisition.get("serial_command_retries")
     if (
         isinstance(poll, (int, float))
         and isinstance(stale, (int, float))
-        and float(stale) < 3.0 * float(poll)
+        and isinstance(serial_timeout, (int, float))
+        and isinstance(serial_attempts, (int, float))
+        and float(stale)
+        < max(
+            3.0 * float(poll),
+            float(serial_timeout) * float(serial_attempts) + 2.0 * float(poll),
+        )
     ):
         issues.append(
             ProfileIssue(
                 "acquisition.stale_timeout_seconds",
                 ValidationLevel.INVALID_CONFIGURATION,
-                "stale timeout must cover at least three polling periods",
+                "stale timeout must cover three polling periods and the serial "
+                "timeout/retry budget",
                 blocks_application=True,
             )
         )
@@ -333,7 +342,7 @@ SOFTWARE_SETTING_MAP: Mapping[str, tuple[str, object]] = {
         "hardware/status_poll_interval_seconds",
         1.0,
     ),
-    "acquisition.stale_timeout_seconds": ("hardware/stale_timeout_seconds", 3.0),
+    "acquisition.stale_timeout_seconds": ("hardware/stale_timeout_seconds", 6.0),
     "acquisition.serial_command_timeout_seconds": (
         "hardware/serial_command_timeout_seconds",
         2.0,

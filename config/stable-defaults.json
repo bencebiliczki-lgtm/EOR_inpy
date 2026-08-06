@@ -17,7 +17,7 @@
     "ui_numeric_refresh_rate_hz": 2,
     "plot_refresh_rate_hz": 2,
     "hardware_status_poll_interval_seconds": 1.0,
-    "stale_timeout_seconds": 3.0,
+    "stale_timeout_seconds": 6.0,
     "serial_command_timeout_seconds": 2.0,
     "serial_command_retries": 2
   },

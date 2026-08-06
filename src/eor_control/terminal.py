@@ -330,16 +330,16 @@ class TerminalApplication:
             line_text = (
                 "nincs hozzáadva"
                 if line_pressure is None
-                else f"{line_pressure:.2f} bar"
+                else f"{line_pressure:.3f} bar"
             )
             differential_text = (
                 "nincs hozzáadva"
                 if differential_pressure is None
-                else f"{differential_pressure:.2f} bar"
+                else f"{differential_pressure:.3f} bar"
             )
             self._write(
-                f"Köpeny={snapshot.jacket_pressure_bar:.2f} bar; "
-                f"besajtolás={injection_pressure:.2f} bar; "
+                f"Köpeny={snapshot.jacket_pressure_bar:.3f} bar; "
+                f"besajtolás={injection_pressure:.3f} bar; "
                 f"vonali={line_text}; "
                 f"differenciál={differential_text}"
             )

@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Lock, Thread
-from time import sleep
+from time import monotonic, sleep
 
 import pytest
 
@@ -112,6 +112,18 @@ class FakeSerial:
         self.is_open = True
 
 
+@dataclass
+class TimedEmptySerial(FakeSerial):
+    timeout: float = 0.02
+    read_count: int = 0
+
+    def read_until(self, expected: bytes = b"\n", size: int | None = None) -> bytes:
+        del expected, size
+        self.read_count += 1
+        sleep(self.timeout)
+        return b""
+
+
 def test_client_starts_network_and_waits_for_delayed_response() -> None:
     serial = FakeSerial([b"", response("READY")])
     client = DasnetClient(serial, unit_id=6)
@@ -144,6 +156,25 @@ def test_client_collects_fragmented_response_until_cr() -> None:
 
     assert DasnetClient(serial, unit_id=6).command("RSVP").message == "READY"
     assert serial.writes.count(encode_command(6, "RSVP")) == 1
+
+
+def test_client_limits_fragment_reads_to_one_timeout_budget_per_attempt() -> None:
+    serial = TimedEmptySerial([])
+    client = DasnetClient(
+        serial,
+        unit_id=6,
+        attempts=2,
+        response_reads_per_attempt=4,
+    )
+
+    started = monotonic()
+    with pytest.raises(DasnetTimeoutError):
+        client.command("RSVP")
+    elapsed = monotonic() - started
+
+    assert serial.read_count == 2
+    assert elapsed < 0.1
+    assert serial.timeout == pytest.approx(0.02)
 
 
 @dataclass

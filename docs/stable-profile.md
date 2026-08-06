@@ -14,7 +14,7 @@ fizikai paraméter blokkolja a hardveres mérés indítását.
 | Adatrögzítés | 1 s | A nyers adatok helyi, folyamatos mentése |
 | Numerikus/diagram frissítés | 2 Hz | A Qt felület terhelésének korlátozása |
 | Hardverstátusz polling | 1 s | Csak olvasási állapotfelügyelet |
-| STALE-határ | 3 s | Legalább három pollingperiódus |
+| STALE-határ | 6 s | Három pollingperiódus és a soros timeout/retry keret lefedése |
 | Soros timeout | 2 s | Egyetlen lassú válasz tolerálása |
 | Soros próbálkozás | 2 | Ismétlődő hiba után egyértelmű leállás |
 | Látható pont/sorozat | 2000 | Korlátozott UI-memória; a nyers CSV ettől független |
