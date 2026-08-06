@@ -114,7 +114,10 @@ a görgethető vezérlőpanel jobbra kerül. A középső grafikonok függőlege
 átméretezhetők, azonos, méréskezdettől számított pozitív időtengelyt használnak. A
 `Beállítások` menüből nyitható meg a kalibrációs/biztonsági panel, valamint itt
 választható rendszer-, világos vagy sötét téma. A témaválasztás következő indításra
-is megmarad.
+is megmarad. A **Megjelenés** oldalon a bal és jobb oldalsáv külön elrejthető,
+valamint elindítható a dashboard elrendezésszerkesztője. Szerkesztéskor minden
+kártya × gombbal elrejthető, az ablak alján lévő vízszintes elemsávból pedig
+visszakapcsolható. A láthatósági beállítások újraindítás után is megmaradnak.
 
 A PID-vezérlés 100 ms-os háttérszálon fut, ezért nem blokkolja a Qt főszálat. A
 nyers adatrögzítés ettől függetlenül 1 másodperc és 1 óra között állítható. A

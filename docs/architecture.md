@@ -174,8 +174,8 @@ kimenetről inicializálja az integrált tagot. A UI 100 ms-os egyszeri időzít
 `PidParameters` csomagot ad a `BackgroundControlRunner` váróhelyére. A runner ezt
 a következő vezérlési ciklus elején, ugyanazon cikluszáron belül alkalmazza; a Qt
 főszál nem vár hardver-I/O-ra. Érvénytelen átmeneti értéknél a korábbi PID marad
-aktív. Hardvermérés közbeni egyéni hangolás törli a következő mérésre vonatkozó
-fizikai PID-validáltság jelzőjét. A leválasztás és a reteszelt hiba
+aktív. A PID-paraméterekhez nem tartozik külön fizikai validáltsági jelző;
+a UI és a runtime a `PidParameters` számszaki ellenőrzését használja. A leválasztás és a reteszelt hiba
 biztonságos lezárása kizárólag az alkalmazási állapotgépen keresztül történik.
 Az aktív szakasz egyetlen `QComboBox` példánya az **Aktív projekt** összefoglaló
 kártyán jelenik meg. Ez a runtime, az INI-ben mentett utolsó szakasz és a
@@ -239,6 +239,15 @@ Az oldalsó `QScrollArea` elemek `AdjustIgnored`, a középső tab és grafikono
 nulla minimumszélességű `Ignored/Expanding` méretpolitikát kapnak, ezért egy látható
 scrollbar vagy a középső nézet méretjavaslata nem zárolhatja az oldalsávokat.
 
+A Megjelenés oldal közvetlen oldalsáv-kapcsolókat és integrált
+dashboard-elrendezésszerkesztőt ad. Az oldalsó `QGroupBox` kártyák stabil kulccsal
+rendelkező `EditableDashboardBox` elemek; szerkesztő módban a jobb felső × gomb
+elrejti őket. A főablak alján vízszintes, görgethető elemsáv tükrözi mindkét
+oldalsáv és minden kártya állapotát, és vissza is állítja az elrejtett elemeket.
+Az `appearance/dashboard/*` QSettings-kulcsok őrzik a választást. Futó vagy
+szüneteltetett mérés alatt a jobb oldalsáv és a STOP/vészleállítás kártyája nem
+rejthető el.
+
 A projekt kiválasztását a modális `ProjectSelectionDialog` végzi. A korábbi
 projekteket legutóbbi elöl sorrendben, a projektenként az INI-ben tárolt utolsó
 mérési fázissal listázza, és új projektet is létre tud hozni az alapértelmezett
@@ -293,7 +302,8 @@ használja, így a címsorban és a tálcán sem a Python alapikon jelenik meg.
 A dashboard felhasználói preferenciái `QSettings` alatt, az `AFKI/EORControl`
 alkalmazásnévvel tárolódnak. Az ablak bezárásakor mentésre kerül az aktív
 projekt/szakasz, téma, vezérlési mód és forrás, PID, rögzítési időköz, kalibráció és
-biztonsági határérték. Az INI projektenként is tárolja az utoljára használt mérési
+biztonsági határérték, továbbá a dashboard oldalsáv- és kártyaláthatósága. Az INI
+projektenként is tárolja az utoljára használt mérési
 fázist a projektválasztó számára. A visszatöltés a Qt widgetek tartományellenőrzésén keresztül
 történik; ismeretlen enum, hibás szám vagy már nem létező projekt nem írja felül a
 biztonságos alapértéket.
@@ -409,21 +419,23 @@ teljes biztonsági mintavételt. A folytatás ugyanabban a runtime-ban történi
 végleges Leállítás lezárja a fázist, elkészíti az Excel-lapot, majd törli a
 dashboard élő pufferét és táblázatát.
 
-Kritikus hardverhiba esetén a `DashboardWindow` közös helyreállítási útvonala
-STOP/safe-state-et kér, leállítja a polling workereket, külön-külön megkísérli
-mindkét COM-port és a DAQ erőforrásainak lezárását, majd a biztonságos,
-nem perzisztáló szimulációs adapterrétegre vált. Az előnyben részesített mód ettől
-HARDVER marad. A részletes hibaüzenet után `QTimer` nyitja meg az
-Eszközbeállításokat, hogy a kezelő azonnal új kapcsolatpróbát végezhessen.
+Kritikus hardverhiba vagy vészleállítás esetén a `DashboardWindow` közös
+helyreállítási útvonala STOP/safe-state-et kér, leállítja a runtime-ot, lezárja
+az aktív mérési fázist, de megőrzi a hardvermódot és a munkamenet engedélyét.
+Az alkalmazás `FAULT`/`STOPPED_BY_FAULT` állapotban marad; nem nyugtázza
+automatikusan a hibát és nem indít automatikus READY–FAULT újraellenőrzési ciklust.
+Csak a riasztássáv kezelői bezárása, valamint a friss biztonsági ellenőrzés
+sikere után vált `READY` állapotba és indít egyszeri, csak olvasási
+hardverállapot-frissítést.
 
 A `DashboardWindow` állandó, szöveges mód- és riasztássávot tart fenn. A reteszelt
 riasztás időpontot, okot, automatikus safe-state műveletet és kezelői következő
 lépést tartalmaz. Külön hibanyugtázó gomb helyett a sáv bezárógombja aktív
 hibaállapotban friss mérési pillanatképet kér és újraértékeli a biztonsági
 feltételeket. A retesz és a sáv csak sikeres ellenőrzéskor törlődik, majd
-szimulációban az eszközállapot automatikusan `READY` lesz. A kritikus
-hardverhiba portfelszabadítása után megmaradt tájékoztató riasztás külön
-bezárható, mert az élő hardverkapcsolat addigra már megszűnt. A `QSystemTrayIcon`
+szimulációban az eszközállapot automatikusan `READY` lesz. Hardvermódban a
+kapcsolat megmaradhat, de a retesz feloldásáig sem mérés, sem vezérlési runtime
+nem indulhat. A `QSystemTrayIcon`
 ezzel párhuzamosan Windows rendszerértesítést jelenít meg; minimalizált vagy
 inaktív ablaknál a `QApplication.alert()` a tálcagombot is figyelemkérésre állítja.
 Az értesítési kulcs megakadályozza, hogy ugyanaz a biztonsági ok minden mérési

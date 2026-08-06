@@ -366,11 +366,9 @@ def software_settings(profile: StableProfile) -> dict[str, object]:
     result.update(
         {
             "hardware/valve_direction_validated": False,
-            "hardware/safe_output_validated": False,
             "hardware/pump_shutdown_validated": False,
             "safety/limits_validated": False,
             "calibration/profile_validated": False,
-            "pid/profile_validated": False,
         }
     )
     return result

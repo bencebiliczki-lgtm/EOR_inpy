@@ -98,6 +98,10 @@ sötét és rendszer-témában is megfelelő; a mód- és riasztássáv szándé
 A reszponzív dashboard-teszt kis ablakmagasságnál láthatóvá teszi mindkét oldalsáv
 scrollbarját, majd külön ellenőrzi a bal és jobb sáv splitterrel történő
 átméretezhetőségét.
+Az elrendezésszerkesztő regressziója ellenőrzi a Megjelenés oldal két
+oldalsáv-kapcsolóját, a kártyák × gombját, az alsó vízszintes visszaállító sávot és
+a láthatóság QSettings-alapú újraindítás utáni megőrzését. Külön biztonsági teszt
+tiltja a jobb oldali mérésvezérlés elrejtését futó mérés alatt.
 Ugyanez a UI-teszt ellenőrzi, hogy az **Aktív projekt** kártya szakasz-dropdownja
 projektváltáskor feltöltődik, módosítása frissíti a runtime aktív szakaszát, projekt
 hiányában pedig letiltott és egyértelmű üresállapotot mutat.
@@ -111,7 +115,10 @@ UI-teszt ellenőrzi a személyre szabott mezők mentését, a kézi módosítás
 A runtime-regresszió ellenőrzi, hogy a sorba állított PID-csomagot pontosan a
 következő háttér-vezérlési ciklus alkalmazza. A UI-regresszió futó mérésnél
 ellenőrzi a kézi/automata mód azonnali runtime-frissítését, valamint a több
-mezőváltozást összevonó, valós idejű PID-frissítést.
+mezőváltozást összevonó, valós idejű PID-frissítést. Külön mezőzárolási teszt
+igazolja, hogy az indítási előkészítés alatt nincs szerkeszthető folyamatérték,
+majd csak a valóban alkalmazható runtime-mezők aktiválódnak; a hardveres BES-flow
+szimulációs mérés közben inaktív marad.
 A mérési és adattárolási tesztek lefedik mindkét pumpa pozitív és negatív nettó
 térfogatváltozását, a számlálók újraindítását, a V1→V2 biztonsági mentéses
 migrációt, a fázisok első előfordulási sorrendjét, a fázisszűrést és a
@@ -130,8 +137,9 @@ A dashboard értesítési tesztje igazolja az állandó mód- és riasztássáv 
 a háttérben vagy minimalizálva történő tálcagomb-figyelmeztetést, valamint hogy
 azonos eseménykulcs csak egy értesítést válthat ki. A riasztásbezárási tesztek
 ellenőrzik a friss biztonsági mérést, a veszélyes állapotban megmaradó reteszt,
-a szimulációs `READY` visszaállítást és a portfelszabadítás után megmaradt
-kritikus hardverhiba-üzenet bezárhatóságát. Az előellenőrzési tesztek
+a szimulációs `READY` visszaállítást, valamint azt, hogy hardveres
+vészleállítás után az állapot kezelői nyugtázásig `FAULT` marad, és nem indul
+automatikus hardverállapot-frissítési hurok. Az előellenőrzési tesztek
 lefedik a figyelmeztetések külön jóváhagyását és bármely hibás tétel indítástiltását.
 A tálcamenü tesztje ellenőrzi az ablak-visszaállítási és programbezárási műveletet,
 valamint hogy a kilépési kérés a főablak biztonságos bezárási útvonalát hívja.
@@ -140,6 +148,11 @@ A termináltesztek végigjárják a csatlakozás–indítás–leállítás–le
 állapotgépet, a vészleállítás és nyugtázás útját, a hibás szabályozási értékek
 elutasítását, valamint egy stdin/stdout alapon szkriptelt teljes munkamenetet.
 Minden terminálteszt kizárólag szimulátorokat és letiltott adatwritert használ.
+
+A manuális fizikai pumpa-RUN, szelepírás, vezetett AO-próba és
+hardver-újracsatlakozás UI-tesztjei ellenőrzik, hogy az Igen/Nem message box
+`Yes` eredménye érték szerinti összehasonlítással valóban továbbítja a
+parancsot; a teszt nem támaszkodik a PySide enum Python-objektumazonosságára.
 
 A hardverkonfigurációs tesztek ellenőrzik az eltérő COM-portokat, DASNET- és
 NI-konfigurációk előállítását, a szelep 1–5 V végpontjait, valamint azt, hogy egy

@@ -35,11 +35,13 @@ biztonsági reteszeket. A stabil profil ezen felül blokkol, amíg nincs külön
 validálva:
 
 - `hardware/valve_direction_validated`;
-- `hardware/safe_output_validated`;
 - `hardware/pump_shutdown_validated`;
 - `safety/limits_validated`;
 - `calibration/profile_validated`;
-- `pid/profile_validated`.
+
+A szelep SAFE feszültségéhez és a PID-paraméterekhez nincs külön
+validáltsági jelző. A SAFE feszültség meglétét a hardverkonfiguráció, a
+PID-paramétereket pedig a `PidParameters` számszaki validációja ellenőrzi.
 
 A preflight nem lép REMOTE módba, nem küld FLOW/PRESS/RUN/STOP parancsot, nem
 ír NI AO-csatornára és nem indít PID-et. Sikertelen ellenőrzésnél az

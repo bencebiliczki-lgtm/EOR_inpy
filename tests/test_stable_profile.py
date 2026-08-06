@@ -8,6 +8,7 @@ from eor_control.stable_profile import (
     apply_missing_software_settings,
     automatic_pump_port_candidates,
     load_stable_profile,
+    software_settings,
     validate_stable_profile,
 )
 
@@ -50,6 +51,13 @@ def test_migration_applies_only_missing_software_values() -> None:
     assert target["hardware/stale_timeout_seconds"] == 3.0
     assert "recording/interval_seconds" not in applied
     assert "hardware/stale_timeout_seconds" in applied
+
+
+def test_obsolete_safe_output_and_pid_validation_flags_are_not_seeded() -> None:
+    settings = software_settings(load_stable_profile(PROFILE_PATH))
+
+    assert "hardware/safe_output_validated" not in settings
+    assert "pid/profile_validated" not in settings
 
 
 def test_invalid_stale_window_blocks_application_start(tmp_path: Path) -> None:

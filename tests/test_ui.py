@@ -31,12 +31,14 @@ from PySide6.QtWidgets import (  # noqa: E402
     QSpinBox,
     QSplitter,
     QTabWidget,
+    QTextEdit,
     QWidget,
 )
 
 from eor_control.application import (  # noqa: E402
     ApplicationState,
     DeviceControlService,
+    MeasurementState,
     RunMode,
 )
 from eor_control.control import (  # noqa: E402
@@ -714,6 +716,13 @@ def test_manual_physical_outputs_use_button_confirmation_without_text_entry(
         lambda: "Teszt szakasz",
     )
     dialog._telemetry_timer.stop()
+
+    class EquivalentYes:
+        """Equal to the Qt Yes value without being the same Python object."""
+
+        def __eq__(self, other: object) -> bool:
+            return other == QMessageBox.StandardButton.Yes
+
     monkeypatch.setattr(
         QInputDialog,
         "getText",
@@ -724,7 +733,7 @@ def test_manual_physical_outputs_use_button_confirmation_without_text_entry(
     monkeypatch.setattr(
         QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        lambda *_args, **_kwargs: EquivalentYes(),
     )
     monkeypatch.setattr(
         dialog,
@@ -1899,13 +1908,15 @@ def test_hardware_disconnect_releases_and_reconnects_without_settings_dialog(
     window.close()
 
 
-def test_critical_hardware_fault_keeps_hardware_session_and_rechecks(
+def test_critical_hardware_fault_stays_latched_without_recheck_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     application()
     window = build_simulated_dashboard(
         tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
     )
+    window._hardware_status_timer.stop()
+    application().processEvents()
     jacket = SimulatedPump()
     injection = SimulatedPump()
     devices = DeviceControlService(
@@ -1931,6 +1942,7 @@ def test_critical_hardware_fault_keeps_hardware_session_and_rechecks(
     simulation_calls: list[tuple[bool, bool]] = []
     errors: list[str] = []
     opened: list[bool] = []
+    status_rechecks: list[bool] = []
     monkeypatch.setattr(
         window,
         "_activate_simulation",
@@ -1944,20 +1956,32 @@ def test_critical_hardware_fault_keeps_hardware_session_and_rechecks(
     monkeypatch.setattr(
         window, "_open_device_settings", lambda: opened.append(True)
     )
+    monkeypatch.setattr(
+        window,
+        "_refresh_active_hardware_status",
+        lambda: status_rechecks.append(True),
+    )
 
-    window._handle_critical_hardware_fault("megszakadt a pumpakapcsolat")
+    window._emergency_stop()
     application().processEvents()
 
     assert jacket.connected
     assert injection.connected
-    assert devices.status.state is ApplicationState.READY
+    assert devices.status.state is ApplicationState.FAULT
+    assert devices.status.measurement is MeasurementState.STOPPED_BY_FAULT
+    assert devices.status.fault_reason is not None
+    assert "vészleállítás" in devices.status.fault_reason
     assert devices.status.hardware_authorized
     assert pump_control.safe_stopped
     assert simulation_calls == []
     assert errors and "HARDWARE mód" in errors[0]
     assert opened == []
+    assert status_rechecks == []
     assert not window._alarm_label.isHidden()
     window._alarm_close_button.click()
+    application().processEvents()
+    assert devices.status.state is ApplicationState.READY
+    assert status_rechecks == [True]
     assert window._alarm_label.isHidden()
     window._pump_control = None
     window._run_mode = RunMode.SIMULATION
@@ -2245,6 +2269,128 @@ def test_right_side_control_inputs_explain_when_changes_take_effect(
     window.close()
 
 
+def test_pid_application_status_has_non_overlapping_wrapped_area(tmp_path: Path) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        tmp_path / "projects.sqlite3",
+    )
+    window._pid_application_status.setText(
+        "A PID-paraméterek mérés közben automatikusan frissülnek, és a következő "
+        "felügyelt vezérlési ciklusban lépnek életbe."
+    )
+
+    status = window._pid_application_status
+    settings = window.findChild(QGroupBox, "valve_control_settings")
+    assert settings is not None
+    form = settings.layout()
+    assert isinstance(form, QFormLayout)
+    _row, role = form.getWidgetPosition(window._pid_application_status_block)
+    minimum_lines_height = status.fontMetrics().lineSpacing() * 3
+    assert role == QFormLayout.ItemRole.SpanningRole
+    assert status.isReadOnly()
+    assert status.lineWrapMode() == QTextEdit.LineWrapMode.WidgetWidth
+    assert status.height() >= minimum_lines_height
+    assert status.maximumHeight() >= minimum_lines_height
+    assert status.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Fixed
+    window.close()
+
+
+def test_dashboard_layout_editor_hides_restores_and_persists_elements(
+    tmp_path: Path,
+) -> None:
+    application()
+    settings = QSettings(str(tmp_path / "layout.ini"), QSettings.Format.IniFormat)
+    project_path = tmp_path / "projects.sqlite3"
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        project_path,
+        settings=settings,
+    )
+    appearance = window._create_appearance_settings_page()
+    left_toggle = appearance.findChild(
+        QCheckBox, "appearance_left_sidebar_visible"
+    )
+    right_toggle = appearance.findChild(
+        QCheckBox, "appearance_right_sidebar_visible"
+    )
+    assert left_toggle is not None
+    assert right_toggle is not None
+    assert left_toggle.isChecked()
+    assert right_toggle.isChecked()
+    apply_appearance = appearance.findChild(
+        QPushButton, "apply_appearance_settings"
+    )
+    editor_button = appearance.findChild(
+        QPushButton, "open_dashboard_layout_editor"
+    )
+    assert apply_appearance is not None
+    assert editor_button is not None
+    left_toggle.setChecked(False)
+    apply_appearance.click()
+    assert window._dashboard_sidebars["left"].isHidden()
+    left_toggle.setChecked(True)
+    apply_appearance.click()
+    assert not window._dashboard_sidebars["left"].isHidden()
+
+    window._enter_layout_editor()
+
+    assert not window._layout_editor_bar.isHidden()
+    assert window._dashboard_boxes
+    assert all(
+        not box.editor_close_button.isHidden()
+        for box in window._dashboard_boxes.values()
+    )
+    line_box = window._dashboard_boxes["line_pressure"]
+    line_box.editor_close_button.click()
+    assert line_box.isHidden()
+    assert not window._layout_element_buttons["box:line_pressure"].isChecked()
+
+    window._layout_element_buttons["box:line_pressure"].click()
+    assert not line_box.isHidden()
+    assert window._layout_element_buttons["box:line_pressure"].isChecked()
+
+    window._set_dashboard_box_visible("line_pressure", False)
+    window._set_dashboard_sidebar_visible("left", False)
+    window._leave_layout_editor()
+    assert window._layout_editor_bar.isHidden()
+    window.close()
+
+    restored = build_simulated_dashboard(
+        tmp_path / "restored.csv",
+        project_path,
+        settings=QSettings(str(tmp_path / "layout.ini"), QSettings.Format.IniFormat),
+    )
+    assert restored._dashboard_boxes["line_pressure"].isHidden()
+    assert restored._dashboard_sidebars["left"].isHidden()
+    restored._reset_dashboard_layout()
+    assert not restored._dashboard_boxes["line_pressure"].isHidden()
+    assert not restored._dashboard_sidebars["left"].isHidden()
+    restored.close()
+
+
+def test_running_measurement_keeps_critical_right_controls_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        tmp_path / "projects.sqlite3",
+    )
+    errors: list[str] = []
+    monkeypatch.setattr(window, "_show_error", errors.append)
+    window._devices.start()
+
+    window._set_dashboard_sidebar_visible("right", False)
+    window._set_dashboard_box_visible("measurement_controls", False)
+
+    assert not window._dashboard_sidebars["right"].isHidden()
+    assert not window._dashboard_boxes["measurement_controls"].isHidden()
+    assert len(errors) == 2
+    window._devices.stop()
+    window.close()
+
+
 def test_mode_and_pid_changes_are_queued_during_running_measurement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2265,6 +2411,7 @@ def test_mode_and_pid_changes_are_queued_during_running_measurement(
         project_path,
         settings=settings,
     )
+    settings.setValue("pid/profile_validated", True)
     queued: list[PidParameters] = []
     monkeypatch.setattr(window._runtime, "update_pid", queued.append)
     window._devices.start()
@@ -2280,7 +2427,92 @@ def test_mode_and_pid_changes_are_queued_during_running_measurement(
 
     assert len(queued) == 1
     assert queued[0].proportional_gain == window._kp.value()
-    assert "következő vezérlési ciklus" in window._pid_application_status.text()
+    assert settings.value("pid/profile_validated", type=bool) is True
+    assert "következő vezérlési ciklus" in (
+        window._pid_application_status.toPlainText()
+    )
+    window._runtime.stop()
+    window._devices.stop()
+    window.close()
+
+
+def test_preflight_does_not_require_safe_voltage_or_pid_validation_flags(
+    tmp_path: Path,
+) -> None:
+    application()
+    settings = QSettings(
+        str(tmp_path / "obsolete-validation.ini"), QSettings.Format.IniFormat
+    )
+    settings.setValue("hardware/safe_output_validated", False)
+    settings.setValue("pid/profile_validated", False)
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        tmp_path / "projects.sqlite3",
+        settings=settings,
+    )
+    assert not settings.contains("hardware/safe_output_validated")
+    assert not settings.contains("pid/profile_validated")
+    window._run_mode = RunMode.HARDWARE
+    snapshot = MeasurementSnapshot(
+        recorded_at=datetime(2026, 8, 6, 10, 30, tzinfo=UTC),
+        monotonic_seconds=1.0,
+        jacket_pump=PumpStatus(120.0, 0.0, 250.0),
+        injection_pump=PumpStatus(90.0, 8.0, 240.0),
+        line_pressure_bar=91.0,
+        differential_pressure_bar=2.0,
+        valve_percent=0.0,
+        quality=DataQuality.GOOD,
+    )
+
+    report = window._build_preflight_report(
+        MeasurementRecord(snapshot, 0.0, "Teszt szakasz")
+    )
+    physical_validation = report.for_key("physical_validation")
+
+    assert report.for_key("pid_validation") is None
+    assert physical_validation is not None
+    assert "SAFE feszültség" not in physical_validation.detail
+    summary = window._configuration_summary_text()
+    assert "Nincs validált PID-hangolás" not in summary
+    assert "PID-paraméterek: számszakilag érvényes" in summary
+    window._run_mode = RunMode.SIMULATION
+    window.close()
+
+
+def test_measurement_fields_follow_runtime_editability(tmp_path: Path) -> None:
+    application()
+    project_path = tmp_path / "projects.sqlite3"
+    with ProjectRepository(project_path) as repository:
+        project = repository.create_project(
+            name="Mezőzárolási projekt",
+            configuration={},
+            calibration_snapshot={},
+        )
+        stage = repository.add_stage(project.id, "Aktív szakasz")
+    settings = QSettings(str(tmp_path / "locking.ini"), QSettings.Format.IniFormat)
+    settings.setValue("project/last_project_id", project.id)
+    settings.setValue("project/last_stage_id", stage.id)
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        project_path,
+        settings=settings,
+    )
+
+    assert window._new_measurement_flow.isEnabled()
+    window._devices.start()
+    window._refresh_state()
+
+    assert all(not field.isEnabled() for field in window._live_measurement_fields)
+    assert not window._stage.isEnabled()
+    assert not window._new_measurement_flow.isEnabled()
+
+    window._runtime.start(window._runtime_settings())
+    window._refresh_state()
+
+    assert all(field.isEnabled() for field in window._live_measurement_fields)
+    assert window._stage.isEnabled()
+    assert not window._new_measurement_flow.isEnabled()
+
     window._runtime.stop()
     window._devices.stop()
     window.close()

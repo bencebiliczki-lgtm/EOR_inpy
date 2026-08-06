@@ -25,7 +25,15 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QColor, QIcon, QShowEvent
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QCloseEvent,
+    QColor,
+    QIcon,
+    QResizeEvent,
+    QShowEvent,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractScrollArea,
@@ -60,6 +68,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTextEdit,
     QToolTip,
     QTreeView,
     QVBoxLayout,
@@ -570,6 +579,43 @@ class ResizableDialog(QDialog):
         self.setSizeGripEnabled(True)
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+
+class EditableDashboardBox(QGroupBox):
+    """Dashboard card with an editor-only close affordance."""
+
+    hide_requested = Signal(str)
+
+    def __init__(self, key: str, title: str, parent: QWidget | None = None) -> None:
+        super().__init__(title, parent)
+        self.layout_key = key
+        self.setObjectName(f"dashboard_box_{key}")
+        self._editor_close = QPushButton("×", self)
+        self._editor_close.setObjectName(f"layout_hide_{key}")
+        self._editor_close.setAccessibleName(f"{title} kártya elrejtése")
+        self._editor_close.setToolTip(f"{title} elrejtése")
+        self._editor_close.setFixedSize(24, 24)
+        self._editor_close.setStyleSheet(
+            "QPushButton { background:#b00020;color:white;font-weight:900;"
+            "border-radius:12px;padding:0; }"
+        )
+        self._editor_close.clicked.connect(
+            lambda _checked=False: self.hide_requested.emit(self.layout_key)
+        )
+        self._editor_close.hide()
+
+    @property
+    def editor_close_button(self) -> QPushButton:
+        return self._editor_close
+
+    def set_editor_active(self, active: bool) -> None:
+        self._editor_close.setVisible(active)
+        if active:
+            self._editor_close.raise_()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._editor_close.move(max(0, self.width() - 29), 2)
 
 
 class SettingsHubDialog(ResizableDialog):
@@ -2600,7 +2646,7 @@ class DeviceTestWizard(ResizableDialog):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
-            if answer is not QMessageBox.StandardButton.Yes:
+            if answer != QMessageBox.StandardButton.Yes:
                 return
         operation = self._operations.get(device)
         if device is FunctionalTestDevice.NI_ANALOG_OUTPUT:
@@ -2642,7 +2688,7 @@ class DeviceTestWizard(ResizableDialog):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        if answer is not QMessageBox.StandardButton.Yes:
+        if answer != QMessageBox.StandardButton.Yes:
             return None
         measured, accepted = QInputDialog.getDouble(
             self,
@@ -2682,7 +2728,7 @@ class DeviceTestWizard(ResizableDialog):
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
                 )
-                if answer is not QMessageBox.StandardButton.Yes:
+                if answer != QMessageBox.StandardButton.Yes:
                     return None
             self._valve_prerequisites_confirmed = True
 
@@ -2700,7 +2746,7 @@ class DeviceTestWizard(ResizableDialog):
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     default,
                 )
-                is QMessageBox.StandardButton.Yes
+                == QMessageBox.StandardButton.Yes
             )
 
         moved = confirmed("A szelep megmozdult?")
@@ -2738,10 +2784,10 @@ class DeviceTestWizard(ResizableDialog):
         )
         return lambda: self._session.run_emergency_communication_test(
             emergency_stop_confirmed=(
-                emergency is QMessageBox.StandardButton.Yes
+                emergency == QMessageBox.StandardButton.Yes
             ),
             communication_loss_confirmed=(
-                communication is QMessageBox.StandardButton.Yes
+                communication == QMessageBox.StandardButton.Yes
             ),
         )
 
@@ -3167,7 +3213,7 @@ class PumpControlDialog(ResizableDialog):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        if answer is QMessageBox.StandardButton.Yes:
+        if answer == QMessageBox.StandardButton.Yes:
             self._execute(
                 lambda: self._service.run(role, expected), f"{role.value} RUN"
             )
@@ -3358,7 +3404,7 @@ class PumpControlDialog(ResizableDialog):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        if answer is not QMessageBox.StandardButton.Yes:
+        if answer != QMessageBox.StandardButton.Yes:
             return
         self._execute(
             lambda: self._control_loop.write_manual_output(target),
@@ -5666,6 +5712,14 @@ class DashboardWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self._user_settings = settings or portable_user_settings()
+        obsolete_validation_keys = (
+            "hardware/safe_output_validated",
+            "pid/profile_validated",
+        )
+        if any(self._user_settings.contains(key) for key in obsolete_validation_keys):
+            for key in obsolete_validation_keys:
+                self._user_settings.remove(key)
+            self._user_settings.sync()
         self._developer_mode = str(
             self._user_settings.value("developer/enabled", "false")
         ).lower() in {"1", "true", "yes", "on"}
@@ -5856,9 +5910,24 @@ class DashboardWindow(QMainWindow):
         if isinstance(application, QApplication):
             application.quit()
 
+    def _dashboard_box(
+        self, key: str, title: str, side: str
+    ) -> EditableDashboardBox:
+        box = EditableDashboardBox(key, title)
+        box.hide_requested.connect(self._hide_dashboard_box)
+        self._dashboard_boxes[key] = box
+        self._dashboard_box_titles[key] = title
+        self._dashboard_box_sides[key] = side
+        return box
+
     def _build_ui(self) -> None:
         self.setWindowTitle("AFKI EOR mérőrendszer — szimuláció")
         self.resize(1100, 720)
+        self._dashboard_boxes: dict[str, EditableDashboardBox] = {}
+        self._dashboard_box_titles: dict[str, str] = {}
+        self._dashboard_box_sides: dict[str, str] = {}
+        self._dashboard_box_visibility: dict[str, bool] = {}
+        self._layout_editor_active = False
         root = QWidget()
         layout = QVBoxLayout(root)
         self._alarm_container = QWidget()
@@ -5918,13 +5987,21 @@ class DashboardWindow(QMainWindow):
         self._valve_label = QLabel("— %")
         self._pressure_margin_label = QLabel("— bar")
         labels = (
-            ("Rendszerállapot", self._state_label),
-            ("Köpenypumpa", self._jacket_label),
-            ("Besajtolópumpa", self._injection_label),
-            ("Vonali nyomás", self._line_label),
-            ("Differenciálnyomás", self._delta_label),
-            ("Nyomáskülönbség (tájékoztató)", self._pressure_margin_label),
-            ("Szelep", self._valve_label),
+            ("system_state", "Rendszerállapot", self._state_label),
+            ("jacket_pump", "Köpenypumpa", self._jacket_label),
+            ("injection_pump", "Besajtolópumpa", self._injection_label),
+            ("line_pressure", "Vonali nyomás", self._line_label),
+            (
+                "differential_pressure",
+                "Differenciálnyomás",
+                self._delta_label,
+            ),
+            (
+                "pressure_margin",
+                "Nyomáskülönbség (tájékoztató)",
+                self._pressure_margin_label,
+            ),
+            ("valve_status", "Szelep", self._valve_label),
         )
         self._connection_labels: dict[str, QLabel] = {}
         connection_keys = (
@@ -5936,8 +6013,8 @@ class DashboardWindow(QMainWindow):
             None,
             "valve",
         )
-        for index, (title, value) in enumerate(labels):
-            box = QGroupBox(title)
+        for index, (key, title, value) in enumerate(labels):
+            box = self._dashboard_box(key, title, "left")
             box.setMinimumHeight(76)
             box_layout = QVBoxLayout(box)
             value.setStyleSheet(
@@ -5990,7 +6067,10 @@ class DashboardWindow(QMainWindow):
         right_layout = QVBoxLayout(right_container)
         right_layout.setContentsMargins(4, 0, 4, 4)
 
-        controls = QGridLayout()
+        control_box = self._dashboard_box(
+            "measurement_controls", "Mérésvezérlés", "right"
+        )
+        controls = QGridLayout(control_box)
         self._connect_button = QPushButton("Csatlakozás")
         self._disconnect_button = QPushButton("Leválasztás")
         self._connect_button.hide()
@@ -6021,9 +6101,11 @@ class DashboardWindow(QMainWindow):
             )
             controls.addWidget(button, row, 0)
         controls.setColumnStretch(0, 1)
-        right_layout.addLayout(controls)
+        right_layout.addWidget(control_box)
 
-        flow_box = QGroupBox("BES mérési térfogatáram")
+        flow_box = self._dashboard_box(
+            "measurement_flow", "BES mérési térfogatáram", "right"
+        )
         flow_layout = QFormLayout(flow_box)
         flow_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         flow_layout.setFieldGrowthPolicy(
@@ -6051,7 +6133,9 @@ class DashboardWindow(QMainWindow):
         flow_layout.addRow(self._apply_measurement_flow_button)
         right_layout.addWidget(flow_box)
 
-        recording_box = QGroupBox("Mérési adatrögzítés")
+        recording_box = self._dashboard_box(
+            "measurement_recording", "Mérési adatrögzítés", "right"
+        )
         recording_layout = QVBoxLayout(recording_box)
         self._recording_status_label = QLabel("RÖGZÍTÉS NEM AKTÍV")
         self._recording_status_label.setObjectName("recording_status_label")
@@ -6076,7 +6160,9 @@ class DashboardWindow(QMainWindow):
         recording_layout.addWidget(self._nas_runtime_label)
         right_layout.addWidget(recording_box)
 
-        configuration_box = QGroupBox("Indulási konfiguráció")
+        configuration_box = self._dashboard_box(
+            "startup_configuration", "Indulási konfiguráció", "right"
+        )
         configuration_layout = QVBoxLayout(configuration_box)
         self._configuration_summary_label = QLabel()
         self._configuration_summary_label.setObjectName("configuration_summary")
@@ -6115,7 +6201,9 @@ class DashboardWindow(QMainWindow):
         project_layout.addWidget(rename_stage, 3, 1, 1, 2)
         right_layout.addWidget(project_box)
         project_box.setVisible(False)
-        project_summary = QGroupBox("Aktív projekt")
+        project_summary = self._dashboard_box(
+            "active_project", "Aktív projekt", "right"
+        )
         project_summary.setObjectName("active_project_summary")
         project_summary_layout = QFormLayout(project_summary)
         project_summary_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
@@ -6140,7 +6228,9 @@ class DashboardWindow(QMainWindow):
         project_summary_layout.addRow(open_overview)
         right_layout.addWidget(project_summary)
 
-        settings = QGroupBox("Szelepvezérlés")
+        settings = self._dashboard_box(
+            "valve_control", "Szelepvezérlés", "right"
+        )
         settings.setObjectName("valve_control_settings")
         form = QFormLayout(settings)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
@@ -6197,10 +6287,42 @@ class DashboardWindow(QMainWindow):
         profile_actions_layout.addWidget(self._delete_pid_profile_button)
         self._apply_pid_button = QPushButton("PID beállítások alkalmazása")
         self._apply_pid_button.clicked.connect(self._apply_pid)
-        self._pid_application_status = QLabel(
+        self._pid_application_status_block = QWidget()
+        self._pid_application_status_block.setObjectName(
+            "pid_application_status_block"
+        )
+        self._pid_application_status_block.setMinimumWidth(0)
+        status_block_policy = self._pid_application_status_block.sizePolicy()
+        status_block_policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+        status_block_policy.setVerticalPolicy(QSizePolicy.Policy.Minimum)
+        self._pid_application_status_block.setSizePolicy(status_block_policy)
+        pid_status_layout = QVBoxLayout(self._pid_application_status_block)
+        pid_status_layout.setContentsMargins(0, 4, 0, 4)
+        pid_status_layout.setSpacing(4)
+        self._pid_application_status_title = QLabel("PID alkalmazási állapot")
+        self._pid_application_status_title.setWordWrap(True)
+        self._pid_application_status = QTextEdit(
             "A PID-paraméterek mérés közben automatikusan frissülnek."
         )
-        self._pid_application_status.setWordWrap(True)
+        self._pid_application_status.setReadOnly(True)
+        self._pid_application_status.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._pid_application_status.setFrameStyle(0)
+        self._pid_application_status.setLineWrapMode(
+            QTextEdit.LineWrapMode.WidgetWidth
+        )
+        self._pid_application_status.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._pid_application_status.setMinimumWidth(0)
+        self._pid_application_status.setFixedHeight(
+            self._pid_application_status.fontMetrics().lineSpacing() * 3 + 12
+        )
+        pid_status_policy = self._pid_application_status.sizePolicy()
+        pid_status_policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+        pid_status_policy.setVerticalPolicy(QSizePolicy.Policy.Fixed)
+        self._pid_application_status.setSizePolicy(pid_status_policy)
+        pid_status_layout.addWidget(self._pid_application_status_title)
+        pid_status_layout.addWidget(self._pid_application_status)
         self._pid_live_update_timer = QTimer(self)
         self._pid_live_update_timer.setSingleShot(True)
         self._pid_live_update_timer.setInterval(100)
@@ -6225,7 +6347,7 @@ class DashboardWindow(QMainWindow):
         form.addRow("Minimális irányváltási idő", self._pid_reversal_interval)
         form.addRow("Ellenirányú korrekció holtsávja", self._pid_reversal_deadband)
         form.addRow("Maximális irányváltásszám / 10 s", self._pid_max_reversals)
-        form.addRow("PID alkalmazási állapot", self._pid_application_status)
+        form.addRow(self._pid_application_status_block)
         form.addRow(self._apply_pid_button)
         for field in (
             self._mode,
@@ -6304,10 +6426,30 @@ class DashboardWindow(QMainWindow):
             self._pid_reversal_interval,
             self._pid_reversal_deadband,
             self._pid_max_reversals,
-            self._pid_application_status,
+            self._pid_application_status_block,
             self._apply_pid_button,
         )
         self._service_pid_form = form
+        self._live_measurement_fields = (
+            self._mode,
+            self._source,
+            self._manual_output,
+            self._setpoint,
+            self._recording_interval,
+            self._pid_profile,
+            self._kp,
+            self._ki,
+            self._kd,
+            self._direction,
+            self._output_min,
+            self._output_max,
+            self._pid_deadband,
+            self._pid_output_rate,
+            self._pid_filter_alpha,
+            self._pid_reversal_interval,
+            self._pid_reversal_deadband,
+            self._pid_max_reversals,
+        )
         self._configure_control_tooltips()
         self._set_service_controls_visible(self._developer_mode)
         right_layout.addWidget(settings)
@@ -6419,6 +6561,10 @@ class DashboardWindow(QMainWindow):
         )
         right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         right_scroll.setWidget(right_container)
+        self._dashboard_sidebars = {
+            "left": left_scroll,
+            "right": right_scroll,
+        }
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setObjectName("dashboard_splitter")
         splitter.setChildrenCollapsible(False)
@@ -6431,8 +6577,190 @@ class DashboardWindow(QMainWindow):
         splitter.setStretchFactor(1, 5)
         splitter.setStretchFactor(2, 0)
         splitter.setSizes([270, 760, 340])
+        self._dashboard_splitter = splitter
         layout.addWidget(splitter, stretch=1)
+        self._layout_editor_bar = self._create_layout_editor_bar()
+        layout.addWidget(self._layout_editor_bar)
+        self._restore_dashboard_layout()
         self.setCentralWidget(root)
+
+    def _create_layout_editor_bar(self) -> QWidget:
+        bar = QWidget()
+        bar.setObjectName("dashboard_layout_editor_bar")
+        bar.setStyleSheet(
+            "#dashboard_layout_editor_bar { border:1px solid #66788a;"
+            "border-radius:6px;padding:4px; }"
+        )
+        outer = QVBoxLayout(bar)
+        outer.setContentsMargins(8, 6, 8, 6)
+        header = QHBoxLayout()
+        title = QLabel(
+            "ELRENDEZÉSSZERKESZTŐ — a kijelölt elemek láthatók; az × elrejti a kártyát"
+        )
+        title.setWordWrap(True)
+        title.setStyleSheet("font-weight:700")
+        finish = QPushButton("Szerkesztés befejezése")
+        finish.clicked.connect(self._leave_layout_editor)
+        reset = QPushButton("Minden elem visszaállítása")
+        reset.clicked.connect(self._reset_dashboard_layout)
+        header.addWidget(title, 1)
+        header.addWidget(reset)
+        header.addWidget(finish)
+        outer.addLayout(header)
+
+        available_scroll = QScrollArea()
+        available_scroll.setObjectName("layout_available_elements_scroll")
+        available_scroll.setWidgetResizable(True)
+        available_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        available_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        available_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        available = QWidget()
+        available.setObjectName("layout_available_elements")
+        available_layout = QHBoxLayout(available)
+        available_layout.setContentsMargins(0, 0, 0, 0)
+        available_layout.setSpacing(6)
+        self._layout_element_buttons: dict[str, QPushButton] = {}
+        for key, label in (
+            ("sidebar:left", "Bal oldali menü"),
+            ("sidebar:right", "Jobb oldali menü"),
+            *tuple(
+                (f"box:{key}", title)
+                for key, title in self._dashboard_box_titles.items()
+            ),
+        ):
+            button = QPushButton(label)
+            button.setObjectName(f"layout_element_{key.replace(':', '_')}")
+            button.setCheckable(True)
+            button.setToolTip(
+                "Bekapcsolva az elem látható; kikapcsolva el van rejtve."
+            )
+            button.toggled.connect(
+                lambda visible, element_key=key: self._layout_element_toggled(
+                    element_key, visible
+                )
+            )
+            available_layout.addWidget(button)
+            self._layout_element_buttons[key] = button
+        available_layout.addStretch(1)
+        available_scroll.setWidget(available)
+        outer.addWidget(available_scroll)
+        bar.hide()
+        return bar
+
+    def _restore_dashboard_layout(self) -> None:
+        self._dashboard_sidebar_visibility = {
+            side: self._setting_bool(
+                f"appearance/dashboard/sidebar_{side}_visible", True
+            )
+            for side in ("left", "right")
+        }
+        for side, visible in self._dashboard_sidebar_visibility.items():
+            self._dashboard_sidebars[side].setVisible(visible)
+        for key, box in self._dashboard_boxes.items():
+            visible = self._setting_bool(
+                f"appearance/dashboard/box_{key}_visible", True
+            )
+            self._dashboard_box_visibility[key] = visible
+            box.setVisible(visible)
+        self._sync_layout_editor_buttons()
+
+    def _enter_layout_editor(self) -> None:
+        self._layout_editor_active = True
+        self._layout_editor_bar.show()
+        for key, box in self._dashboard_boxes.items():
+            box.set_editor_active(self._dashboard_box_visibility.get(key, True))
+        self._sync_layout_editor_buttons()
+
+    def _leave_layout_editor(self) -> None:
+        self._layout_editor_active = False
+        for box in self._dashboard_boxes.values():
+            box.set_editor_active(False)
+        self._layout_editor_bar.hide()
+
+    def _hide_dashboard_box(self, key: str) -> None:
+        self._set_dashboard_box_visible(key, False)
+
+    def _set_dashboard_box_visible(self, key: str, visible: bool) -> None:
+        box = self._dashboard_boxes.get(key)
+        if box is None:
+            return
+        if (
+            key == "measurement_controls"
+            and not visible
+            and self._devices.status.state is ApplicationState.RUNNING
+        ):
+            self._show_error(
+                "A mérésvezérlés futó vagy szüneteltetett mérés közben nem "
+                "rejthető el."
+            )
+            self._sync_layout_editor_buttons()
+            return
+        self._dashboard_box_visibility[key] = visible
+        box.setVisible(visible)
+        box.set_editor_active(self._layout_editor_active and visible)
+        self._user_settings.setValue(
+            f"appearance/dashboard/box_{key}_visible", visible
+        )
+        self._user_settings.sync()
+        self._sync_layout_editor_buttons()
+
+    def _set_dashboard_sidebar_visible(self, side: str, visible: bool) -> None:
+        if side not in self._dashboard_sidebars:
+            return
+        if (
+            side == "right"
+            and not visible
+            and self._devices.status.state is ApplicationState.RUNNING
+        ):
+            self._show_error(
+                "A jobb oldali mérésvezérlés futó vagy szüneteltetett mérés "
+                "közben nem rejthető el."
+            )
+            self._sync_layout_editor_buttons()
+            return
+        self._dashboard_sidebar_visibility[side] = visible
+        self._dashboard_sidebars[side].setVisible(visible)
+        self._user_settings.setValue(
+            f"appearance/dashboard/sidebar_{side}_visible", visible
+        )
+        self._user_settings.sync()
+        self._sync_layout_editor_buttons()
+
+    def _layout_element_toggled(self, key: str, visible: bool) -> None:
+        if key.startswith("sidebar:"):
+            self._set_dashboard_sidebar_visible(key.removeprefix("sidebar:"), visible)
+            return
+        if key.startswith("box:"):
+            self._set_dashboard_box_visible(key.removeprefix("box:"), visible)
+
+    def _sync_layout_editor_buttons(self) -> None:
+        buttons = getattr(self, "_layout_element_buttons", {})
+        states = {
+            **{
+                f"sidebar:{side}": visible
+                for side, visible in getattr(
+                    self, "_dashboard_sidebar_visibility", {}
+                ).items()
+            },
+            **{
+                f"box:{key}": visible
+                for key, visible in self._dashboard_box_visibility.items()
+            },
+        }
+        for key, button in buttons.items():
+            button.blockSignals(True)
+            button.setChecked(states.get(key, True))
+            button.blockSignals(False)
+
+    def _reset_dashboard_layout(self) -> None:
+        for side in self._dashboard_sidebars:
+            self._set_dashboard_sidebar_visible(side, True)
+        for key in self._dashboard_boxes:
+            self._set_dashboard_box_visible(key, True)
 
     def _build_menu(self) -> None:
         project_menu = self.menuBar().addMenu("Projekt")
@@ -6664,8 +6992,8 @@ class DashboardWindow(QMainWindow):
             (
                 "appearance",
                 "Megjelenés",
-                "Az alkalmazás rendszer-, világos vagy sötét témája.",
-                self._create_appearance_settings_page,
+                "Téma, oldalsávok és a dashboard kártyáinak láthatósága.",
+                lambda: self._create_appearance_settings_page(hub),
             ),
         ]
         if self._developer_mode:
@@ -6757,9 +7085,18 @@ class DashboardWindow(QMainWindow):
         dialog.rejected.connect(restore)
         return dialog
 
-    def _create_appearance_settings_page(self) -> QWidget:
+    def _create_appearance_settings_page(
+        self, settings_hub: SettingsHubDialog | None = None
+    ) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        help_text = QLabel(
+            "Az oldalsávok közvetlenül kapcsolhatók. A szerkesztő nézetben minden "
+            "dashboard-kártya × gombbal elrejthető, az ablak alján pedig "
+            "vízszintesen visszakapcsolható."
+        )
+        help_text.setWordWrap(True)
+        layout.addWidget(help_text)
         form = QFormLayout()
         theme = QComboBox()
         theme.setObjectName("settings_theme")
@@ -6779,10 +7116,59 @@ class DashboardWindow(QMainWindow):
         )
         theme.setCurrentIndex(max(0, theme.findData(selected)))
         form.addRow(input_field_label("Alkalmazás témája", theme), theme)
+        left_sidebar = QCheckBox("Bal oldali menü megjelenítése")
+        left_sidebar.setObjectName("appearance_left_sidebar_visible")
+        left_sidebar.setChecked(
+            self._dashboard_sidebar_visibility.get("left", True)
+        )
+        right_sidebar = QCheckBox("Jobb oldali menü megjelenítése")
+        right_sidebar.setObjectName("appearance_right_sidebar_visible")
+        right_sidebar.setChecked(
+            self._dashboard_sidebar_visibility.get("right", True)
+        )
+        right_sidebar.setEnabled(
+            self._devices.status.state is not ApplicationState.RUNNING
+        )
+        if not right_sidebar.isEnabled():
+            right_sidebar.setToolTip(
+                "A mérésvezérlést tartalmazó jobb oldalsáv futó mérés közben "
+                "nem rejthető el."
+            )
+        form.addRow(left_sidebar)
+        form.addRow(right_sidebar)
         layout.addLayout(form)
-        apply = QPushButton("Alkalmazás")
-        apply.clicked.connect(lambda: self._set_theme(str(theme.currentData())))
-        layout.addWidget(apply)
+        apply_button = QPushButton("Alkalmazás")
+        apply_button.setObjectName("apply_appearance_settings")
+
+        def apply_appearance() -> None:
+            selected_theme = str(theme.currentData())
+            current_theme = next(
+                (
+                    key
+                    for key, action in self._theme_actions.items()
+                    if action.isChecked()
+                ),
+                "system",
+            )
+            if selected_theme != current_theme:
+                self._theme_actions[selected_theme].setChecked(True)
+                self._set_theme(selected_theme)
+            self._set_dashboard_sidebar_visible("left", left_sidebar.isChecked())
+            self._set_dashboard_sidebar_visible("right", right_sidebar.isChecked())
+
+        apply_button.clicked.connect(apply_appearance)
+        layout.addWidget(apply_button)
+        editor = QPushButton("Dashboard elrendezésének szerkesztése…")
+        editor.setObjectName("open_dashboard_layout_editor")
+
+        def open_editor() -> None:
+            apply_appearance()
+            if settings_hub is not None:
+                settings_hub.accept()
+            QTimer.singleShot(0, self._enter_layout_editor)
+
+        editor.clicked.connect(open_editor)
+        layout.addWidget(editor)
         layout.addStretch()
         return page
 
@@ -7770,7 +8156,7 @@ class DashboardWindow(QMainWindow):
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
                 )
-                if answer is not QMessageBox.StandardButton.Yes:
+                if answer != QMessageBox.StandardButton.Yes:
                     self._set_all_connections(
                         "LEVÁLASZTVA — ÚJRAAKTIVÁLÁS SZÜKSÉGES",
                         ok=None,
@@ -8600,7 +8986,7 @@ class DashboardWindow(QMainWindow):
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
                 )
-                if answer is not QMessageBox.StandardButton.Yes:
+                if answer != QMessageBox.StandardButton.Yes:
                     return
                 if (
                     self._active_hardware_configuration is not None
@@ -8645,6 +9031,7 @@ class DashboardWindow(QMainWindow):
     def _dismiss_alarm(self) -> None:
         if self._active_alarm_text == "Nincs aktív riasztás":
             return
+        hardware_fault_acknowledged = False
         try:
             if self._devices.status.state is ApplicationState.FAULT:
                 decision = self._control_loop.verify_safe_fault_clear(
@@ -8658,6 +9045,7 @@ class DashboardWindow(QMainWindow):
                     )
                     return
                 self._devices.acknowledge_fault()
+                hardware_fault_acknowledged = self._run_mode is RunMode.HARDWARE
                 if self._run_mode is RunMode.SIMULATION:
                     self._set_all_connections("SZIMULÁCIÓ — KÉSZ", ok=True)
             self._clear_active_alarm()
@@ -8667,6 +9055,8 @@ class DashboardWindow(QMainWindow):
                 f"{type(error).__name__}: {error}"
             )
         self._refresh_state()
+        if hardware_fault_acknowledged:
+            QTimer.singleShot(0, self._refresh_active_hardware_status)
 
     @staticmethod
     def _pid_spinbox(value: float) -> QDoubleSpinBox:
@@ -8968,9 +9358,6 @@ class DashboardWindow(QMainWindow):
             self._pid_profile.blockSignals(False)
             self._delete_pid_profile_button.setEnabled(False)
         if self._runtime.running:
-            if self._run_mode is RunMode.HARDWARE:
-                self._user_settings.setValue("pid/profile_validated", False)
-                self._user_settings.sync()
             self._pid_application_status.setText(
                 "PID-frissítés előkészítve a következő vezérlési ciklushoz…"
             )
@@ -9739,9 +10126,6 @@ class DashboardWindow(QMainWindow):
                 "szelepirány": self._setting_bool(
                     "hardware/valve_direction_validated", False
                 ),
-                "szelep SAFE feszültség": self._setting_bool(
-                    "hardware/safe_output_validated", False
-                ),
                 "biztonsági nyomáshatárok": self._setting_bool(
                     "safety/limits_validated", False
                 ),
@@ -9773,17 +10157,6 @@ class DashboardWindow(QMainWindow):
                     if missing_physical
                     else ""
                 ),
-            )
-
-            pid_validated = self._setting_bool("pid/profile_validated", False)
-            add(
-                "pid_validation",
-                "PID-profil fizikai hangolása",
-                PreflightStatus.PASSED if pid_validated else PreflightStatus.FAILED,
-                "Validált PID-profil." if pid_validated else "Nincs validált PID-hangolás.",
-                "Automatikus szelepvezérléshez validált PID-profil szükséges."
-                if not pid_validated
-                else "",
             )
 
         snapshot = record.snapshot
@@ -10498,24 +10871,19 @@ class DashboardWindow(QMainWindow):
                     errors.append(f"biztonsági leállítás: {error}")
             if self._pump_control is not None:
                 self._pump_control.observe_safe_stop()
-            if self._devices.status.state is ApplicationState.FAULT:
-                try:
-                    self._devices.acknowledge_fault()
-                except Exception as error:
-                    errors.append(f"hibaállapot lezárása: {error}")
             self._start_pending_stage_exports()
-            self._set_all_connections("ÚJRAELLENŐRZÉS", ok=None)
+            self._set_all_connections("VÉSZLEÁLLÍTÁS — RETESZELVE", ok=False)
             details = "" if not errors else "\n- " + "\n- ".join(errors)
             self._show_error(
                 "A mérés biztonságosan leállt. A HARDWARE mód, a "
                 "hardverprofil és a munkamenet engedélye megmaradt. A program "
-                "csak olvasási hardverellenőrzést indít.\n\n"
+                "FAULT állapotban marad a riasztás kezelői nyugtázásáig; "
+                "ezután csak olvasási hardverellenőrzést indít.\n\n"
                 f"Hiba: {message}{details}"
             )
         finally:
             self._critical_hardware_recovery_active = False
             self._refresh_state()
-        QTimer.singleShot(0, self._refresh_active_hardware_status)
 
     def _set_connection(self, key: str, connected: bool) -> None:
         self._set_connection_status(
@@ -10695,11 +11063,36 @@ class DashboardWindow(QMainWindow):
             and self._devices.status.measurement is MeasurementState.RUNNING
             and not self._preflight_active
         )
+        self._refresh_measurement_field_editability(state)
         self._configuration_summary_label.setText(
             self._configuration_summary_text()
         )
         self._refresh_valve_status()
         self._refresh_recording_status()
+
+    def _refresh_measurement_field_editability(
+        self, state: ApplicationState
+    ) -> None:
+        measurement_active = state is ApplicationState.RUNNING
+        live_editing_available = self._runtime.running and not self._preflight_active
+        for field in self._live_measurement_fields:
+            field.setEnabled(not measurement_active or live_editing_available)
+        self._stage.setEnabled(
+            isinstance(self._project.currentData(), int)
+            and (not measurement_active or live_editing_available)
+        )
+
+        # This value has a supervised physical apply path, but no simulation-side
+        # runtime operation. Keep it editable before a measurement and only while
+        # that physical operation is actually available during a measurement.
+        flow_change_available = (
+            self._run_mode is RunMode.HARDWARE
+            and self._devices.status.measurement is MeasurementState.RUNNING
+            and not self._preflight_active
+        )
+        self._new_measurement_flow.setEnabled(
+            not measurement_active or flow_change_available
+        )
 
     def _configuration_summary_text(self) -> str:
         hardware = self._active_hardware_configuration
@@ -10733,14 +11126,19 @@ class DashboardWindow(QMainWindow):
                 )
             )
         )
-        valve_validated = self._setting_bool(
+        valve_direction_validated = self._setting_bool(
             "hardware/valve_direction_validated", False
-        ) and self._setting_bool("hardware/safe_output_validated", False)
+        )
         safety_validated = self._setting_bool("safety/limits_validated", False)
         calibration_validated = self._setting_bool(
             "calibration/profile_validated", False
         )
-        pid_validated = self._setting_bool("pid/profile_validated", False)
+        try:
+            self._pid_parameters()
+        except ValueError:
+            pid_parameters_valid = False
+        else:
+            pid_parameters_valid = True
         storage_ready = self._data_directory.exists() and os.access(
             self._data_directory, os.W_OK
         )
@@ -10749,10 +11147,10 @@ class DashboardWindow(QMainWindow):
                 hardware_complete,
                 pump_ready,
                 ni_ready,
-                valve_validated,
+                valve_direction_validated,
                 safety_validated,
                 calibration_validated,
-                pid_validated,
+                pid_parameters_valid,
                 storage_ready,
             )
         )
@@ -10762,13 +11160,18 @@ class DashboardWindow(QMainWindow):
                 f"Hardverprofil: {'teljes' if hardware_complete else 'hiányos'}",
                 f"Pumpakapcsolatok: {'kész' if pump_ready else 'hibás/ellenőrizetlen'}",
                 f"NI bemenetek: {'kész' if ni_ready else 'hibás/ellenőrizetlen'}",
-                "Szelepkimenet: "
-                + ("validált" if valve_validated else "nincs validálva"),
+                "Szelepirány: "
+                + (
+                    "validált"
+                    if valve_direction_validated
+                    else "nincs validálva"
+                ),
                 "Biztonsági határok: "
                 + ("kész" if safety_validated else "hiányos/nincs validálva"),
                 "Kalibrációk: "
                 + ("kész" if calibration_validated else "hiányos/nincs validálva"),
-                f"PID-profil: {'kész' if pid_validated else 'nincs hangolva'}",
+                "PID-paraméterek: "
+                + ("számszakilag érvényes" if pid_parameters_valid else "hibás"),
                 f"Adatmentés: {'kész' if storage_ready else 'hibás'}",
                 "Mérésindítás: "
                 + ("engedélyezett" if measurement_ready else "blokkolt"),

@@ -57,6 +57,11 @@ A mintavételi gyakoriság 1 másodperc és 1 óra között konfigurálható. A 
   minimalizálva a Windows-értesítés és a tálcagomb is kérjen figyelmet.
 - A bal és jobb oldalsáv splitterrel akkor is átméretezhető maradjon, amikor a
   tartalma miatt függőleges scrollbar jelenik meg.
+- A Megjelenés beállításokban a bal és jobb oldalsáv külön kapcsolható legyen. A
+  dashboard elrendezésszerkesztőjében minden oldalsó kártya × gombbal elrejthető,
+  az elérhető elemek pedig az ablak alján vízszintes sávban legyenek
+  visszakapcsolhatók. A választás legyen tartós. A STOP és a szoftveres
+  vészleállítás elérhetőségét futó mérés közben elrejtés nem szüntetheti meg.
 - A jobb oldali vezérlőpanel minden inputmezője azonos szélességű legyen az
   oldalsáv bármely szélességén; hosszabb címke nem törheti a hozzá tartozó mezőt
   teljes szélességű külön sorba.
@@ -133,9 +138,12 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   a kapcsolat maradjon élő, a dashboard élő grafikonja, táblázata és értékei
   kerüljenek alaphelyzetbe.
 - Kritikus hardverhiba, kapcsolatvesztés, biztonsági interlock, watchdoghiba vagy
-  vészleállítás után a program minden portot best-effort módon zárjon le, dobja
-  el az aktív hardvermódot, mutasson konkrét hibaüzenetet, majd automatikusan
-  nyissa meg az Eszközbeállításokat. Nem kritikus előellenőrzési hiba ne bontsa
+  vészleállítás után a program best-effort STOP/safe-state-et kérjen, állítsa
+  le a runtime-ot, és maradjon reteszelt `FAULT` állapotban. A hardvermódot és
+  a munkamenet engedélyét megőrizheti, de a kezelői nyugtázásig nem indíthat
+  automatikus újraellenőrzést, mérést vagy vezérlési runtime-ot. Sikeres friss
+  biztonsági ellenőrzés és kezelői nyugtázás után egyetlen, csak olvasási
+  hardverállapot-frissítés induljon. Nem kritikus előellenőrzési hiba ne bontsa
   az élő hardverkapcsolatot.
 - Hardveres módban a mérésindítás külön ablakban kérje be mindkét pumpa elérendő
   kezdőnyomását, saját hardveres nyomáshatárát, a köpeny nyomásfelépítési
@@ -210,6 +218,10 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   a háttérszál következő felügyelt ciklushatárán, versenyhelyzet nélkül lépjen
   életbe. Érvénytelen átmeneti mezőérték nem írhatja felül az utolsó érvényes PID-et.
   A PID-beállítások névvel menthető profilokba rendezhetők.
+- Folyamatban lévő mérés alatt csak olyan értékmező maradhat aktív, amelyhez
+  tényleges futásidejű alkalmazási út tartozik. Az indítási előkészítés alatt a
+  futásidejű mezők is legyenek zárolva; a BES mérési flow szimulációban ne legyen
+  szerkeszthető, mert ott nincs hozzá alkalmazható fizikai pumpaművelet.
 - A részletes PID-hangolás és a felügyelt manuális hardvervezérlés csak Developer
   módban jelenhet meg; a normál kezelői nézet az üzemi műveletekre korlátozódjon.
 - Developer módban a háttér-vezérlési ciklus időköze és watchdog-tűrése külön
