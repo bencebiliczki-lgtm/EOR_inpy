@@ -132,7 +132,8 @@ def slow_intervals() -> PumpPollingIntervals:
 def test_default_pressure_stale_window_covers_observed_serial_jitter() -> None:
     intervals = PumpPollingIntervals()
 
-    assert intervals.pressure_seconds == pytest.approx(1.0)
+    assert intervals.pressure_seconds == pytest.approx(0.5)
+    assert intervals.slow_telemetry_seconds == pytest.approx(0.5)
     assert intervals.pressure_stale_seconds == pytest.approx(6.0)
     assert intervals.pressure_stale_seconds >= 3.0 * intervals.pressure_seconds
     assert intervals.slow_telemetry_stale_seconds == pytest.approx(3.0)
@@ -194,7 +195,7 @@ def test_slow_field_failure_does_not_make_pressure_stale_or_stop_worker() -> Non
     pump.disconnect()
 
 
-def test_blocking_slow_fields_cannot_accumulate_pressure_age_to_stale() -> None:
+def test_blocking_slow_fields_do_not_trigger_unscheduled_pressure_reads() -> None:
     raw = BlockingSlowTelemetryPump(delay_seconds=0.0)
     intervals = PumpPollingIntervals(
         pressure_seconds=0.02,
@@ -209,11 +210,22 @@ def test_blocking_slow_fields_cannot_accumulate_pressure_age_to_stale() -> None:
 
     telemetry = pump.read_telemetry()
 
-    assert telemetry.pressure.quality is DataQuality.GOOD
+    # A blocking serial transaction may legitimately make pressure stale. The
+    # poller must not compensate with hidden PRESS requests outside the cadence.
+    assert telemetry.pressure.quality is DataQuality.STALE
     assert telemetry.pressure.age_seconds is not None
-    assert telemetry.pressure.age_seconds < intervals.pressure_stale_seconds
-    assert raw.calls["pressure"] >= 2
+    assert telemetry.pressure.age_seconds >= intervals.pressure_stale_seconds
+    assert raw.calls["pressure"] == 1
     pump.disconnect()
+
+
+def test_polling_deadline_uses_absolute_cadence_and_skips_missed_slots() -> None:
+    assert PollingPump._advance_polling_deadline(10.0, 0.5, 10.2) == pytest.approx(
+        10.5
+    )
+    assert PollingPump._advance_polling_deadline(10.0, 0.5, 11.2) == pytest.approx(
+        11.5
+    )
 
 
 def test_failed_stop_is_latched_until_acknowledgement() -> None:
@@ -233,7 +245,7 @@ def test_failed_stop_is_latched_until_acknowledgement() -> None:
     pump.disconnect()
 
 
-def test_successful_control_commands_refresh_pressure_cache() -> None:
+def test_control_commands_do_not_add_pressure_reads_outside_polling_cadence() -> None:
     raw = SlowPollablePump(delay_seconds=0.0)
     pump = PollingPump(raw, name="test", intervals=slow_intervals())
     pump.connect()
@@ -243,7 +255,7 @@ def test_successful_control_commands_refresh_pressure_cache() -> None:
     pump.set_constant_flow(10.0)
     pump.run()
 
-    assert raw.calls["pressure"] == pressure_reads_after_connect + 3
+    assert raw.calls["pressure"] == pressure_reads_after_connect
     assert pump.read_telemetry().pressure.quality is DataQuality.GOOD
     pump.disconnect()
 

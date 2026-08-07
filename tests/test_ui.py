@@ -270,6 +270,8 @@ def test_calibration_settings_scroll_without_overlapping_fields() -> None:
     dialog.show()
     application().processEvents()
 
+    assert dialog.minimum_margin.minimum() == pytest.approx(20.0)
+
     field_groups = (
         (
             dialog.line_voltage_min,
@@ -2301,6 +2303,15 @@ def test_measurement_start_preflight_accepts_finite_voltage_outside_nominal_span
     window._devices._daq.inputs["line_pressure"] = -1.188189
     errors: list[str] = []
     monkeypatch.setattr(window, "_show_error", errors.append)
+    assert window._pump_control is not None
+    monkeypatch.setattr(
+        window._pump_control,
+        "apply_measurement_flow",
+        lambda requested: requested,
+    )
+    window._devices.start(start_simulated_devices=False)
+    window._devices.set_measurement_state(MeasurementState.WAITING_CONFIRMATION)
+    window._pending_measurement_pump_plan = window._default_measurement_pump_plan()
 
     window._start()
 
@@ -2314,6 +2325,96 @@ def test_measurement_start_preflight_accepts_finite_voltage_outside_nominal_span
     assert window._runtime.running
     assert not errors
     window._stop()
+    window.close()
+
+
+def test_simulation_enables_separate_preparation_before_measurement_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    project_path = tmp_path / "projects.sqlite3"
+    with ProjectRepository(project_path) as repository:
+        project = repository.create_project(
+            name="Simulation preparation",
+            configuration={},
+            calibration_snapshot={},
+        )
+        stage = repository.add_stage(project.id, "Preparation stage")
+    settings = QSettings(
+        str(tmp_path / "simulation-preparation.ini"), QSettings.Format.IniFormat
+    )
+    settings.setValue("project/last_project_id", project.id)
+    settings.setValue("project/last_stage_id", stage.id)
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", project_path, settings=settings
+    )
+    preparation_requests: list[bool] = []
+    monkeypatch.setattr(
+        window,
+        "_start_measurement_preflight",
+        lambda: preparation_requests.append(True),
+    )
+
+    window._refresh_state()
+
+    assert window._devices.status.state is ApplicationState.READY
+    assert window._prepare_button.isEnabled()
+    assert not window._start_button.isEnabled()
+    window._prepare()
+    assert preparation_requests == [True]
+    window.close()
+
+
+def test_simulation_preparation_unlocks_measurement_start_only_after_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = application()
+    project_path = tmp_path / "projects.sqlite3"
+    with ProjectRepository(project_path) as repository:
+        project = repository.create_project(
+            name="Prepared simulation",
+            configuration={},
+            calibration_snapshot={},
+        )
+        stage = repository.add_stage(project.id, "Prepared stage")
+    settings = QSettings(
+        str(tmp_path / "prepared-simulation.ini"), QSettings.Format.IniFormat
+    )
+    settings.setValue("project/last_project_id", project.id)
+    settings.setValue("project/last_stage_id", stage.id)
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", project_path, settings=settings
+    )
+    assert window._pump_control is not None
+    monkeypatch.setattr(
+        MeasurementPumpStartupDialog,
+        "exec",
+        lambda _dialog: QDialog.DialogCode.Accepted,
+    )
+    monkeypatch.setattr(
+        window._pump_control,
+        "start_measurement_pumps",
+        lambda **_kwargs: None,
+    )
+
+    window._begin_measurement_after_preflight()
+    for _ in range(100):
+        app.processEvents()
+        if (
+            window._devices.status.measurement
+            is MeasurementState.WAITING_CONFIRMATION
+        ):
+            break
+        sleep(0.01)
+
+    assert window._devices.status.state is ApplicationState.RUNNING
+    assert (
+        window._devices.status.measurement
+        is MeasurementState.WAITING_CONFIRMATION
+    )
+    assert window._start_button.isEnabled()
+    assert not window._prepare_button.isEnabled()
+    window._devices.stop()
     window.close()
 
 
@@ -2387,6 +2488,51 @@ def test_hardware_preparation_progress_refreshes_dashboard_values(
     assert window._pressure_margin_label.text() == "30,375 bar"
     assert not window._times
     window._preflight_active = False
+    window._run_mode = RunMode.SIMULATION
+    window._devices.stop()
+    window.close()
+
+
+def test_hardware_start_requires_separate_completed_preparation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        tmp_path / "projects.sqlite3",
+    )
+    window._run_mode = RunMode.HARDWARE
+    errors: list[str] = []
+    started: list[bool] = []
+    monkeypatch.setattr(window, "_show_error", errors.append)
+    monkeypatch.setattr(
+        window,
+        "_start_measurement_preflight",
+        lambda: pytest.fail("measurement start must not open preparation"),
+    )
+    monkeypatch.setattr(
+        window,
+        "_start_prepared_measurement",
+        lambda: started.append(True),
+    )
+
+    assert window._primary_control_buttons[:2] == (
+        window._start_button,
+        window._prepare_button,
+    )
+    assert window._prepare_button.text() == "Előkészítés"
+    window._start()
+    assert errors and "Előkészítést" in errors[-1]
+    assert not started
+
+    window._devices.start()
+    window._devices.set_measurement_state(MeasurementState.WAITING_CONFIRMATION)
+    window._pending_measurement_pump_plan = window._default_measurement_pump_plan()
+    window._refresh_state()
+    assert window._state_label.text() == "ELŐKÉSZÍTVE"
+    window._start()
+
+    assert started == [True]
     window._run_mode = RunMode.SIMULATION
     window._devices.stop()
     window.close()

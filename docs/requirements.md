@@ -141,7 +141,7 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   differenciálnyomása, valamint a köpeny–besajtolás nyomáskülönbsége. Az
   előkészítési kijelzés nem indíthatja el idő előtt a PID-et, az adatmentést vagy
   a mérési grafikon pontgyűjtését.
-- A mérés kezelői gombjai: **Mérés indítása**, **Mérés
+- A mérés kezelői gombjai: **Mérés indítása**, **Előkészítés**, **Mérés
   szüneteltetése/folytatása** és **Mérés leállítása**. Szünetben a PID és az
   adatmentés álljon, de a biztonsági felügyelet fusson tovább és a fizikai
   kimenet maradjon a szünet kezdeti értékén. Leállításkor STOP/safe-state után
@@ -155,7 +155,8 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   biztonsági ellenőrzés és kezelői nyugtázás után egyetlen, csak olvasási
   hardverállapot-frissítés induljon. Nem kritikus előellenőrzési hiba ne bontsa
   az élő hardverkapcsolatot.
-- Hardveres módban a mérésindítás külön ablakban kérje be mindkét pumpa elérendő
+- Hardveres és szimulációs módban az **Előkészítés** gomb külön ablakban
+  kérje be mindkét pumpa elérendő
   kezdőnyomását, saját hardveres nyomáshatárát, a köpeny nyomásfelépítési
   térfogatáramát, a besajtoló térfogatáramát és a nyomástöbblet stabilitási idejét.
   A program a dokumentált `MAXPRESS` paranccsal állítsa be a két pumpa saját
@@ -166,7 +167,17 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   nyomástöbblet kizárólag a besajtolópumpa `RUN` előtti indítási engedélyfeltétel:
   a `RUN` után és a mérési ciklusban nem kell fenntartani. A köpenypumpa a
   kezelő által megadott fix nyomáscélt tartsa, ne kövesse a besajtolási nyomást.
-  A PID- és adatrögzítési ciklus csak mindkét kezdőnyomás elérése után kezdődhet.
+  A BES pumpa az első célnyomás-mintánál azonnal álljon le; a stabilitási
+  idő alatt nem maradhat rajta előkészítési flow. Az előkészítés befejezése
+  után a rendszer várjon. A PID- és adatrögzítési ciklus kizárólag a
+  külön **Mérés indítása** gomb megnyomásakor kezdődhet; ez a gomb nem
+  kérheti be újra az előkészítési adatokat.
+  A kezelői felület a minimális indítási többletet nem engedheti 20 bar alá.
+  A BES konfigurálása előtt és közvetlenül a BES `RUN` előtt ismét ellenőrizni
+  kell a friss cache-elt különbséget; visszaesésnél a BES nem indulhat el.
+  Szimulációban ugyanez az állapotgép és sorrend fusson a szimulált
+  pumpákkal; az **Előkészítés** legyen elérhető READY állapotban, a
+  **Mérés indítása** pedig csak WAITING_CONFIRMATION állapotban.
 - A pumpatelemetria minőségét mezőnként kell nyilvántartani. A nyomás
   biztonságkritikus; elavulása reteszelt hibát okozhat. A FLOW vagy VOLA önálló
   elavulása `DEGRADED` kapcsolatot jelezzen és maradjon látható, de önmagában ne
@@ -179,6 +190,10 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   soros timeout/próbálkozási keret plusz két pollingperiódusnál. A felület
   jelezze, hogy a nyomás STALE-határának növelése késlelteti a kapcsolatvesztés
   felismerését; az értékek csak a következő hardveraktiváláskor lépjenek életbe.
+  Az alapértelmezett nyomás-, FLOW-, VOLA- és STATUS-periódus 0,5 s; a
+  nyomás-STALE-határ 6 s, a többi mezőé 3 s, a kezdő telemetria timeoutja
+  3 s. Előkészítés és mérés ugyanazt az egy cache-elt pollingfolyamatot
+  használja; lassú mező után nem adható ki rejtett extra nyomáslekérdezés.
 - A köpenynyomás felépülése alatt minden egyéb szenzor-, kapcsolat- és
   nyomáshatár maradjon aktív. Timeout, kezelői megszakítás vagy bármely hiba
   mindkét pumpán STOP-ot és a mérési runtime indításának tiltását váltsa ki.
@@ -247,6 +262,9 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
 - Developer módban a háttér-vezérlési ciklus időköze és watchdog-tűrése külön
   beállítható és tartósan mentett legyen. Módosításuk futó mérés közben tilos;
   a watchdog és a ciklushiba miatti safe-state nem kapcsolható ki.
+  Ugyanez a ciklusidő és watchdog-tűrés vezérelje a pumpák `PREPARING`
+  állapotának biztonsági ellenőrzéseit is; az előkészítés nem használhat
+  kódba égetett saját ciklusidőt.
 - Cél a beállított nyomás ±1 bar tartása, ennek igazolási módszerét még rögzíteni kell.
 
 ## Adatmentés

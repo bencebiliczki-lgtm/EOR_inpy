@@ -111,7 +111,7 @@ class DeviceControlService:
         self._state = ApplicationState.READY
         self._connection = HardwareConnectionState.CONNECTED
 
-    def start(self) -> None:
+    def start(self, *, start_simulated_devices: bool = True) -> None:
         if self._state is not ApplicationState.READY:
             raise RuntimeError("measurement can only start from ready state")
         self._require_hardware_authorization()
@@ -120,7 +120,7 @@ class DeviceControlService:
             acknowledge = getattr(pump, "acknowledge_stop_latch", None)
             if callable(acknowledge):
                 acknowledge()
-            if self._mode is RunMode.SIMULATION:
+            if self._mode is RunMode.SIMULATION and start_simulated_devices:
                 start_simulation = getattr(pump, "start_simulation", None)
                 if callable(start_simulation):
                     start_simulation()

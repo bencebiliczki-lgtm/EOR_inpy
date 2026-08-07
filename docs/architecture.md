@@ -281,10 +281,9 @@ tüskeszűrő is átengedi, de a nyers biztonsági ág már az első burstben ak
 
 A fizikai ISCO pumpák blokkoló DASNET-forgalma nem a vezérlési szálon fut. A
 `PollingPump` pumpánként külön worker szálon frissít időbélyegzett cache-t: a
-`PRESS` alapértelmezetten 1 másodpercenként, a `FLOW`, `VOLA` és `STATUS`
-egymáshoz képest eltolva kerül lekérdezésre. Minden lassú mezőtranzakció után
-azonnali `PRESS` frissítés történik, ezért több lassú lekérdezés nem tudja
-egymás után öregíteni a biztonságkritikus nyomáscache-t. A gyors mérés–biztonság–PID
+`PRESS` alapértelmezetten 0,5 másodpercenként, a `FLOW`, `VOLA` és `STATUS`
+szintén 0,5 másodperces, egymáshoz képest eltolt periódussal kerül
+lekérdezésre. A konfigurált ütemen kívüli extra `PRESS` tranzakció nincs. A gyors mérés–biztonság–PID
 ciklus kizárólag ezt a cache-t olvassa. Az első teljes adatkészletre csak a
 kapcsolatfelépítés vár; a `RSVP` és `IDENTIFY` kizárólag a pumpa `connect()`
 életciklusában fut. Kommunikációs hiba után a worker nem próbál automatikus
@@ -295,10 +294,9 @@ töredékes válasz olvasása összesen csak egy soros timeoutablakot használha
 A lassú telemetria határa 3 másodperc. A cache kommunikációs
 hibánál `DISCONNECTED`, a határidőn túl frissítetlen adatnál `STALE` minőséget
 kap, és mindkettő a meglévő biztonsági reteszt aktiválja.
-A REMOTE, konfigurációs és RUN műveletek sikeres befejezése után a
-`PollingPump` ugyanazon kizárólagos soros tulajdonlás alatt `PRESS` visszaolvasást
-végez. Ez megakadályozza, hogy a mérésindítási vagy flow-váltási
-parancssorozat több lépésen keresztül frissítetlen nyomást hagyjon a cache-ben.
+A REMOTE, konfigurációs és RUN műveletek elsőbbséget kapnak a soros vonalon,
+de nem indítanak rejtett `PRESS` visszaolvasást; a nyomáscache-t kizárólag a
+konfigurált periodikus lekérdezés frissíti.
 
 ## Felhasználói beállítások
 
@@ -492,11 +490,11 @@ hardveraktiválás után engedélyezettek. A kezelő `CONST FLOW` vagy `CONST PR
 módot és célértéket állíthat, majd külön, alapértelmezetten elutasított gombos
 megerősítéssel indíthatja a pumpát; parancsszöveget nem kell begépelnie.
 
-Normál hardveres mérésindításkor külön ablak gyűjti be mindkét pumpa cél-
+Normál hardveres előkészítéskor az **Előkészítés** gomb külön ablakban gyűjti be mindkét pumpa cél-
 kezdőnyomását, a köpeny nyomásfelépítési térfogatáramát és a besajtoló
 térfogatáramát. Az ablak csak akkor enged indítani, ha a tervezett köpenynyomás
 legalább a konfigurált biztonsági többlettel nagyobb a besajtoló kezdőnyomásánál.
-Az utoljára elfogadott értékeket a `QSettings` megőrzi, de minden mérés előtt újra
+Az utoljára elfogadott értékeket a `QSettings` megőrzi, de minden előkészítés előtt újra
 megjelennek, és csak explicit gombos kezelői megerősítéssel fogadhatók el. A
 `ml/h` értékeket
 a teljes alkalmazási és pumpavezérlési réteg változatlanul `ml/h` egységben adja
@@ -515,10 +513,19 @@ besajtolópumpa megadott térfogatáramú `RUN` parancsát. A besajtoló `RUN` u
 különbség már nem reteszelési feltétel: a második előkészítési ciklus csak a két
 megadott kezdőnyomást várja ki. A köpenypumpa saját célértékének elérésekor
 `STOP → CONST PRESS → RUN` sorrenddel a kezelő fix nyomáscéljára vált. A mérési
-runtime sem próbál 20 bar-os követési különbséget fenntartani. Csak a két cél
-elérése után indul a PID- és adatrögzítési runtime. Bármelyik felfutás 120
+runtime sem próbál 20 bar-os követési különbséget fenntartani. A két cél
+elérésekor a BES pumpa azonnal leáll, és a stabilitási ablak alatt is STOP
+állapotban marad. Az előkészítés ezután `WAITING_CONFIRMATION` állapotban
+vár; a PID- és adatrögzítési runtime csak a külön **Mérés indítása**
+gomb megnyomásakor indul. Bármelyik felfutás 120
 másodperces timeoutja, megszakítása vagy más biztonsági oka mindkét pumpát
 leállítja, és a runtime nem indul.
+
+A BES automatikus előkészítése háromszoros indítási kaput használ: a stabil
+minimum eléréséig semmilyen BES-konfiguráció nem indul, majd a BES `REMOTE`
+előtt és közvetlenül a BES `RUN` előtt is újraolvassa a cache-elt KÖP–BES
+különbséget. Ez az automatikus kapu nem kapcsolható ki a manuális
+pumpavezérlés eltérő szabályával.
 
 A besajtolópumpa `RUN` előtt a szolgáltatás friss státuszt olvas mindkét pumpáról,
 és a konfigurált minimum alatti köpenynyomás-többletnél megtagadja az indítást. A `STOP ALL`
@@ -588,8 +595,18 @@ A pumpaszolgáltatás írási kapuja mindkét pumpa teljes, friss
 adható ki `REMOTE`, `FLOW`, `PRESS`, `RUN` vagy analóg kimeneti parancs. A BES
 előkészítési flow-ja csak a kezdőnyomás felépítéséhez használható. A
 stabil kezdőnyomás után a KÖP pumpa a konfigurált nyomástartásban marad, a BES
-pumpa pedig STOP állapotba kerül. A PID és az adatmentés a nem időzített kezelői
-megerősítésig nem indul.
+pumpa pedig STOP állapotban vár. A PID és az adatmentés a dashboard külön
+**Mérés indítása** gombjáig nem indul; további felugró megerősítés nincs.
+
+Az előkészítés és a mérés ugyanazt a `PollingPump` cache-t olvassa. Az
+ütemező abszolút határidőkkel tartja a konfigurált periódust, kimaradt időrésnél
+a következő érvényes slotra lép, és FLOW/VOLA/STATUS után nem iktat be
+konfigurálatlan extra PRESS tranzakciót.
+A `PumpControlService` előkészítési felügyeleti ciklusa a
+`BackgroundControlRunner` aktuális ciklusidejét és watchdog-tűrését kapja meg.
+Abszolút monotonic határidőt használ, ezért az ellenőrzés végrehajtási ideje
+nem adódik hozzá minden következő periódushoz; határidő-túllépés ugyanazon
+safe-stop útvonalat aktiválja, mint a mérési runtime-ban.
 
 A repositoryban rendelkezésre álló DASNET dokumentáció nem igazolja a
 futás közbeni közvetlen FLOW-átírást. Ezért a BES mérési flow induláskori

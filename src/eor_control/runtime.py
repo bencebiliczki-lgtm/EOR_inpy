@@ -68,6 +68,15 @@ class BackgroundControlRunner:
     def paused(self) -> bool:
         return self.running and self._pause_event.is_set()
 
+    @property
+    def control_interval_seconds(self) -> float:
+        """Configured start-to-start period shared with preparation control."""
+        return self._interval
+
+    @property
+    def watchdog_tolerance_seconds(self) -> float:
+        return self._watchdog_tolerance
+
     def start(self, settings: RuntimeSettings) -> None:
         if self.running:
             raise RuntimeError("control runner is already running")

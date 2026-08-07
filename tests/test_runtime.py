@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from time import sleep
 
+import pytest
+
 from eor_control.control import ControlMode, PidParameters, PressureSource
 from eor_control.runtime import BackgroundControlRunner, RuntimeSettings
 
@@ -60,6 +62,18 @@ def test_control_cycles_run_faster_than_persistent_recording() -> None:
 
     assert len(loop.persist_flags) >= 4
     assert loop.persist_flags.count(True) == 1
+
+
+def test_runtime_exposes_timing_used_by_preparation_control() -> None:
+    loop = FakeControlLoop()
+    runner = BackgroundControlRunner(  # type: ignore[arg-type]
+        loop,
+        control_interval_seconds=0.35,
+        watchdog_tolerance_seconds=0.08,
+    )
+
+    assert runner.control_interval_seconds == pytest.approx(0.35)
+    assert runner.watchdog_tolerance_seconds == pytest.approx(0.08)
 
 
 def test_slow_control_cycle_triggers_watchdog_and_safe_state() -> None:

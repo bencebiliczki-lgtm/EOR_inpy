@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from time import sleep
 
 import pytest
 
@@ -61,6 +62,7 @@ def service(
     jacket_pressure: float = 120.0,
     injection_pressure: float = 100.0,
     minimum_jacket_margin_bar: float = 20.0,
+    enforce_injection_margin: bool = True,
 ) -> tuple[
     PumpControlService, FakePump, FakePump
 ]:
@@ -70,6 +72,7 @@ def service(
         jacket_pump=jacket,
         injection_pump=injection,
         minimum_jacket_margin_bar=minimum_jacket_margin_bar,
+        enforce_injection_margin=enforce_injection_margin,
     )
     control.authorize(PumpControlService.AUTHORIZATION)
     control.connect(PumpRole.JACKET)
@@ -119,6 +122,62 @@ def test_measurement_start_preserves_hourly_flow_targets() -> None:
     assert not control.state(PumpRole.INJECTION).running
 
 
+def test_measurement_preparation_enforces_configured_control_deadline() -> None:
+    control, jacket, injection = service()
+
+    def slow_safety_check() -> tuple[str, ...]:
+        sleep(0.02)
+        return ()
+
+    with pytest.raises(TimeoutError, match="control cycle deadline missed"):
+        control.start_measurement_pumps(
+            jacket_target_pressure_bar=120.0,
+            jacket_buildup_flow_ml_per_hour=10.0,
+            injection_start_pressure_bar=100.0,
+            injection_target_flow_ml_per_hour=10.0,
+            confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+            startup_safety_check=slow_safety_check,
+            control_interval_seconds=0.005,
+            control_watchdog_tolerance_seconds=0.001,
+        )
+
+    assert jacket.commands[-1] == "STOP"
+    assert injection.commands[-1] == "STOP"
+
+
+def test_preparation_control_deadline_uses_absolute_cadence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [10.08]
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr("eor_control.pump_control.monotonic", lambda: now[0])
+    monkeypatch.setattr("eor_control.pump_control.sleep", fake_sleep)
+
+    deadline = PumpControlService._wait_for_control_deadline(
+        10.0,
+        0.1,
+        10.0,
+        1.0,
+    )
+    assert deadline == pytest.approx(10.1)
+    assert sleeps == pytest.approx([0.02])
+
+    now[0] = 10.36
+    deadline = PumpControlService._wait_for_control_deadline(
+        deadline,
+        0.1,
+        10.3,
+        1.0,
+    )
+    assert deadline == pytest.approx(10.4)
+    assert sleeps[-1] == pytest.approx(0.04)
+
+
 def test_startup_targets_must_remain_stable_before_confirmation_state() -> None:
     class ChangingPump(FakePump):
         reads: int = 0
@@ -147,7 +206,7 @@ def test_startup_targets_must_remain_stable_before_confirmation_state() -> None:
             confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
             margin_stability_seconds=0.01,
             pressure_buildup_timeout_seconds=0.02,
-            polling_interval_seconds=0.001,
+            control_interval_seconds=0.001,
         )
 
     assert injection.commands[-1] == "STOP"
@@ -273,7 +332,7 @@ def test_injection_starts_after_margin_before_jacket_reaches_full_target() -> No
             injection_target_flow_ml_per_hour=60.0,
             confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
             pressure_buildup_timeout_seconds=0.001,
-            polling_interval_seconds=0.001,
+            control_interval_seconds=0.001,
         )
 
     assert "RUN" in injection.commands
@@ -326,7 +385,7 @@ def test_measurement_start_pressure_timeout_never_runs_injection() -> None:
             injection_target_flow_ml_per_hour=60.0,
             confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
             pressure_buildup_timeout_seconds=0.001,
-            polling_interval_seconds=0.001,
+            control_interval_seconds=0.001,
         )
 
     assert jacket.commands == ["REMOTE", "FLOW=60.0", "RUN", "STOP"]
@@ -345,7 +404,7 @@ def test_measurement_start_waits_for_injection_start_pressure() -> None:
             injection_target_flow_ml_per_hour=60.0,
             confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
             pressure_buildup_timeout_seconds=0.001,
-            polling_interval_seconds=0.001,
+            control_interval_seconds=0.001,
         )
 
     assert jacket.commands[-1] == "STOP"
@@ -355,7 +414,9 @@ def test_measurement_start_waits_for_injection_start_pressure() -> None:
 
 
 def test_measurement_start_rechecks_margin_immediately_before_injection_run() -> None:
-    control, jacket, injection = service()
+    # The automatic preparation sequence owns this gate even when the service's
+    # optional manual RUN margin policy is disabled.
+    control, jacket, injection = service(enforce_injection_margin=False)
     checks = 0
 
     def safety_check() -> tuple[str, ...]:
@@ -378,6 +439,38 @@ def test_measurement_start_rechecks_margin_immediately_before_injection_run() ->
     assert "RUN" not in injection.commands
     assert jacket.commands[-1] == "STOP"
     assert injection.commands[-1] == "STOP"
+
+
+def test_jacket_reaches_twenty_bar_margin_before_any_injection_setup() -> None:
+    control, jacket, injection = service(
+        jacket_pressure=100.0,
+        injection_pressure=100.0,
+    )
+    observed_injection_commands: list[tuple[float, tuple[str, ...]]] = []
+
+    def build_jacket_margin() -> tuple[str, ...]:
+        observed_injection_commands.append(
+            (jacket.pressure - injection.pressure, tuple(injection.commands))
+        )
+        jacket.pressure = min(120.0, jacket.pressure + 5.0)
+        return ()
+
+    control.start_measurement_pumps(
+        jacket_target_pressure_bar=120.0,
+        jacket_buildup_flow_ml_per_hour=60.0,
+        injection_start_pressure_bar=100.0,
+        injection_target_flow_ml_per_hour=10.0,
+        confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+        startup_safety_check=build_jacket_margin,
+        control_interval_seconds=0.001,
+    )
+
+    assert all(
+        commands == ()
+        for margin, commands in observed_injection_commands
+        if margin < 20.0
+    )
+    assert injection.commands[:3] == ["REMOTE", "FLOW=10.0", "RUN"]
 
 
 def test_margin_may_fall_after_injection_run_while_jacket_holds_fixed_target() -> None:

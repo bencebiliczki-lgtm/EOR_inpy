@@ -246,16 +246,7 @@ class PumpControlService:
         if not state.remote or not state.configured or state.running:
             raise RuntimeError("pump must be configured and stopped in REMOTE mode")
         if role is PumpRole.INJECTION and self._enforce_injection_margin:
-            statuses = self.statuses()
-            margin = (
-                statuses[PumpRole.JACKET].pressure_bar
-                - statuses[PumpRole.INJECTION].pressure_bar
-            )
-            if margin < self._minimum_margin:
-                raise PermissionError(
-                    f"jacket pressure margin is {margin:.3f} bar; "
-                    f"at least {self._minimum_margin:.3f} bar is required"
-                )
+            self._require_injection_start_margin()
         self._pumps[role].run()
         self._states[role] = PumpPreparationState(
             remote=True,
@@ -278,7 +269,8 @@ class PumpControlService:
         confirmation: str,
         startup_safety_check: Callable[[], tuple[str, ...]] | None = None,
         pressure_buildup_timeout_seconds: float = 120.0,
-        polling_interval_seconds: float = 0.25,
+        control_interval_seconds: float = 0.2,
+        control_watchdog_tolerance_seconds: float = 0.05,
         margin_stability_seconds: float = 0.0,
     ) -> None:
         """Use the startup margin once, then hold the fixed jacket target."""
@@ -291,10 +283,15 @@ class PumpControlService:
             injection_start_pressure_bar,
             injection_target_flow_ml_per_hour,
             pressure_buildup_timeout_seconds,
-            polling_interval_seconds,
+            control_interval_seconds,
         )
         if not all(isfinite(value) and value > 0.0 for value in values):
             raise ValueError("measurement pump targets and timings must be positive and finite")
+        if (
+            not isfinite(control_watchdog_tolerance_seconds)
+            or control_watchdog_tolerance_seconds < 0.0
+        ):
+            raise ValueError("control watchdog tolerance must be nonnegative and finite")
         if not isfinite(margin_stability_seconds) or margin_stability_seconds < 0.0:
             raise ValueError("margin stability time must be nonnegative and finite")
         limits = (jacket_pressure_limit_bar, injection_pressure_limit_bar)
@@ -349,8 +346,10 @@ class PumpControlService:
             self.run(PumpRole.JACKET, self.RUN_JACKET_CONFIRMATION)
 
             deadline = monotonic() + pressure_buildup_timeout_seconds
+            next_control = monotonic()
             margin_stable_since: float | None = None
             while True:
+                cycle_started = monotonic()
                 require_application_safe()
                 statuses = self.statuses()
                 jacket_pressure = statuses[PumpRole.JACKET].pressure_bar
@@ -361,6 +360,11 @@ class PumpControlService:
                     if margin_stable_since is None:
                         margin_stable_since = now
                     if now - margin_stable_since >= margin_stability_seconds:
+                        self._require_control_deadline(
+                            cycle_started,
+                            control_interval_seconds,
+                            control_watchdog_tolerance_seconds,
+                        )
                         break
                 else:
                     margin_stable_since = None
@@ -370,8 +374,17 @@ class PumpControlService:
                         f"at least {self._minimum_margin:.3f} bar must be stable "
                         f"for {margin_stability_seconds:.2f} s"
                     )
-                sleep(polling_interval_seconds)
+                next_control = self._wait_for_control_deadline(
+                    next_control,
+                    control_interval_seconds,
+                    cycle_started,
+                    control_watchdog_tolerance_seconds,
+                )
 
+            # The first gate controls the complete BES preparation sequence.
+            # Re-read the shared cache after the stability window: BES must not
+            # even be configured if the jacket margin has fallen back.
+            self._require_injection_start_margin()
             self.enter_remote(PumpRole.INJECTION)
             if injection_pressure_limit_bar is not None:
                 self._pumps[PumpRole.INJECTION].set_pressure_limit(
@@ -388,12 +401,19 @@ class PumpControlService:
                 injection_target_flow_ml_per_hour,
             )
             require_application_safe()
+            # Configuration transactions take time. Enforce the physical start
+            # gate once more immediately before the BES RUN command, regardless
+            # of the manual-control margin policy configured on this service.
+            self._require_injection_start_margin()
             self.run(PumpRole.INJECTION, self.RUN_INJECTION_CONFIRMATION)
 
             injection_deadline = monotonic() + pressure_buildup_timeout_seconds
+            next_control = monotonic()
             jacket_holding = False
+            injection_stopped_at_target = False
             targets_stable_since: float | None = None
             while True:
+                cycle_started = monotonic()
                 require_application_safe()
                 statuses = self.statuses()
                 jacket_pressure = statuses[PumpRole.JACKET].pressure_bar
@@ -415,9 +435,20 @@ class PumpControlService:
                     jacket_pressure >= jacket_target_pressure_bar
                     and injection_pressure >= injection_start_pressure_bar
                 ):
+                    if not injection_stopped_at_target:
+                        # Stop buildup flow on the first cached sample at/above
+                        # target. Stability is observed with the BES pump stopped
+                        # so the confirmation window cannot create overshoot.
+                        self.stop(PumpRole.INJECTION)
+                        injection_stopped_at_target = True
                     if targets_stable_since is None:
                         targets_stable_since = now
                     if now - targets_stable_since >= margin_stability_seconds:
+                        self._require_control_deadline(
+                            cycle_started,
+                            control_interval_seconds,
+                            control_watchdog_tolerance_seconds,
+                        )
                         break
                 else:
                     targets_stable_since = None
@@ -429,14 +460,16 @@ class PumpControlService:
                         f"{injection_pressure:.3f}/"
                         f"{injection_start_pressure_bar:.3f} bar"
                     )
-                sleep(polling_interval_seconds)
+                next_control = self._wait_for_control_deadline(
+                    next_control,
+                    control_interval_seconds,
+                    cycle_started,
+                    control_watchdog_tolerance_seconds,
+                )
 
             require_application_safe()
-            # Do not keep injecting startup flow while operator confirmation is
-            # pending.  The jacket pump retains its configured pressure hold;
-            # the BES pump is deliberately stopped until the independently
-            # configured measurement flow is verified and RUN is re-issued.
-            self.stop(PumpRole.INJECTION)
+            # The jacket pump retains its configured pressure hold; the BES pump
+            # remains stopped until measurement start applies and verifies flow.
         except Exception as error:
             stop_errors = self.stop_all()
             if stop_errors:
@@ -444,6 +477,53 @@ class PumpControlService:
                     f"{error}; pump startup rollback errors: {'; '.join(stop_errors)}"
                 ) from error
             raise
+
+    @staticmethod
+    def _wait_for_control_deadline(
+        previous_deadline: float,
+        interval_seconds: float,
+        cycle_started: float,
+        watchdog_tolerance_seconds: float,
+    ) -> float:
+        """Wait on an absolute cadence and skip slots that are already missed."""
+        PumpControlService._require_control_deadline(
+            cycle_started,
+            interval_seconds,
+            watchdog_tolerance_seconds,
+        )
+        next_deadline = previous_deadline + interval_seconds
+        now = monotonic()
+        if next_deadline <= now:
+            missed = int((now - next_deadline) // interval_seconds) + 1
+            next_deadline += missed * interval_seconds
+        sleep(max(0.0, next_deadline - monotonic()))
+        return next_deadline
+
+    @staticmethod
+    def _require_control_deadline(
+        cycle_started: float,
+        interval_seconds: float,
+        watchdog_tolerance_seconds: float,
+    ) -> None:
+        elapsed = monotonic() - cycle_started
+        if elapsed > interval_seconds + watchdog_tolerance_seconds:
+            raise TimeoutError(
+                "control cycle deadline missed during pump preparation: "
+                f"{elapsed:.3f} seconds"
+            )
+
+    def _require_injection_start_margin(self) -> float:
+        statuses = self.statuses()
+        margin = (
+            statuses[PumpRole.JACKET].pressure_bar
+            - statuses[PumpRole.INJECTION].pressure_bar
+        )
+        if margin < self._minimum_margin:
+            raise PermissionError(
+                f"jacket pressure margin is {margin:.3f} bar; "
+                f"at least {self._minimum_margin:.3f} bar is required"
+            )
+        return margin
 
     def apply_measurement_flow(
         self,

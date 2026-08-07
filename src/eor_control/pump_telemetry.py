@@ -48,8 +48,8 @@ class PollablePump(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class PumpPollingIntervals:
-    pressure_seconds: float = 1.0
-    slow_telemetry_seconds: float = 1.0
+    pressure_seconds: float = 0.5
+    slow_telemetry_seconds: float = 0.5
     pressure_stale_seconds: float = 6.0
     slow_telemetry_stale_seconds: float = 3.0
     startup_timeout_seconds: float = 3.0
@@ -268,36 +268,24 @@ class PollingPump:
         )
 
     def enter_remote(self) -> None:
-        self._execute(self._pump.enter_remote, refresh_pressure=True)
+        self._execute(self._pump.enter_remote)
         with self._condition:
             self._stop_latched = False
 
     def set_constant_flow(self, flow_ml_per_hour: float) -> None:
-        self._execute(
-            lambda: self._pump.set_constant_flow(flow_ml_per_hour),
-            refresh_pressure=True,
-        )
+        self._execute(lambda: self._pump.set_constant_flow(flow_ml_per_hour))
 
     def read_configured_flow_ml_per_hour(self) -> float:
-        return self._execute(
-            self._pump.read_configured_flow_ml_per_hour,
-            refresh_pressure=True,
-        )
+        return self._execute(self._pump.read_configured_flow_ml_per_hour)
 
     def set_constant_pressure(self, pressure_bar: float) -> None:
-        self._execute(
-            lambda: self._pump.set_constant_pressure(pressure_bar),
-            refresh_pressure=True,
-        )
+        self._execute(lambda: self._pump.set_constant_pressure(pressure_bar))
 
     def set_pressure_limit(self, pressure_bar: float) -> None:
-        self._execute(
-            lambda: self._pump.set_pressure_limit(pressure_bar),
-            refresh_pressure=True,
-        )
+        self._execute(lambda: self._pump.set_pressure_limit(pressure_bar))
 
     def run(self) -> None:
-        self._execute(self._pump.run, refresh_pressure=True)
+        self._execute(self._pump.run)
         with self._condition:
             self._stop_latched = False
 
@@ -311,7 +299,6 @@ class PollingPump:
         self._execute(
             self._pump.request_stop,
             require_connected=False,
-            refresh_pressure=False,
         )
 
     def acknowledge_stop_latch(self) -> None:
@@ -319,10 +306,10 @@ class PollingPump:
             self._stop_latched = False
 
     def clear(self) -> None:
-        self._execute(self._pump.clear, refresh_pressure=True)
+        self._execute(self._pump.clear)
 
     def return_local(self) -> None:
-        self._execute(self._pump.return_local, refresh_pressure=False)
+        self._execute(self._pump.return_local)
 
     def disconnect(self) -> None:
         with self._condition:
@@ -345,7 +332,6 @@ class PollingPump:
         operation: Callable[[], T],
         *,
         require_connected: bool = True,
-        refresh_pressure: bool = False,
     ) -> T:
         if require_connected:
             with self._condition:
@@ -356,15 +342,7 @@ class PollingPump:
             self._condition.notify_all()
         try:
             with self._command_lock:
-                result = operation()
-                pressure = (
-                    self._pump.read_pressure_bar()
-                    if refresh_pressure
-                    else None
-                )
-            if pressure is not None:
-                self._update("pressure", pressure)
-            return result
+                return operation()
         finally:
             with self._condition:
                 self._pending_commands -= 1
@@ -386,11 +364,12 @@ class PollingPump:
                 )
                 self._condition.notify_all()
 
-            next_pressure = monotonic() + self._intervals.pressure_seconds
+            schedule_origin = monotonic()
+            next_pressure = schedule_origin + self._intervals.pressure_seconds
             slow_step = self._intervals.slow_telemetry_seconds / 3.0
-            next_flow = monotonic()
-            next_volume = monotonic() + slow_step
-            next_status = monotonic() + self._intervals.slow_telemetry_seconds
+            next_flow = schedule_origin
+            next_volume = schedule_origin + slow_step
+            next_status = schedule_origin + (2.0 * slow_step)
             while not self._stop_event.is_set():
                 deadlines = {
                     "pressure": next_pressure,
@@ -432,60 +411,36 @@ class PollingPump:
                             field,
                             self._read("PRESS", self._pump.read_pressure_bar),
                         )
-                        next_pressure = monotonic() + self._intervals.pressure_seconds
                     elif field == "flow":
                         self._update(
                             field,
                             self._read("FLOW", self._pump.read_flow_ml_per_hour),
-                        )
-                        next_flow = (
-                            monotonic() + self._intervals.slow_telemetry_seconds
                         )
                     elif field == "volume":
                         self._update(
                             field,
                             self._read("VOLA", self._pump.read_remaining_volume_ml),
                         )
-                        next_volume = (
-                            monotonic() + self._intervals.slow_telemetry_seconds
-                        )
                     else:
                         self._read("STATUS", self._pump.read_operating_status)
                         self._update(field, None)
                         log_health = True
-                        next_status = (
-                            monotonic() + self._intervals.slow_telemetry_seconds
-                        )
                 except Exception as field_error:
                     self._record_field_error(field, field_error)
-                    retry_at = monotonic() + (
-                        self._intervals.pressure_seconds
-                        if field == "pressure"
-                        else self._intervals.slow_telemetry_seconds
+                finally:
+                    next_due = self._advance_polling_deadline(
+                        due,
+                        interval,
+                        monotonic(),
                     )
                     if field == "pressure":
-                        next_pressure = retry_at
+                        next_pressure = next_due
                     elif field == "flow":
-                        next_flow = retry_at
+                        next_flow = next_due
                     elif field == "volume":
-                        next_volume = retry_at
+                        next_volume = next_due
                     else:
-                        next_status = retry_at
-                finally:
-                    if field != "pressure" and not self._stop_event.is_set():
-                        # A slow FLOW/VOLA/STATUS transaction owns the same serial
-                        # line as PRESS. Refresh pressure immediately afterwards so
-                        # its age cannot accumulate across slow-field polls.
-                        try:
-                            self._update(
-                                "pressure",
-                                self._read("PRESS", self._pump.read_pressure_bar),
-                            )
-                        except Exception as pressure_error:
-                            self._record_field_error("pressure", pressure_error)
-                        next_pressure = (
-                            monotonic() + self._intervals.pressure_seconds
-                        )
+                        next_status = next_due
                     if log_health:
                         self._log_telemetry_health()
         except Exception as error:
@@ -499,6 +454,19 @@ class PollingPump:
                     "TELEMETRY_CONNECTION_LOST",
                     f"FAILED: {type(error).__name__}: {error}",
                 )
+
+    @staticmethod
+    def _advance_polling_deadline(
+        previous_deadline: float,
+        interval: float,
+        now: float,
+    ) -> float:
+        """Keep the configured cadence without accumulating transaction drift."""
+        next_deadline = previous_deadline + interval
+        if next_deadline <= now:
+            missed_intervals = int((now - next_deadline) // interval) + 1
+            next_deadline += missed_intervals * interval
+        return next_deadline
 
     def _read(self, command: str, operation: Callable[[], T]) -> T:
         # Operator and safety commands have priority over the next scheduled

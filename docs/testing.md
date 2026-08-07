@@ -206,12 +206,16 @@ köpenycélnál a `STOP → CONST PRESS → RUN` sorrendet, továbbá mindkét d
 valamint hogy az `1000 ml/h` kezelői célérték `FLOW=1000` parancsként jut el a
 pumpához. Ellenőrzi továbbá a pontos indítási
 megerősítést, a két kezdőnyomás és a tervezett nyomástöbblet kötelező bevitelét,
-a besajtoló kezdőnyomásának kivárását, valamint azt, hogy timeout vagy indulási
+a besajtoló kezdőnyomásának kivárását, a cél első elérésekor kiadott azonnali
+STOP-ot, valamint azt, hogy timeout vagy indulási
 biztonsági hiba esetén egyik pumpa sem marad RUN állapotban.
 Külön regresszió igazolja, hogy a besajtoló sikeres `RUN` parancsa után a
 nyomáskülönbség 20 bar alá esése nem állítja le a pumpákat: a köpeny a megadott
 fix `CONST PRESS` célon marad, a normál és szüneteltetett mérési safety pedig nem
 alkalmazza újra az indítási marginfeltételt.
+Dinamikus nyomásfelfutási regresszió ellenőrzi, hogy 20 bar alatti KÖP–BES
+különbségnél a BES még `REMOTE` vagy `FLOW` parancsot sem kap, valamint hogy
+a konfigurálás közben visszaeső margin a BES `RUN` előtt leállítja az indítást.
 A részleges kapcsolati tesztek igazolják, hogy az egyik pumpa vagy NI-bemenet hibája
 mellett a többi eszköz sikeres státusza megmarad, a kapcsolódás és REMOTE módba
 lépés egy műveletként fut, REMOTE-hibánál pedig a port bezáródik. Bezáráskor minden
@@ -229,9 +233,10 @@ Külön regresszió rögzíti, hogy a nyomás `STALE` határa legalább három
 pollingperiódust és a soros timeout/próbálkozási keretet lefedi. A DASNET-teszt
 ellenőrzi, hogy a töredékes válaszolvasás egy próbálkozáson belül nem nyit több
 teljes timeoutablakot, a pumpatelemetria-regresszió pedig valós blokkolási idővel
-igazolja, hogy egymást követő lassú mezők nem teszik STALE-lé a friss nyomást.
-Külön teszt ellenőrzi, hogy a sikeres REMOTE, konfigurációs és RUN parancsok
-mindegyike azonnali nyomáscache-frissítést eredményez.
+igazolja, hogy az abszolút pollinghatáridő nem halmoz tranzakciós driftet, és
+a lassú mezők után nem keletkezik konfigurálatlan extra nyomáslekérdezés.
+Külön teszt ellenőrzi, hogy a REMOTE, konfigurációs és RUN parancsok nem
+adnak ki a konfigurált pollingütemen kívüli rejtett nyomáslekérdezést.
 Külön telemetriateszt igazolja, hogy FLOW/VOLA timeout mellett a nyomáspolling
 tovább fut, a nyomás minősége `GOOD` marad, míg a kapcsolat `DEGRADED` állapotot
 és mezőszintű hibát ad.
@@ -267,12 +272,18 @@ Az előkészítési dashboard regressziója `PREPARING` állapotban ellenőrzi a
 pumpanyomás, a vonali és differenciálnyomás, valamint a nyomáskülönbség élő
 frissítését és magyar, legfeljebb három tizedesjegyes megjelenítését,
 miközben a mérési grafikon pufferében még nem keletkezik pont.
+Külön UI-regresszió rögzíti, hogy hardvermódban a **Mérés indítása** nem
+nyit előkészítési adatablakot: befejezett **Előkészítés** nélkül tiltott,
+utána pedig közvetlenül a runtime indítási útját hívja.
 
 Az ISCO regressziós teszt ellenőrzi, hogy az `ML/HR` beállítás után az egység
 nélküli `FLOW`/`SETFLOW` visszaolvasás nem kap hibás hatvanszoros szorzót.
 
 A Developer vezérlésiciklus-beállítás tesztje ellenőrzi a ciklusidő és a
 watchdog-tűrés tartós mentését, valamint a számított végrehajtási határidőt.
+Az előkészítési regresszió igazolja, hogy ugyanezek az értékek jutnak a
+pumpafelügyeleti ciklusba, az ütemezés nem halmoz driftet, a watchdog-túllépés
+pedig mindkét pumpát leállítja.
 
 ## Hardveres smoke test
 

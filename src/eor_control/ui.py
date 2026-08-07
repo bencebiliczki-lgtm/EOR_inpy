@@ -5151,7 +5151,7 @@ class CalibrationSettingsDialog(ResizableDialog):
         self.max_injection = self._value_spinbox(350.0, 0.1, 1000.0, " bar")
         self.max_line = self._value_spinbox(400.0, 0.1, 1000.0, " bar")
         self.max_delta = self._value_spinbox(50.0, 0.1, 1000.0, " bar")
-        self.minimum_margin = self._value_spinbox(20.0, 0.1, 1000.0, " bar")
+        self.minimum_margin = self._value_spinbox(20.0, 20.0, 1000.0, " bar")
         self.max_overshoot = self._value_spinbox(5.0, 0.1, 1000.0, " bar")
         for label, field in (
             ("Köpenypumpa maximális nyomása", self.max_jacket),
@@ -6026,6 +6026,8 @@ class DashboardWindow(QMainWindow):
             and self._devices.status.state is ApplicationState.IDLE
         ):
             self._devices.connect()
+        if self._run_mode is RunMode.SIMULATION and self._pump_control is None:
+            self._pump_control = self._make_simulation_pump_control()
         self._refresh_state()
 
     def _build_tray_menu(self) -> None:
@@ -6229,6 +6231,7 @@ class DashboardWindow(QMainWindow):
         self._connect_button.hide()
         self._disconnect_button.hide()
         self._start_button = QPushButton("Mérés indítása")
+        self._prepare_button = QPushButton("Előkészítés")
         self._pause_button = QPushButton("Mérés szüneteltetése")
         self._stop_button = QPushButton("Mérés leállítása")
         self._emergency_button = QPushButton("VÉSZLEÁLLÍTÁS")
@@ -6238,11 +6241,13 @@ class DashboardWindow(QMainWindow):
         self._connect_button.clicked.connect(self._connect_devices)
         self._disconnect_button.clicked.connect(self._disconnect_devices)
         self._start_button.clicked.connect(self._start)
+        self._prepare_button.clicked.connect(self._prepare)
         self._pause_button.clicked.connect(self._pause_measurement)
         self._stop_button.clicked.connect(self._stop)
         self._emergency_button.clicked.connect(self._emergency_stop)
         self._primary_control_buttons = (
             self._start_button,
+            self._prepare_button,
             self._pause_button,
             self._stop_button,
             self._emergency_button,
@@ -7647,7 +7652,7 @@ class DashboardWindow(QMainWindow):
     def _refresh_active_hardware_status(self) -> None:
         if (
             self._run_mode is not RunMode.HARDWARE
-            or self._devices.status.state is not ApplicationState.READY
+            or not self._hardware_status_monitoring_allowed()
             or self._runtime.running
             or self._preflight_active
             or self._hardware_status_active
@@ -7690,6 +7695,13 @@ class DashboardWindow(QMainWindow):
             daemon=True,
         ).start()
 
+    def _hardware_status_monitoring_allowed(self) -> bool:
+        status = self._devices.status
+        return status.state is ApplicationState.READY or (
+            status.state is ApplicationState.RUNNING
+            and status.measurement is MeasurementState.WAITING_CONFIRMATION
+        )
+
     @staticmethod
     def _pump_telemetry_summary(pump: object) -> tuple[str, bool | None]:
         reader = getattr(pump, "read_telemetry", None)
@@ -7728,7 +7740,7 @@ class DashboardWindow(QMainWindow):
         if (
             result.generation != self._hardware_status_generation
             or self._run_mode is not RunMode.HARDWARE
-            or self._devices.status.state is not ApplicationState.READY
+            or not self._hardware_status_monitoring_allowed()
         ):
             return
         self._last_hardware_status_record = result.record
@@ -7760,7 +7772,7 @@ class DashboardWindow(QMainWindow):
         if (
             generation != self._hardware_status_generation
             or self._run_mode is not RunMode.HARDWARE
-            or self._devices.status.state is not ApplicationState.READY
+            or not self._hardware_status_monitoring_allowed()
         ):
             return
         self._handle_critical_hardware_fault(
@@ -8864,7 +8876,7 @@ class DashboardWindow(QMainWindow):
                     else self._max_injection.value()
                 ),
             ).reasons,
-            enforce_injection_margin=False,
+            enforce_injection_margin=True,
         )
         pump_control.authorize(PumpControlService.AUTHORIZATION)
         try:
@@ -9001,7 +9013,7 @@ class DashboardWindow(QMainWindow):
         self._simulation_injection = injection
         self._simulation_daq = daq
         self._devices.connect()
-        self._pump_control = None
+        self._pump_control = self._make_simulation_pump_control()
         self._active_hardware_configuration = None
         self._hardware_connection_result = None
         self._hardware_daq = None
@@ -9020,6 +9032,22 @@ class DashboardWindow(QMainWindow):
         self._refresh_mode_label()
         self._set_all_connections("LEVÁLASZTVA", ok=None)
         self._refresh_state()
+
+    def _make_simulation_pump_control(self) -> PumpControlService:
+        jacket = self._simulation_jacket
+        injection = self._simulation_injection
+        if jacket is None or injection is None:
+            raise RuntimeError("a szimulált pumpák nem érhetők el")
+        service = PumpControlService(
+            jacket_pump=jacket,
+            injection_pump=injection,
+            minimum_jacket_margin_bar=self._minimum_margin.value(),
+            diagnostics=self._diagnostics,
+            enforce_injection_margin=True,
+        )
+        service.authorize(PumpControlService.AUTHORIZATION)
+        service.observe_connected(*tuple(PumpRole))
+        return service
 
     def _set_line_pressure_source_available(self, available: bool) -> None:
         line_index = self._source.findData(PressureSource.LINE_SENSOR)
@@ -9851,6 +9879,23 @@ class DashboardWindow(QMainWindow):
                 self._handle_runtime_fault(str(error))
 
     def _start(self) -> None:
+        if (
+            self._devices.status.state is not ApplicationState.RUNNING
+            or self._devices.status.measurement
+            is not MeasurementState.WAITING_CONFIRMATION
+            or self._pending_measurement_pump_plan is None
+        ):
+            self._show_error(
+                "A mérés indítása előtt futtasd le az Előkészítést."
+            )
+            self._refresh_state()
+            return
+        self._start_prepared_measurement()
+
+    def _prepare(self) -> None:
+        self._start_measurement_preflight()
+
+    def _start_measurement_preflight(self) -> None:
         if self._stage.currentData() is None:
             self._show_error("A méréshez válassz projektet és mérési szakaszt.")
             return
@@ -9911,7 +9956,7 @@ class DashboardWindow(QMainWindow):
     def _begin_measurement_after_preflight(self) -> None:
         plan: MeasurementPumpPlan | None = None
         confirmation = ""
-        if self._run_mode is RunMode.HARDWARE:
+        if self._run_mode in (RunMode.HARDWARE, RunMode.SIMULATION):
             dialog = MeasurementPumpStartupDialog(
                 self._default_measurement_pump_plan(),
                 maximum_jacket_pressure_bar=self._max_jacket.value(),
@@ -9928,70 +9973,72 @@ class DashboardWindow(QMainWindow):
             self._pending_measurement_pump_plan = plan
         try:
             runtime_settings = self._runtime_settings()
-            self._devices.start()
+            self._devices.start(start_simulated_devices=False)
             self._devices.set_measurement_state(MeasurementState.PREPARING)
             if plan is None:
-                self._complete_measurement_start(runtime_settings)
-            else:
-                pump_control = self._pump_control
-                if pump_control is None:
-                    raise RuntimeError("a fizikai pumpavezérlés nem érhető el")
-                self._preflight_active = True
-                active_stage = runtime_settings.active_stage
+                raise RuntimeError("az előkészítési pumpaterv nem érhető el")
+            pump_control = self._pump_control
+            if pump_control is None:
+                raise RuntimeError("a pumpavezérlés nem érhető el")
+            self._preflight_active = True
+            active_stage = runtime_settings.active_stage
+            control_interval_seconds = self._runtime.control_interval_seconds
+            control_watchdog_tolerance_seconds = (
+                self._runtime.watchdog_tolerance_seconds
+            )
 
-                def execute() -> None:
-                    def startup_safety_check() -> tuple[str, ...]:
-                        if (
-                            self._devices.status.state
-                            is not ApplicationState.RUNNING
-                        ):
-                            return ("measurement pump startup was cancelled",)
-                        record = self._control_loop.observe_pump_startup_once(
-                            active_stage=active_stage
-                        )
-                        self._runtime_bridge.pump_startup_progress.emit(record)
-                        return record.safety_reasons
+            def execute() -> None:
+                def startup_safety_check() -> tuple[str, ...]:
+                    if self._devices.status.state is not ApplicationState.RUNNING:
+                        return ("measurement pump startup was cancelled",)
+                    record = self._control_loop.observe_pump_startup_once(
+                        active_stage=active_stage
+                    )
+                    self._runtime_bridge.pump_startup_progress.emit(record)
+                    return record.safety_reasons
 
-                    try:
-                        pump_control.start_measurement_pumps(
-                            jacket_target_pressure_bar=(
-                                plan.jacket_target_pressure_bar
-                            ),
-                            jacket_buildup_flow_ml_per_hour=(
-                                plan.jacket_buildup_flow_ml_per_hour
-                            ),
-                            injection_start_pressure_bar=(
-                                plan.injection_start_pressure_bar
-                            ),
-                            injection_target_flow_ml_per_hour=(
-                                plan.injection_startup_flow_ml_per_hour
-                            ),
-                            jacket_pressure_limit_bar=(
-                                plan.jacket_pressure_limit_bar
-                                if plan.jacket_pressure_limit_bar is not None
-                                else self._max_jacket.value()
-                            ),
-                            injection_pressure_limit_bar=(
-                                plan.injection_pressure_limit_bar
-                                if plan.injection_pressure_limit_bar is not None
-                                else self._max_injection.value()
-                            ),
-                            margin_stability_seconds=(
-                                plan.margin_stability_seconds
-                            ),
-                            confirmation=confirmation,
-                            startup_safety_check=startup_safety_check,
-                        )
-                    except Exception as error:
-                        self._runtime_bridge.pump_startup_failed.emit(str(error))
-                    else:
-                        self._runtime_bridge.pump_startup_completed.emit()
+                try:
+                    pump_control.start_measurement_pumps(
+                        jacket_target_pressure_bar=(
+                            plan.jacket_target_pressure_bar
+                        ),
+                        jacket_buildup_flow_ml_per_hour=(
+                            plan.jacket_buildup_flow_ml_per_hour
+                        ),
+                        injection_start_pressure_bar=(
+                            plan.injection_start_pressure_bar
+                        ),
+                        injection_target_flow_ml_per_hour=(
+                            plan.injection_startup_flow_ml_per_hour
+                        ),
+                        jacket_pressure_limit_bar=(
+                            plan.jacket_pressure_limit_bar
+                            if plan.jacket_pressure_limit_bar is not None
+                            else self._max_jacket.value()
+                        ),
+                        injection_pressure_limit_bar=(
+                            plan.injection_pressure_limit_bar
+                            if plan.injection_pressure_limit_bar is not None
+                            else self._max_injection.value()
+                        ),
+                        margin_stability_seconds=plan.margin_stability_seconds,
+                        control_interval_seconds=control_interval_seconds,
+                        control_watchdog_tolerance_seconds=(
+                            control_watchdog_tolerance_seconds
+                        ),
+                        confirmation=confirmation,
+                        startup_safety_check=startup_safety_check,
+                    )
+                except Exception as error:
+                    self._runtime_bridge.pump_startup_failed.emit(str(error))
+                else:
+                    self._runtime_bridge.pump_startup_completed.emit()
 
-                Thread(
-                    target=execute,
-                    name="eor-measurement-pump-startup",
-                    daemon=True,
-                ).start()
+            Thread(
+                target=execute,
+                name="eor-measurement-pump-startup",
+                daemon=True,
+            ).start()
         except Exception as error:
             self._show_error(f"A mérés nem indítható: {error}")
         self._refresh_state()
@@ -10023,7 +10070,6 @@ class DashboardWindow(QMainWindow):
         status = self._devices.status
         if (
             not self._preflight_active
-            or self._run_mode is not RunMode.HARDWARE
             or status.state is not ApplicationState.RUNNING
             or status.measurement is not MeasurementState.PREPARING
         ):
@@ -10045,38 +10091,18 @@ class DashboardWindow(QMainWindow):
             )
             return
         self._devices.set_measurement_state(MeasurementState.WAITING_CONFIRMATION)
-        try:
-            statuses = pump_control.statuses()
-            current_pressure = statuses[PumpRole.INJECTION].pressure_bar
-        except Exception as error:
-            self._measurement_pump_startup_failed(
-                f"a megerősítés előtti nyomáslekérdezés sikertelen: {error}"
-            )
-            return
-        prompt = QMessageBox(self)
-        prompt.setWindowTitle("Kezdőnyomás elérve")
-        prompt.setText(
-            "A kezdőnyomás elérve. Elindítod a mérést?\n"
-            f"Aktuális BES nyomás: {current_pressure:.3f} bar\n"
-            f"Célérték: {plan.injection_start_pressure_bar:.3f} bar"
-        )
-        start_button = prompt.addButton(
-            "Mérés indítása", QMessageBox.ButtonRole.AcceptRole
-        )
-        prompt.addButton(
-            "Előkészítés megszakítása", QMessageBox.ButtonRole.RejectRole
-        )
-        prompt.exec()
-        if prompt.clickedButton() != start_button:
-            self._preflight_active = False
-            try:
-                self._devices.stop()
-            except Exception as error:
-                self._show_error(f"Az előkészítés leállítása sikertelen: {error}")
-            self._pending_measurement_pump_plan = None
+        self._preflight_active = False
+        self._refresh_state()
+
+    def _start_prepared_measurement(self) -> None:
+        plan = self._pending_measurement_pump_plan
+        pump_control = self._pump_control
+        if plan is None or pump_control is None:
+            self._show_error("Az előkészített pumpabeállítás nem érhető el.")
             self._refresh_state()
             return
-        self._preflight_active = False
+        self._preflight_active = True
+        self._refresh_state()
         try:
             readiness = self._control_loop.observe_once(
                 active_stage=self._stage.currentText()
@@ -10112,6 +10138,7 @@ class DashboardWindow(QMainWindow):
             self._devices.emergency_stop(f"runtime startup failed: {error}")
             self._show_error(f"A mérés nem indítható: {error}")
         self._pending_measurement_pump_plan = None
+        self._preflight_active = False
         self._refresh_state()
 
     def _apply_running_measurement_flow(self) -> None:
@@ -10614,6 +10641,8 @@ class DashboardWindow(QMainWindow):
             )
             return
         self._start_pending_stage_exports()
+        self._pending_measurement_pump_plan = None
+        self._preflight_active = False
         self._reset_measurement_dashboard()
         self._refresh_state()
 
@@ -11221,9 +11250,16 @@ class DashboardWindow(QMainWindow):
         self._set_connection_status("valve", "LEVÁLASZTVA", None)
 
     def _refresh_state(self) -> None:
-        state = self._devices.status.state
+        device_status = self._devices.status
+        state = device_status.state
         self._state_label.setText(
-            "SZÜNETEL" if self._runtime.paused else state.value.upper()
+            "SZÜNETEL"
+            if self._runtime.paused
+            else "ELŐKÉSZÍTÉS"
+            if device_status.measurement is MeasurementState.PREPARING
+            else "ELŐKÉSZÍTVE"
+            if device_status.measurement is MeasurementState.WAITING_CONFIRMATION
+            else state.value.upper()
         )
         self._connect_button.setEnabled(False)
         self._disconnect_button.setEnabled(False)
@@ -11242,14 +11278,23 @@ class DashboardWindow(QMainWindow):
                 and self._devices.status.hardware_authorized
             )
         )
-        can_start = (
-            state is ApplicationState.READY
-            and not self._preflight_active
+        common_start_conditions = (
+            not self._preflight_active
             and project_selected
             and no_alarm
             and connections_ready
         )
-        self._start_button.setEnabled(can_start)
+        preparation_ready = (
+            state is ApplicationState.READY and common_start_conditions
+        )
+        prepared_start = (
+            state is ApplicationState.RUNNING
+            and self._devices.status.measurement
+            is MeasurementState.WAITING_CONFIRMATION
+            and self._pending_measurement_pump_plan is not None
+            and common_start_conditions
+        )
+        self._start_button.setEnabled(prepared_start)
         if not project_selected:
             self._start_button.setToolTip(
                 "Válasszon aktív projektet és mérési szakaszt."
@@ -11277,6 +11322,11 @@ class DashboardWindow(QMainWindow):
             self._start_button.setToolTip(
                 "Futtassa le sikeresen minden konfigurált eszköz kapcsolati tesztjét."
             )
+        elif not prepared_start:
+            self._start_button.setToolTip(
+                "Előbb futtasd le az Előkészítést; utána ez a gomb "
+                "azonnal elindítja a mérést."
+            )
         elif state is not ApplicationState.READY:
             self._start_button.setToolTip(
                 "Aktiválja a hardvermódot; ez egyben létrehozza az élő "
@@ -11287,6 +11337,17 @@ class DashboardWindow(QMainWindow):
         else:
             self._start_button.setToolTip(
                 "Tételes biztonsági előellenőrzés után indítja a mérést."
+            )
+        self._prepare_button.setEnabled(preparation_ready)
+        if self._preflight_active:
+            self._prepare_button.setToolTip("Az előkészítés folyamatban van.")
+        elif state is ApplicationState.RUNNING:
+            self._prepare_button.setToolTip(
+                "Az előkészítés elkészült vagy a mérés már fut."
+            )
+        else:
+            self._prepare_button.setToolTip(
+                "Bekéri az előkészítési adatokat és felkészíti a pumpákat."
             )
         self._pause_button.setEnabled(
             state is ApplicationState.RUNNING

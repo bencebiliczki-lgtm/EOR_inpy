@@ -74,10 +74,12 @@ szelepberagadás is injektálható a normál biztonsági útvonal ellenőrzésé
 
 Első indításkor nyisd meg a `Projekt` → `Projektkezelő…` ablakot, hozz létre egy
 projektet és legalább egy mérési szakaszt, aktiváld a hardvermódot, majd kattints
-a `Mérés indítása` gombra. Indítás előtt kötelező, tételes ellenőrzőablak jelenik
+az `Előkészítés` gombra. Ekkor kötelező, tételes ellenőrzőablak jelenik
 meg a projekt, eszközkapcsolatok, szenzoradatok, kalibráció, biztonsági reteszek,
 a konfigurált minimális köpenynyomás-többlet és tárhely állapotával. Hiba tiltja az
-indítást; figyelmeztetés külön kezelői jóváhagyást igényel. A projekt és szakaszok a
+indítást; figyelmeztetés külön kezelői jóváhagyást igényel. A pumpák
+előkészítése után a mérés a `Mérés indítása` gomb megnyomására indul.
+A projekt és szakaszok a
 felhasználó `Dokumentumok\EOR\projects.sqlite3` adatbázisában maradnak meg, a
 nyers projektfájlok pedig a `Dokumentumok\EOR\projects` könyvtárba kerülnek. A PID
 erősítések, hatásirány és
@@ -292,5 +294,7 @@ kompatibilitását az OptiPlex célgépen indított próba igazolja.
 ## Dokumentáció
 
 A fejlesztés előtt olvasd el az `AGENTS.md` és a `docs/` fájlokat. A még nem tisztázott kérdések a `docs/open-questions.md` dokumentumban találhatók.
+A pumpák kezelői folyamatát, állapotgépét, pollingját, parancssorrendjét
+és biztonsági leállítását a `docs/pump-control.md` foglalja össze.
 A verziózott szoftveres kiinduló profil, migráció, onedir build és helyszíni
 ellenőrzőlista a `docs/stable-profile.md` dokumentumban található.
