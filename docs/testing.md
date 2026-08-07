@@ -275,6 +275,8 @@ miközben a mérési grafikon pufferében még nem keletkezik pont.
 Külön UI-regresszió rögzíti, hogy hardvermódban a **Mérés indítása** nem
 nyit előkészítési adatablakot: befejezett **Előkészítés** nélkül tiltott,
 utána pedig közvetlenül a runtime indítási útját hívja.
+Külön regresszió tiltja, hogy ez az út pumpa-flow parancsot adjon ki: a
+mérésindítás csak a szelepvezérlést és az adatrögzítést aktiválja.
 
 Az ISCO regressziós teszt ellenőrzi, hogy az `ML/HR` beállítás után az egység
 nélküli `FLOW`/`SETFLOW` visszaolvasás nem kap hibás hatvanszoros szorzót.

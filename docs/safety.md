@@ -125,7 +125,8 @@ hatásiránya `REVERSE`. A korábban tárolt `DIRECT` alapértéket a beállít�
 egyszer `REVERSE` értékre állítja, miközben a névvel mentett PID-profilokat nem
 módosítja. A kalibrációs végpontokat ezzel együtt nem szabad megfordítani.
 
-A 20 baros köpeny–besajtolási különbség csak az indítási felfutás feltétele.
+A konfigurált (alapértelmezetten 20 baros) köpeny–besajtolási különbség
+csak az indítási felfutás feltétele.
 Ettől független, folyamatos interlock, hogy a besajtolónyomás nem lehet magasabb
 a köpenynyomásnál; megsértése `INJECTION_PRESSURE_ABOVE_JACKET` hibakóddal
 reteszelt teljes safe-state-et kér.

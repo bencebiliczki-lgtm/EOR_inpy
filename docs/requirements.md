@@ -161,7 +161,8 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   térfogatáramát, a besajtoló térfogatáramát és a nyomástöbblet stabilitási idejét.
   A program a dokumentált `MAXPRESS` paranccsal állítsa be a két pumpa saját
   határát még a `RUN` előtt. A köpenypumpa induljon elsőként; amikor a legalább
-  20 bar köpeny–besajtoló többlet a beállított ideig stabil, induljon el a
+  Beállításokban megadott köpeny–besajtoló többlet a beállított ideig stabil,
+  induljon el a
   besajtolópumpa is. Ezután mindkét pumpa együtt haladjon a kezdő célértéke felé,
   a köpeny pedig saját célján STOP után váltson állandó nyomástartásra. A
   nyomástöbblet kizárólag a besajtolópumpa `RUN` előtti indítási engedélyfeltétel:
@@ -171,8 +172,13 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   idő alatt nem maradhat rajta előkészítési flow. Az előkészítés befejezése
   után a rendszer várjon. A PID- és adatrögzítési ciklus kizárólag a
   külön **Mérés indítása** gomb megnyomásakor kezdődhet; ez a gomb nem
-  kérheti be újra az előkészítési adatokat.
-  A kezelői felület a minimális indítási többletet nem engedheti 20 bar alá.
+  kérheti be újra az előkészítési adatokat, és nem adhat pumpa-
+  `STOP`, `FLOW`, `PRESS` vagy `RUN` parancsot. Kizárólag a szelepvezérlést
+  és a mért értékek rögzítését indíthatja el.
+  A minimális indítási többlet alapértéke 20 bar, de a Beállításokban
+  bármely pozitív, legalább 0,1 baros értékre módosítható. Az aktuális
+  értéket az előellenőrzésnek és mindkét BES-indítási kapunak ugyanúgy kell
+  használnia.
   A BES konfigurálása előtt és közvetlenül a BES `RUN` előtt ismét ellenőrizni
   kell a friss cache-elt különbséget; visszaesésnél a BES nem indulhat el.
   Szimulációban ugyanez az állapotgép és sorrend fusson a szimulált
@@ -335,8 +341,8 @@ Mérésindítási konfiguráció
 
 - `pump_startup/injection_startup_flow_ml_per_hour`: BES előkészítési
   térfogatáram.
-- `pump_startup/injection_measurement_flow_ml_per_hour`: BES mérési
-  térfogatáram.
+- `pump_startup/injection_measurement_flow_ml_per_hour`: korábbi
+  kompatibilitási kulcs; a mérésindítás nem alkalmazza.
 - A korábbi `pump_startup/injection_target_flow_ml_per_hour` kulcs csak
   migrációs fallback az előkészítési értékhez. Ha az új mérési kulcs
   hiányzik, az aktív szakasz mentett cél-flow-ja az egyértelmű alapérték.

@@ -91,6 +91,15 @@ class PumpControlService:
         self._enforce_injection_margin = enforce_injection_margin
         self._authorized = False
 
+    @property
+    def minimum_jacket_margin_bar(self) -> float:
+        return self._minimum_margin
+
+    def set_minimum_jacket_margin_bar(self, value: float) -> None:
+        if not isfinite(value) or value <= 0.0:
+            raise ValueError("minimum jacket margin must be positive and finite")
+        self._minimum_margin = value
+
     def authorize(self, confirmation: str) -> None:
         if confirmation != self.AUTHORIZATION:
             raise PermissionError("pump control authorization did not match")
@@ -469,7 +478,7 @@ class PumpControlService:
 
             require_application_safe()
             # The jacket pump retains its configured pressure hold; the BES pump
-            # remains stopped until measurement start applies and verifies flow.
+            # remains stopped. Measurement start does not alter either pump.
         except Exception as error:
             stop_errors = self.stop_all()
             if stop_errors:

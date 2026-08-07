@@ -532,6 +532,17 @@ def test_injection_run_uses_configured_margin_below_twenty_bar() -> None:
     assert injection.commands[-1] == "RUN"
 
 
+def test_injection_run_uses_updated_configured_margin() -> None:
+    control, _, injection = service(jacket_pressure=112.0)
+    prepare(control, PumpRole.INJECTION)
+    control.set_minimum_jacket_margin_bar(12.0)
+
+    control.run(PumpRole.INJECTION, PumpControlService.RUN_INJECTION_CONFIRMATION)
+
+    assert control.minimum_jacket_margin_bar == pytest.approx(12.0)
+    assert injection.commands[-1] == "RUN"
+
+
 def test_manual_pump_safety_does_not_require_other_devices_or_cross_pump_margin() -> None:
     jacket = FakePump(0.0, [])
     injection = FakePump(100.0, [])

@@ -5151,7 +5151,7 @@ class CalibrationSettingsDialog(ResizableDialog):
         self.max_injection = self._value_spinbox(350.0, 0.1, 1000.0, " bar")
         self.max_line = self._value_spinbox(400.0, 0.1, 1000.0, " bar")
         self.max_delta = self._value_spinbox(50.0, 0.1, 1000.0, " bar")
-        self.minimum_margin = self._value_spinbox(20.0, 20.0, 1000.0, " bar")
+        self.minimum_margin = self._value_spinbox(20.0, 0.1, 1000.0, " bar")
         self.max_overshoot = self._value_spinbox(5.0, 0.1, 1000.0, " bar")
         for label, field in (
             ("Köpenypumpa maximális nyomása", self.max_jacket),
@@ -5400,7 +5400,7 @@ class MeasurementPumpStartupDialog(ResizableDialog):
     ) -> None:
         super().__init__(parent)
         self._minimum_jacket_margin_bar = minimum_jacket_margin_bar
-        self.setWindowTitle("Mérésindítási pumpabeállítások")
+        self.setWindowTitle("Pumpák előkészítése")
         self.resize(620, 390)
         layout = QVBoxLayout(self)
         explanation = QLabel(
@@ -5409,7 +5409,7 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             "köpenynyomás-többlet a megadott ideig stabil, "
             "a besajtolópumpa is elindul, és a két pumpa együtt halad a "
             "kezdőértékek felé. A köpeny a célján STOP után nyomástartásra vált. "
-            "Ettől kezdve a 20 bar-os különbséget a program nem tartja fenn: "
+            "Ettől kezdve a beállított különbséget a program nem tartja fenn: "
             "a köpenypumpa a megadott fix nyomáscélt tartja. "
             "A két saját pumpahatárt a program RUN előtt a pumpákba írja. A "
             "mérési ciklus csak mindkét kezdőnyomás elérése után indul."
@@ -5452,15 +5452,6 @@ class MeasurementPumpStartupDialog(ResizableDialog):
         self.injection_flow.setSuffix(" ml/h")
         self.injection_flow.setValue(defaults.injection_startup_flow_ml_per_hour)
 
-        self.injection_measurement_flow = QDoubleSpinBox()
-        self.injection_measurement_flow.setObjectName("measurement_injection_flow")
-        self.injection_measurement_flow.setRange(0.0, 600000.0)
-        self.injection_measurement_flow.setDecimals(3)
-        self.injection_measurement_flow.setSuffix(" ml/h")
-        self.injection_measurement_flow.setValue(
-            defaults.effective_measurement_flow_ml_per_hour
-        )
-
         self.jacket_pressure_limit = QDoubleSpinBox()
         self.jacket_pressure_limit.setObjectName("startup_jacket_pressure_limit")
         self.jacket_pressure_limit.setRange(0.01, maximum_jacket_pressure_bar)
@@ -5497,12 +5488,14 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             "Besajtoló elérendő kezdőnyomása", self.injection_start_pressure
         )
         form.addRow("BES előkészítési térfogatáram", self.injection_flow)
-        form.addRow("BES mérési térfogatáram", self.injection_measurement_flow)
         form.addRow("Köpenypumpa saját nyomáshatára", self.jacket_pressure_limit)
         form.addRow(
             "Besajtolópumpa saját nyomáshatára", self.injection_pressure_limit
         )
-        form.addRow("20 bar többlet stabilitási ideje", self.margin_stability)
+        form.addRow(
+            f"{minimum_jacket_margin_bar:.3f} bar többlet stabilitási ideje",
+            self.margin_stability,
+        )
         layout.addLayout(form)
 
         warning = QLabel(
@@ -5530,7 +5523,6 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             self.jacket_buildup_flow,
             self.injection_start_pressure,
             self.injection_flow,
-            self.injection_measurement_flow,
             self.jacket_pressure_limit,
             self.injection_pressure_limit,
             self.margin_stability,
@@ -5544,9 +5536,6 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             jacket_buildup_flow_ml_per_hour=self.jacket_buildup_flow.value(),
             injection_start_pressure_bar=self.injection_start_pressure.value(),
             injection_startup_flow_ml_per_hour=self.injection_flow.value(),
-            injection_measurement_flow_ml_per_hour=(
-                self.injection_measurement_flow.value()
-            ),
             jacket_pressure_limit_bar=self.jacket_pressure_limit.value(),
             injection_pressure_limit_bar=self.injection_pressure_limit.value(),
             margin_stability_seconds=self.margin_stability.value(),
@@ -5578,7 +5567,6 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             and plan.jacket_buildup_flow_ml_per_hour > 0.0
             and plan.injection_start_pressure_bar > 0.0
             and plan.injection_target_flow_ml_per_hour > 0.0
-            and plan.effective_measurement_flow_ml_per_hour > 0.0
             and plan.jacket_pressure_limit_bar is not None
             and plan.jacket_target_pressure_bar <= plan.jacket_pressure_limit_bar
             and plan.injection_pressure_limit_bar is not None
@@ -5636,7 +5624,8 @@ class PreflightDialog(ResizableDialog):
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         self._start_button = buttons.addButton(
-            "Mérés indítása", QDialogButtonBox.ButtonRole.AcceptRole
+            "Tovább az előkészítéshez",
+            QDialogButtonBox.ButtonRole.AcceptRole,
         )
         self._start_button.setEnabled(report.can_start and not report.has_warnings)
         buttons.accepted.connect(self.accept)
@@ -5919,6 +5908,7 @@ class DashboardWindow(QMainWindow):
         self._hardware_status_active = False
         self._hardware_status_generation = 0
         self._preflight_active = False
+        self._shutdown_started = False
         self._critical_hardware_recovery_active = False
         self._overview_dialog: MeasurementOverviewDialog | None = None
         self._active_alarm_text = "Nincs aktív riasztás"
@@ -9783,6 +9773,10 @@ class DashboardWindow(QMainWindow):
                     self._max_line.value(),
                 ),
             )
+            if self._pump_control is not None:
+                self._pump_control.set_minimum_jacket_margin_bar(
+                    self._minimum_margin.value()
+                )
         except ValueError as error:
             self._show_error(str(error))
 
@@ -10087,7 +10081,7 @@ class DashboardWindow(QMainWindow):
         pump_control = self._pump_control
         if plan is None or pump_control is None:
             self._measurement_pump_startup_failed(
-                "a BES mérési flow beállítása nem érhető el"
+                "az előkészített pumpaállapot nem érhető el"
             )
             return
         self._devices.set_measurement_state(MeasurementState.WAITING_CONFIRMATION)
@@ -10096,8 +10090,7 @@ class DashboardWindow(QMainWindow):
 
     def _start_prepared_measurement(self) -> None:
         plan = self._pending_measurement_pump_plan
-        pump_control = self._pump_control
-        if plan is None or pump_control is None:
+        if plan is None or self._pump_control is None:
             self._show_error("Az előkészített pumpabeállítás nem érhető el.")
             self._refresh_state()
             return
@@ -10122,12 +10115,9 @@ class DashboardWindow(QMainWindow):
             # preserves the configured rate/output limits and prevents startup
             # windup while the operator dialog is open.
             self._control_loop.configure_pid(self._pid_parameters())
-            applied = pump_control.apply_measurement_flow(
-                plan.effective_measurement_flow_ml_per_hour
-            )
-            self._applied_measurement_flow_ml_per_hour = applied
-            self._current_measurement_flow.setText(f"{applied:.3f} ml/h")
-            self._new_measurement_flow.setValue(applied)
+            # Measurement start owns only valve control and acquisition. Pump
+            # state is the result of preparation or explicit manual operation;
+            # do not issue STOP/FLOW/RUN here.
             self._complete_measurement_start(self._runtime_settings())
         except Exception as error:
             if self._run_mode is RunMode.HARDWARE:
@@ -10540,11 +10530,7 @@ class DashboardWindow(QMainWindow):
         )
         margin_ok = actual_margin >= required_margin
         margin_status = (
-            PreflightStatus.PASSED
-            if margin_ok
-            else PreflightStatus.WARNING
-            if self._run_mode is RunMode.HARDWARE
-            else PreflightStatus.FAILED
+            PreflightStatus.PASSED if margin_ok else PreflightStatus.WARNING
         )
         add(
             "pressure_margin",
@@ -10555,7 +10541,7 @@ class DashboardWindow(QMainWindow):
             (
                 "A program először csak a köpenypumpát indítja el, és a "
                 "besajtolópumpát a szükséges különbség eléréséig tiltja."
-                if not margin_ok and self._run_mode is RunMode.HARDWARE
+                if not margin_ok
                 else "Növelje biztonságosan a köpenynyomást vagy csökkentse a "
                 "besajtolási nyomást."
                 if not margin_ok
@@ -10708,6 +10694,8 @@ class DashboardWindow(QMainWindow):
             self._refresh_state()
 
     def _handle_cycle(self, result: object) -> None:
+        if self._shutdown_started:
+            return
         if not isinstance(result, ControlCycleResult):
             self._handle_runtime_fault("invalid result from control thread")
             return
@@ -11040,6 +11028,8 @@ class DashboardWindow(QMainWindow):
         QToolTip.showText(screen_position, str(data_reader()), self._plot)
 
     def _handle_runtime_fault(self, message: str) -> None:
+        if self._shutdown_started:
+            return
         event = self._create_measurement_event(
             event_type="fault",
             severity="critical",
@@ -11518,7 +11508,7 @@ class DashboardWindow(QMainWindow):
         )
 
     def _refresh_recording_status(self, recorded_at: datetime | None = None) -> None:
-        if not hasattr(self, "_recording_status_label"):
+        if self._shutdown_started or not hasattr(self, "_recording_status_label"):
             return
         pending = self._nas_sync.pending_count
         if self._nas_sync.enabled:
@@ -11584,6 +11574,7 @@ class DashboardWindow(QMainWindow):
             QTimer.singleShot(0, self._restore_startup_mode)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._shutdown_started = True
         self._save_user_settings()
         self._hardware_status_timer.stop()
         self._hardware_status_generation += 1

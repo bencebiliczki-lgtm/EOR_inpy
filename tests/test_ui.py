@@ -270,7 +270,7 @@ def test_calibration_settings_scroll_without_overlapping_fields() -> None:
     dialog.show()
     application().processEvents()
 
-    assert dialog.minimum_margin.minimum() == pytest.approx(20.0)
+    assert dialog.minimum_margin.minimum() == pytest.approx(0.1)
 
     field_groups = (
         (
@@ -1149,24 +1149,42 @@ def test_measurement_pump_startup_dialog_requires_all_values_without_text_confir
         MeasurementPumpPlan(120.0, 0.0, 100.0, 10.0),
         maximum_jacket_pressure_bar=400.0,
         maximum_injection_pressure_bar=350.0,
-        minimum_jacket_margin_bar=20.0,
+        minimum_jacket_margin_bar=12.0,
     )
 
     assert not dialog.start_button.isEnabled()
     dialog.jacket_buildup_flow.setValue(60.0)
 
     assert dialog.start_button.isEnabled()
+    assert any(
+        "12.000 bar" in label.text() for label in dialog.findChildren(QLabel)
+    )
     assert dialog.plan() == MeasurementPumpPlan(
         120.0,
         60.0,
         100.0,
         10.0,
-        injection_measurement_flow_ml_per_hour=10.0,
         jacket_pressure_limit_bar=400.0,
         injection_pressure_limit_bar=350.0,
     )
     dialog.injection_start_pressure.setValue(101.0)
-    assert not dialog.start_button.isEnabled()
+    assert dialog.start_button.isEnabled()
+
+
+def test_changed_pressure_margin_is_applied_to_simulation_pump_control(
+    tmp_path: Path,
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+    )
+    assert window._pump_control is not None
+
+    window._minimum_margin.setValue(7.5)
+    window._apply_measurement_settings()
+
+    assert window._pump_control.minimum_jacket_margin_bar == pytest.approx(7.5)
+    window.close()
 
 
 def test_measurement_table_model_uses_excel_columns_and_hungarian_time() -> None:
@@ -2278,6 +2296,9 @@ def test_window_shutdown_requests_safe_state_from_ready_devices(tmp_path: Path) 
     assert injection.stop_requested
     assert daq.safe_state_requested
     assert window._valve.safe_state_requested
+    # A cycle signal queued before closeEvent may be delivered after the NAS
+    # queue has closed; shutdown callbacks must become harmless no-ops.
+    window._refresh_recording_status()
 
 
 def test_measurement_start_preflight_accepts_finite_voltage_outside_nominal_span(
@@ -2307,7 +2328,9 @@ def test_measurement_start_preflight_accepts_finite_voltage_outside_nominal_span
     monkeypatch.setattr(
         window._pump_control,
         "apply_measurement_flow",
-        lambda requested: requested,
+        lambda _requested: pytest.fail(
+            "measurement start must not issue a pump flow command"
+        ),
     )
     window._devices.start(start_simulated_devices=False)
     window._devices.set_measurement_state(MeasurementState.WAITING_CONFIRMATION)
@@ -3204,6 +3227,9 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert window._minimum_margin.minimum() == 0.1
     window._minimum_margin.setValue(10.0)
     assert window._minimum_margin.value() == 10.0
+    assert window._pump_control is not None
+    window._apply_measurement_settings()
+    assert window._pump_control.minimum_jacket_margin_bar == pytest.approx(10.0)
     window._open_measurement_overview()
     overview = window._overview_dialog
     assert overview is not None
@@ -3353,6 +3379,10 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     )
     assert developer._buttons.isVisible()
     assert developer._buttons.geometry().bottom() <= developer.contentsRect().bottom()
+    developer._filter.setCurrentIndex(
+        developer._filter.findData(DiagnosticCategory.JACKET_PUMP.value)
+    )
+    developer._rebuild()
     assert developer._table.rowCount() == 2
     assert developer._table.item(0, 3).text() == "EOR vezérlőalkalmazás"
     assert developer._table.item(0, 4).text() == "TX"

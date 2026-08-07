@@ -14,13 +14,13 @@ vészleállítót és a pumpák saját nyomásvédelmét.
    lépés nem szükséges.
 3. Megnyomja az **Előkészítés** gombot.
 4. Ellenőrzi és elfogadja a kezdőnyomásokat, a nyomáshatárokat, az
-   előkészítési flow-kat, a mérési BES-flow-t és a stabilitási időt.
+   előkészítési flow-kat és a stabilitási időt.
 5. A rendszer automatikusan felépíti a nyomást, majd **ELŐKÉSZÍTVE**
    állapotban vár. Ekkor a BES pumpa STOP állapotú, a KÖP a megadott
    nyomást tartja. PID és mérési adatmentés még nem fut.
-6. A kezelő megnyomja a **Mérés indítása** gombot. A rendszer beállítja és
-   visszaellenőrzi a BES mérési flow-ját, elindítja a BES pumpát, majd a
-   PID- és adatrögzítési ciklust.
+6. A kezelő megnyomja a **Mérés indítása** gombot. A rendszer friss
+   biztonsági mintát vesz, majd elindítja a szelep PID-vezérlését és az
+   adatrögzítési ciklust. Pumpaparancsot nem ad ki.
 
 A **Mérés indítása** nem kéri be újra az előkészítési adatokat, és
 befejezett előkészítés nélkül sem hardver-, sem szimulációs módban nem
@@ -217,8 +217,9 @@ RUN
 
 A BES pumpa ekkor még nem indul. A rendszer megvárja, amíg a
 `KÖP nyomás − BES nyomás` legalább a konfigurált minimum, alapértelmezetten
-20 bar, és a megadott stabilitási ideig fennáll. A normál kezelői beállítás
-nem engedi ezt a minimumot 20 bar alá csökkenteni.
+20 bar, és a megadott stabilitási ideig fennáll. A beállítás 0,1 bar vagy
+nagyobb pozitív érték lehet; a program nem helyettesíti fix 20 baros
+konstanssal.
 
 ### 2. BES nyomásfelépítés
 
@@ -231,18 +232,18 @@ FLOW = BES előkészítési flow
 RUN
 ```
 
-A 20 bar-os különbség a BES `RUN` előtti indítási kapu. A BES indulása után
-a rendszer nem próbál folyamatosan 20 bar-os követési különbséget tartani;
+A konfigurált különbség a BES `RUN` előtti indítási kapu. A BES indulása után
+a rendszer nem próbálja folyamatosan fenntartani ezt a követési különbséget;
 a KÖP a kezelő által megadott fix célnyomást tartja.
 
 A kaput a rendszer három ponton biztosítja:
 
 1. a KÖP felfutási ciklus addig nem fejeződik be, amíg nincs meg a stabil
-   20 bar-os vagy annál nagyobb különbség;
+   konfigurált vagy annál nagyobb különbség;
 2. a BES `REMOTE` és flow-konfigurációja előtt újra ellenőrzi a különbséget;
 3. közvetlenül a BES `RUN` előtt ismét ellenőrzi azt.
 
-Ha a különbség a BES konfigurálása alatt visszaesik 20 bar alá, a BES nem
+Ha a különbség a BES konfigurálása alatt visszaesik a konfigurált minimum alá, a BES nem
 indul el, az előkészítés hibával megszakad, és mindkét pumpa STOP-ot kap.
 
 Amikor a KÖP eléri saját célját:
@@ -274,10 +275,14 @@ A vezérlési ciklus és a pumpa polling nem ugyanaz:
 - a vezérlési ciklus a cache és az NI-adatok biztonsági kiértékelésének,
   illetve a szabályozásnak a gyakorisága.
 
-## Mérés indítása és flow-váltás
+## Mérés indítása és külön flow-váltás
 
 A **Mérés indítása** megnyomásakor a rendszer friss biztonsági kiértékelést
-végez. Ezután a BES mérési flow beállítása:
+végez, konfigurálja a PID-et, majd elindítja a szelepvezérlést és az
+adatrögzítést. A pumpák konfigurációját és futási állapotát nem módosítja;
+ezért a kézzel beállított kezdőállapot is változatlan marad.
+
+A külön, explicit futás közbeni BES-flow módosítás sorrendje:
 
 ```text
 BES STOP
@@ -288,7 +293,7 @@ BES STOP
 → egyezés esetén RUN
 ```
 
-Ugyanez a konzervatív sorrend fut mérés közbeni flow-módosításkor is. Ha a
+Ha a
 `SETFLOW` visszaolvasás nem egyezik a kért értékkel, a BES nem kap `RUN`
 parancsot, és a rendszer kritikus hibaként kezeli az eltérést.
 
@@ -359,7 +364,7 @@ fenntartott hardverkapcsolat `READY` állapotban megmarad.
 | `pump_startup/jacket_buildup_flow_ml_per_hour` | KÖP előkészítési flow |
 | `pump_startup/injection_start_pressure_bar` | BES kezdőnyomás |
 | `pump_startup/injection_startup_flow_ml_per_hour` | BES előkészítési flow |
-| `pump_startup/injection_measurement_flow_ml_per_hour` | BES mérési flow |
+| `pump_startup/injection_measurement_flow_ml_per_hour` | Korábbi kompatibilitási kulcs; a mérésindítás nem alkalmazza |
 | `pump_startup/jacket_pressure_limit_bar` | KÖP `MAXPRESS` |
 | `pump_startup/injection_pressure_limit_bar` | BES `MAXPRESS` |
 | `pump_startup/margin_stability_seconds` | Stabilitási idő |

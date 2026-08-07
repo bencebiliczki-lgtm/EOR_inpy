@@ -609,8 +609,9 @@ nem adódik hozzá minden következő periódushoz; határidő-túllépés ugyan
 safe-stop útvonalat aktiválja, mint a mérési runtime-ban.
 
 A repositoryban rendelkezésre álló DASNET dokumentáció nem igazolja a
-futás közbeni közvetlen FLOW-átírást. Ezért a BES mérési flow induláskori
-és futás közbeni váltása konzervatívan `STOP → CONST FLOW/FLOW →
+futás közbeni közvetlen FLOW-átírást. A **Mérés indítása** nem vált
+pumpa-flow-t; a külön, explicit futás közbeni BES-flow-váltás konzervatívan
+`STOP → CONST FLOW/FLOW →
 SETFLOW visszaolvasás → RUN` sorrendű. Sikertelen visszaolvasásnál a régi
 alkalmazott érték marad a felületen, a rendszer pedig biztonságosan leáll.
 A 260D firmware a `SETFLOWx` lekérdezés célértékét `FLOWx=érték` kulccsal is
