@@ -28,7 +28,7 @@ class IscoSerialConfig:
     timeout_seconds: float = 0.25
     attempts: int = 3
     pressure_unit: str = "BAR"
-    flow_unit: str = "ML/MIN"
+    flow_unit: str = "ML/HR"
 
     def __post_init__(self) -> None:
         if not self.port.strip():
@@ -53,6 +53,7 @@ class IscoPump:
     def __init__(self, client: DasnetCommandClient, config: IscoSerialConfig) -> None:
         self._client = client
         self._config = config
+        self._flow_unit = config.flow_unit
         self._connected = False
         self._identified_model: str | None = None
 
@@ -106,7 +107,7 @@ class IscoPump:
             response,
             command=command,
         )
-        unit = (reported_unit or self._config.flow_unit).upper()
+        unit = (reported_unit or self._flow_unit).upper()
         if unit not in {"ML/MIN", "ML/HR"}:
             raise ValueError(
                 f"unexpected ISCO unit {unit!r} for {command}; "
@@ -128,7 +129,7 @@ class IscoPump:
             command=command,
             accepted_keys=accepted_keys,
         )
-        unit = (reported_unit or self._config.flow_unit).upper()
+        unit = (reported_unit or self._flow_unit).upper()
         if unit not in {"ML/MIN", "ML/HR"}:
             raise ValueError(
                 f"unexpected ISCO unit {unit!r} for {command}; "
@@ -156,9 +157,12 @@ class IscoPump:
     def set_constant_flow(self, flow_ml_per_hour: float) -> None:
         self._require_connected()
         value = self._format_nonnegative(flow_ml_per_hour, "flow")
-        self._client.command(
-            f"{self._channel_command('UNITS')}=ML/HR"
-        )
+        self._client.command(f"{self._channel_command('UNITS')}=ML/HR")
+        # Unitless FLOW/SETFLOW responses must be interpreted according to the
+        # unit that was successfully programmed into the pump.  Keeping the
+        # original ML/MIN fallback here caused a second, erroneous x60
+        # conversion (20 ml/h was reported as 1200 ml/h).
+        self._flow_unit = "ML/HR"
         self._client.command(self._channel_command("CONST FLOW", suffix_a=False))
         self._client.command(
             f"{self._channel_command('FLOW', suffix_a=False)}={value}"
@@ -215,7 +219,11 @@ class IscoPump:
     def _format_nonnegative(value: float, label: str) -> str:
         if not isfinite(value) or value < 0.0:
             raise ValueError(f"ISCO {label} target must be nonnegative and finite")
-        return format(value, ".7g")
+        # Operator setpoints have three decimal places throughout the application.
+        # Fixed-point formatting preserves that resolution even for large flow
+        # values; ``.7g`` incorrectly treated seven *significant* digits as the
+        # precision and silently changed values such as 123456.789 to 123456.8.
+        return f"{value:.3f}".rstrip("0").rstrip(".")
 
 
 _MEASUREMENT_PATTERN = re.compile(

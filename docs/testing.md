@@ -265,7 +265,11 @@ ellenőrzi az élő pumpa- és NI-értékeket, a SAFE szelepállapotot, tovább�
 hogy a szolgáltatási frissítés nem hoz létre grafikonpontot.
 Az előkészítési dashboard regressziója `PREPARING` állapotban ellenőrzi a két
 pumpanyomás, a vonali és differenciálnyomás, valamint a nyomáskülönbség élő
-frissítését, miközben a mérési grafikon pufferében még nem keletkezik pont.
+frissítését és magyar, legfeljebb három tizedesjegyes megjelenítését,
+miközben a mérési grafikon pufferében még nem keletkezik pont.
+
+Az ISCO regressziós teszt ellenőrzi, hogy az `ML/HR` beállítás után az egység
+nélküli `FLOW`/`SETFLOW` visszaolvasás nem kap hibás hatvanszoros szorzót.
 
 A Developer vezérlésiciklus-beállítás tesztje ellenőrzi a ciklusidő és a
 watchdog-tűrés tartós mentését, valamint a számított végrehajtási határidőt.

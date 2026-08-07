@@ -68,6 +68,11 @@ A mintavételi gyakoriság 1 másodperc és 1 óra között konfigurálható. A 
 - Kapcsolati állapot minden eszközhöz.
 - Aktuális értékek és aktív riasztások jól láthatóan.
 - A köpeny- és besajtolási nyomás aktuális különbsége külön kijelzőn jelenjen meg.
+- A dashboard nyomáskijelzői magyar tizedesvesszőt és legfeljebb három
+  tizedesjegyet használjanak; felesleges záró nullákat ne jelenítsenek meg.
+- A pumpák térfogatáramát a teljes alkalmazás `ml/h` egységben kezeli. Az
+  `ML/HR` beállítás utáni egység nélküli `FLOW` és `SETFLOW` válaszokon tilos
+  `ml/min` átváltást alkalmazni.
 - Az adatrögzítés állapota mutassa az aktív fájlt, méretet, utolsó rögzítési ciklust
   és a NAS-szinkron várólistáját.
 - Az elmúlt 10 perc élő diagramja.

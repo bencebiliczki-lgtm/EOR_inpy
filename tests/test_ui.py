@@ -121,6 +121,7 @@ from eor_control.ui import (  # noqa: E402
     application_icon_path,
     build_simulated_dashboard,
     configure_windows_application_identity,
+    format_dashboard_pressure,
     migrate_legacy_project_database,
     migrate_legacy_project_files,
     portable_user_settings,
@@ -132,6 +133,21 @@ from eor_control.ui import (  # noqa: E402
 def application() -> QApplication:
     instance = QApplication.instance()
     return instance if isinstance(instance, QApplication) else QApplication([])
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (120.0, "120 bar"),
+        (104.75, "104,75 bar"),
+        (1.375, "1,375 bar"),
+        (-0.0001, "0 bar"),
+    ],
+)
+def test_dashboard_pressure_uses_hungarian_adaptive_decimals(
+    value: float, expected: str
+) -> None:
+    assert format_dashboard_pressure(value) == expected
 
 
 def test_user_settings_and_projects_use_documents_eor_with_legacy_migration(
@@ -2323,15 +2339,13 @@ def test_active_hardware_ready_state_refreshes_dashboard_without_measurement(
     assert window._devices.status.state is ApplicationState.READY
     assert not window._runtime.running
     assert window._last_cycle_result is None
-    jacket_text = window._jacket_label.text()
-    injection_text = window._injection_label.text()
-    jacket_value, jacket_unit = jacket_text.split()
-    injection_value, injection_unit = injection_text.split()
+    jacket_value, jacket_unit = window._jacket_label.text().split()
+    injection_value, injection_unit = window._injection_label.text().split()
     assert jacket_unit == injection_unit == "bar"
-    assert len(jacket_value.rsplit(".", 1)[1]) == 3
-    assert len(injection_value.rsplit(".", 1)[1]) == 3
-    assert float(jacket_value) == pytest.approx(120.0, abs=0.01)
-    assert float(injection_value) == pytest.approx(100.0, abs=0.01)
+    assert len(jacket_value.partition(",")[2]) <= 3
+    assert len(injection_value.partition(",")[2]) <= 3
+    assert float(jacket_value.replace(",", ".")) == pytest.approx(120.0, abs=0.01)
+    assert float(injection_value.replace(",", ".")) == pytest.approx(100.0, abs=0.01)
     assert window._connection_labels["jacket"].text() == "KAPCSOLÓDVA"
     assert window._connection_labels["line_daq"].text() == "KAPCSOLÓDVA — ÉLŐ"
     assert window._valve_label.text() == "SAFE — mérés nem fut"
@@ -2366,11 +2380,11 @@ def test_hardware_preparation_progress_refreshes_dashboard_values(
     window._measurement_pump_startup_progress(record)
 
     assert window._last_hardware_status_record is record
-    assert window._jacket_label.text() == "135.125 bar"
-    assert window._injection_label.text() == "104.750 bar"
-    assert window._line_label.text() == "88.625 bar"
-    assert window._delta_label.text() == "1.375 bar"
-    assert window._pressure_margin_label.text() == "30.375 bar"
+    assert window._jacket_label.text() == "135,125 bar"
+    assert window._injection_label.text() == "104,75 bar"
+    assert window._line_label.text() == "88,625 bar"
+    assert window._delta_label.text() == "1,375 bar"
+    assert window._pressure_margin_label.text() == "30,375 bar"
     assert not window._times
     window._preflight_active = False
     window._run_mode = RunMode.SIMULATION

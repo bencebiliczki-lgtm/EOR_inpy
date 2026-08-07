@@ -625,6 +625,15 @@ def input_field_label(text: str, field: QWidget) -> QLabel:
     return label
 
 
+def format_dashboard_pressure(value: float) -> str:
+    """Format a dashboard pressure with up to three Hungarian decimal places."""
+    number = f"{value:.3f}"
+    if number == "-0.000":
+        number = "0.000"
+    number = number.rstrip("0").rstrip(".").replace(".", ",")
+    return f"{number} bar"
+
+
 class ResizableDialog(QDialog):
     """Common base for application dialogs that may be freely resized."""
 
@@ -7760,9 +7769,11 @@ class DashboardWindow(QMainWindow):
 
     def _apply_idle_hardware_record(self, record: MeasurementRecord) -> None:
         snapshot = record.snapshot
-        self._jacket_label.setText(f"{snapshot.jacket_pump.pressure_bar:.3f} bar")
+        self._jacket_label.setText(
+            format_dashboard_pressure(snapshot.jacket_pump.pressure_bar)
+        )
         self._injection_label.setText(
-            f"{snapshot.injection_pump.pressure_bar:.3f} bar"
+            format_dashboard_pressure(snapshot.injection_pump.pressure_bar)
         )
         self._jacket_remaining_label.setText(
             f"Maradék folyadék: "
@@ -7797,12 +7808,12 @@ class DashboardWindow(QMainWindow):
             True if configuration is None else configuration.valve_output_enabled
         )
         self._line_label.setText(
-            f"{snapshot.line_pressure_bar:.3f} bar"
+            format_dashboard_pressure(snapshot.line_pressure_bar)
             if line_enabled and snapshot.line_pressure_bar is not None
             else "Nincs hozzáadva"
         )
         self._delta_label.setText(
-            f"{snapshot.differential_pressure_bar:.3f} bar"
+            format_dashboard_pressure(snapshot.differential_pressure_bar)
             if delta_enabled and snapshot.differential_pressure_bar is not None
             else "Nincs hozzáadva"
         )
@@ -7834,7 +7845,7 @@ class DashboardWindow(QMainWindow):
             snapshot.jacket_pump.pressure_bar
             - snapshot.injection_pump.pressure_bar
         )
-        self._pressure_margin_label.setText(f"{margin:.3f} bar")
+        self._pressure_margin_label.setText(format_dashboard_pressure(margin))
         self._pressure_margin_label.setStyleSheet(
             "background:transparent;font-size:20px;font-weight:700;color:#66788a"
         )
@@ -10700,8 +10711,12 @@ class DashboardWindow(QMainWindow):
         self._set_connection("line_daq", True)
         self._set_connection("delta_daq", True)
         self._set_connection("valve", result.command.enabled)
-        self._jacket_label.setText(f"{snapshot.jacket_pump.pressure_bar:.3f} bar")
-        self._injection_label.setText(f"{snapshot.injection_pump.pressure_bar:.3f} bar")
+        self._jacket_label.setText(
+            format_dashboard_pressure(snapshot.jacket_pump.pressure_bar)
+        )
+        self._injection_label.setText(
+            format_dashboard_pressure(snapshot.injection_pump.pressure_bar)
+        )
         self._jacket_remaining_label.setText(
             f"Maradék folyadék: {snapshot.jacket_pump.remaining_volume_ml:.1f} ml"
         )
@@ -10722,18 +10737,18 @@ class DashboardWindow(QMainWindow):
         self._line_label.setText(
             "Nincs hozzáadva"
             if snapshot.line_pressure_bar is None
-            else f"{snapshot.line_pressure_bar:.3f} bar"
+            else format_dashboard_pressure(snapshot.line_pressure_bar)
         )
         self._delta_label.setText(
             "Nincs hozzáadva"
             if snapshot.differential_pressure_bar is None
-            else f"{snapshot.differential_pressure_bar:.3f} bar"
+            else format_dashboard_pressure(snapshot.differential_pressure_bar)
         )
         margin = (
             snapshot.jacket_pump.pressure_bar
             - snapshot.injection_pump.pressure_bar
         )
-        self._pressure_margin_label.setText(f"{margin:.3f} bar")
+        self._pressure_margin_label.setText(format_dashboard_pressure(margin))
         self._pressure_margin_label.setStyleSheet(
             "background:transparent;font-size:20px;font-weight:700;color:#66788a"
         )

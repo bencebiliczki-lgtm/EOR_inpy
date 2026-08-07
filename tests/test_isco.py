@@ -88,6 +88,31 @@ def test_setflow_accepts_flowa_firmware_response() -> None:
     assert client.commands[-1] == "SETFLOWA"
 
 
+def test_hourly_flow_command_prevents_x60_on_unitless_readback() -> None:
+    client = ScriptedClient(
+        {
+            "RSVP": ["READY"],
+            "IDENTIFY": ["MODEL 260D PUMP"],
+            "UNITSA=ML/HR": [""],
+            "CONST FLOW": [""],
+            "FLOW=20": [""],
+            "SETFLOWA": ["FLOWA=20"],
+        }
+    )
+    # Reproduce the previous mismatch explicitly: even if the configured
+    # fallback was ML/MIN, set_constant_flow programs the pump to ML/HR.
+    pump = IscoPump(client, IscoSerialConfig("COM1", 6, flow_unit="ML/MIN"))
+    pump.connect()
+
+    pump.set_constant_flow(20.0)
+
+    assert pump.read_configured_flow_ml_per_hour() == pytest.approx(20.0)
+
+
+def test_application_flow_unit_defaults_to_ml_per_hour() -> None:
+    assert IscoSerialConfig("COM1", 6).flow_unit == "ML/HR"
+
+
 @pytest.mark.parametrize(
     ("response", "error"),
     [
@@ -151,6 +176,25 @@ def test_documented_control_command_sequences() -> None:
         "RUN",
         "STOP",
         "LOCAL",
+    ]
+
+
+def test_control_command_preserves_three_decimal_setpoint_at_large_magnitude() -> None:
+    pump, client = connected_pump()
+    client.responses.update(
+        {
+            "UNITSA=ML/HR": [""],
+            "CONST FLOW": [""],
+            "FLOW=123456.789": [""],
+        }
+    )
+
+    pump.set_constant_flow(123456.789)
+
+    assert client.commands[-3:] == [
+        "UNITSA=ML/HR",
+        "CONST FLOW",
+        "FLOW=123456.789",
     ]
 
 
