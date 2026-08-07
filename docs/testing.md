@@ -199,9 +199,10 @@ A naplómegőrzési tesztek igazolják a lejárt ismert naplók törlését, a l
 naplók tömörítését, az aktív és zárolt fájlok védelmét, valamint azt, hogy a
 nyers CSV nem kerül az automatikus tisztítás hatókörébe.
 
-A mérési pumpaindítás tesztje ellenőrzi a köpenypumpa `CONST FLOW → RUN`, a stabil
-20 bar többletnél még a teljes köpenycél előtt engedett besajtoló `RUN`, majd a
-köpenycélnál a `STOP → CONST PRESS → RUN` sorrendet, továbbá mindkét dokumentált
+A mérési pumpaindítás tesztje ellenőrzi a köpenypumpa `CONST FLOW → RUN`, a
+köpenycél és a konfigurált margin kivárását, majd a külön ciklusokra bontott
+`STOP → CONST PRESS → RUN` nyomástartási sorrendet. A BES csak ennek stabilitása
+után indulhat. A teszt ellenőrzi továbbá mindkét dokumentált
 `MAXPRESS` hardverhatár-parancsot és az `ML/HR` pumpaegység explicit beállítását,
 valamint hogy az `1000 ml/h` kezelői célérték `FLOW=1000` parancsként jut el a
 pumpához. Ellenőrzi továbbá a pontos indítási
@@ -216,6 +217,17 @@ alkalmazza újra az indítási marginfeltételt.
 Dinamikus nyomásfelfutási regresszió ellenőrzi, hogy 20 bar alatti KÖP–BES
 különbségnél a BES még `REMOTE` vagy `FLOW` parancsot sem kap, valamint hogy
 a konfigurálás közben visszaeső margin a BES `RUN` előtt leállítja az indítást.
+Külön deadline-regresszió lassú `STOP`, `PRESS` és `RUN` tesztdublákkal igazolja,
+az aszinkron worker alatt tovább futó safety ciklust és azt, hogy a lassú
+parancs nem okoz control-cycle deadline hibát, miközben a lassú biztonsági
+kiértékelés továbbra is watchdoghibát okoz. Parancssorrend-teszt
+igazolja a KÖP átállítási lépései közötti friss safety ciklust. A rollback-teszt
+`PROBLEM=LOCAL MODE` válasznál ellenőrzi az egyszeri `REMOTE → STOP` helyreállítást
+és azt, hogy a másik pumpa STOP-ja ettől függetlenül lefut.
+Worker-regresszió ellenőrzi, hogy a már sorban álló STOP megelőzi a következő
+telemetriát, az egyik pumpa blokkolt tranzakciója nem állítja meg a másik workerét,
+a STATUS igazolja a STOP/RUN eredményt, és a parancstimeout nem control-cycle
+deadline néven jelenik meg.
 A részleges kapcsolati tesztek igazolják, hogy az egyik pumpa vagy NI-bemenet hibája
 mellett a többi eszköz sikeres státusza megmarad, a kapcsolódás és REMOTE módba
 lépés egy műveletként fut, REMOTE-hibánál pedig a port bezáródik. Bezáráskor minden
@@ -272,11 +284,13 @@ Az előkészítési dashboard regressziója `PREPARING` állapotban ellenőrzi a
 pumpanyomás, a vonali és differenciálnyomás, valamint a nyomáskülönbség élő
 frissítését és magyar, legfeljebb három tizedesjegyes megjelenítését,
 miközben a mérési grafikon pufferében még nem keletkezik pont.
-Külön UI-regresszió rögzíti, hogy hardvermódban a **Mérés indítása** nem
-nyit előkészítési adatablakot: befejezett **Előkészítés** nélkül tiltott,
-utána pedig közvetlenül a runtime indítási útját hívja.
-Külön regresszió tiltja, hogy ez az út pumpa-flow parancsot adjon ki: a
-mérésindítás csak a szelepvezérlést és az adatrögzítést aktiválja.
+Külön UI-regresszió rögzíti, hogy READY állapotban az **Előkészítés** és a
+**Mérés indítása** egyszerre elérhető. A közvetlen mérésindítás friss
+előellenőrzést futtat, de nem nyit előkészítési adatablakot; az előkészített út
+WAITING_CONFIRMATION állapotból közvetlenül ugyanazt a runtime-indítást hívja.
+Külön regresszió tiltja, hogy a közvetlen út pumpa-előkészítést vagy pumpa-flow
+parancsot adjon ki: a mérésindítás csak a szelepvezérlést és az adatrögzítést
+aktiválja.
 
 Az ISCO regressziós teszt ellenőrzi, hogy az `ML/HR` beállítás után az egység
 nélküli `FLOW`/`SETFLOW` visszaolvasás nem kap hibás hatvanszoros szorzót.
@@ -326,6 +340,12 @@ KÖP-nyomásnak a teljes stabilitási időn át fenn kell maradnia, majd a BES
 pumpának az operátori döntésig STOP állapotban kell várnia. Az exportteszt
 ellenőrzi az eseményazonosító deduplikálását, az eseménylapot és a diagram
 marker-sorozatát.
+Az egységes vezérlési regresszió a `PumpStartupPlan` alapú belépési pontot,
+a közös STOP/FLOW/RUN állapotútvonalat és a flow-váltás RUN előtti
+biztonsági kapuját is ellenőrzi.
+Az UI-komponens refaktor után a dashboard-regresszió változatlan object name-ek,
+splitter-sorrend, widgetméretek, signalok, projektválasztás és mérési
+állapotátmenetek mellett ellenőrzi a felépítést.
 A SETFLOW firmware-kompatibilitási teszt elfogadja az azonos csatornájú
 `FLOWx=érték` választ, de elutasítja a másik csatorna kulcsát, a hibás
 mértékegységet, a nem véges értéket és a tolerancián kívüli célértéket.

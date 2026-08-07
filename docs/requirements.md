@@ -160,11 +160,11 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   kezdőnyomását, saját hardveres nyomáshatárát, a köpeny nyomásfelépítési
   térfogatáramát, a besajtoló térfogatáramát és a nyomástöbblet stabilitási idejét.
   A program a dokumentált `MAXPRESS` paranccsal állítsa be a két pumpa saját
-  határát még a `RUN` előtt. A köpenypumpa induljon elsőként; amikor a legalább
-  Beállításokban megadott köpeny–besajtoló többlet a beállított ideig stabil,
-  induljon el a
-  besajtolópumpa is. Ezután mindkét pumpa együtt haladjon a kezdő célértéke felé,
-  a köpeny pedig saját célján STOP után váltson állandó nyomástartásra. A
+  határát még a `RUN` előtt. A köpenypumpa induljon elsőként, érje el a saját
+  célnyomását és legalább a Beállításokban megadott köpeny–besajtoló többletet,
+  majd külön ciklusokban hajtsa végre a `STOP → CONST PRESS → RUN` átállást. A
+  köpeny nyomástartásának a beállított ideig stabilnak kell maradnia, és csak
+  ezután konfigurálható és indítható a besajtolópumpa. A
   nyomástöbblet kizárólag a besajtolópumpa `RUN` előtti indítási engedélyfeltétel:
   a `RUN` után és a mérési ciklusban nem kell fenntartani. A köpenypumpa a
   kezelő által megadott fix nyomáscélt tartsa, ne kövesse a besajtolási nyomást.
@@ -181,9 +181,22 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   használnia.
   A BES konfigurálása előtt és közvetlenül a BES `RUN` előtt ismét ellenőrizni
   kell a friss cache-elt különbséget; visszaesésnél a BES nem indulhat el.
+  Az előkészítés explicit állapotgép legyen. Egy felügyeleti ciklus legfeljebb
+  egy aszinkron pumpaparancsot helyezhet queue-ba; a ciklus nem várhatja meg a
+  soros tranzakciót. Minden `STOP`, konfiguráció vagy `RUN` csak érvényes válasz
+  és az előírt STATUS-igazolás után léptetheti tovább az állapotgépet. A DASNET-
+  tranzakció saját timeoutja ne számítson vezérlésiciklus-deadline hibának.
+  Pumpánként egyetlen worker birtokolja a COM-portot, ütemezi a pollingot és a
+  prioritásos parancssort. Emergency/safety STOP prioritása előzze meg a még el
+  nem kezdett normál parancsokat és telemetriát; futó keretet bájtszinten nem
+  szabad megszakítani.
   Szimulációban ugyanez az állapotgép és sorrend fusson a szimulált
-  pumpákkal; az **Előkészítés** legyen elérhető READY állapotban, a
-  **Mérés indítása** pedig csak WAITING_CONFIRMATION állapotban.
+  pumpákkal. READY állapotban az **Előkészítés** és a **Mérés indítása** is legyen
+  elérhető. A közvetlen mérésindítás a manuálisan beállított pumpákhoz friss
+  biztonsági előellenőrzés után kihagyja a pumpa-előkészítést; pumpaparancsot nem
+  ad, csak a szelepvezérlést és az adatrögzítést indítja. Az automatikus
+  előkészítés után a **Mérés indítása** WAITING_CONFIRMATION állapotból ugyanazt
+  a mérési runtime-ot indítsa.
 - A pumpatelemetria minőségét mezőnként kell nyilvántartani. A nyomás
   biztonságkritikus; elavulása reteszelt hibát okozhat. A FLOW vagy VOLA önálló
   elavulása `DEGRADED` kapcsolatot jelezzen és maradjon látható, de önmagában ne

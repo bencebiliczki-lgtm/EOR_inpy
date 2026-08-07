@@ -81,7 +81,7 @@ from eor_control.hardware import (  # noqa: E402
 from eor_control.ni import NidaqmxDataAcquisition  # noqa: E402
 from eor_control.preflight import PreflightReport, PreflightStatus  # noqa: E402
 from eor_control.projects import ProjectRepository  # noqa: E402
-from eor_control.pump_control import PumpRole  # noqa: E402
+from eor_control.pump_control import PumpControlTiming, PumpRole  # noqa: E402
 from eor_control.simulators import (  # noqa: E402
     SimulatedDataAcquisition,
     SimulatedPump,
@@ -2332,10 +2332,13 @@ def test_measurement_start_preflight_accepts_finite_voltage_outside_nominal_span
             "measurement start must not issue a pump flow command"
         ),
     )
-    window._devices.start(start_simulated_devices=False)
-    window._devices.set_measurement_state(MeasurementState.WAITING_CONFIRMATION)
-    window._pending_measurement_pump_plan = window._default_measurement_pump_plan()
-
+    monkeypatch.setattr(
+        window._pump_control,
+        "prepare_measurement_pumps",
+        lambda *_args, **_kwargs: pytest.fail(
+            "direct measurement start must not prepare the pumps"
+        ),
+    )
     window._start()
 
     for _ in range(100):
@@ -2351,7 +2354,7 @@ def test_measurement_start_preflight_accepts_finite_voltage_outside_nominal_span
     window.close()
 
 
-def test_simulation_enables_separate_preparation_before_measurement_start(
+def test_simulation_offers_preparation_and_direct_measurement_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     application()
@@ -2371,20 +2374,21 @@ def test_simulation_enables_separate_preparation_before_measurement_start(
     window = build_simulated_dashboard(
         tmp_path / "raw.csv", project_path, settings=settings
     )
-    preparation_requests: list[bool] = []
+    preflight_requests: list[bool] = []
     monkeypatch.setattr(
         window,
         "_start_measurement_preflight",
-        lambda: preparation_requests.append(True),
+        lambda *, start_measurement: preflight_requests.append(start_measurement),
     )
 
     window._refresh_state()
 
     assert window._devices.status.state is ApplicationState.READY
     assert window._prepare_button.isEnabled()
-    assert not window._start_button.isEnabled()
+    assert window._start_button.isEnabled()
     window._prepare()
-    assert preparation_requests == [True]
+    window._start()
+    assert preflight_requests == [False, True]
     window.close()
 
 
@@ -2414,10 +2418,19 @@ def test_simulation_preparation_unlocks_measurement_start_only_after_completion(
         "exec",
         lambda _dialog: QDialog.DialogCode.Accepted,
     )
+    preparation_calls: list[tuple[MeasurementPumpPlan, PumpControlTiming]] = []
+
+    def capture_preparation(
+        plan: MeasurementPumpPlan, **kwargs: object
+    ) -> None:
+        timing = kwargs["timing"]
+        assert isinstance(timing, PumpControlTiming)
+        preparation_calls.append((plan, timing))
+
     monkeypatch.setattr(
         window._pump_control,
-        "start_measurement_pumps",
-        lambda **_kwargs: None,
+        "prepare_measurement_pumps",
+        capture_preparation,
     )
 
     window._begin_measurement_after_preflight()
@@ -2437,6 +2450,11 @@ def test_simulation_preparation_unlocks_measurement_start_only_after_completion(
     )
     assert window._start_button.isEnabled()
     assert not window._prepare_button.isEnabled()
+    assert len(preparation_calls) == 1
+    assert preparation_calls[0][0] == window._pending_measurement_pump_plan
+    assert preparation_calls[0][1].control_interval_seconds == pytest.approx(
+        window._runtime.control_interval_seconds
+    )
     window._devices.stop()
     window.close()
 
@@ -2516,7 +2534,7 @@ def test_hardware_preparation_progress_refreshes_dashboard_values(
     window.close()
 
 
-def test_hardware_start_requires_separate_completed_preparation(
+def test_hardware_start_supports_manual_and_prepared_pump_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     application()
@@ -2525,18 +2543,17 @@ def test_hardware_start_requires_separate_completed_preparation(
         tmp_path / "projects.sqlite3",
     )
     window._run_mode = RunMode.HARDWARE
-    errors: list[str] = []
-    started: list[bool] = []
-    monkeypatch.setattr(window, "_show_error", errors.append)
+    preflight_requests: list[bool] = []
+    runtime_starts: list[bool] = []
     monkeypatch.setattr(
         window,
         "_start_measurement_preflight",
-        lambda: pytest.fail("measurement start must not open preparation"),
+        lambda *, start_measurement: preflight_requests.append(start_measurement),
     )
     monkeypatch.setattr(
         window,
-        "_start_prepared_measurement",
-        lambda: started.append(True),
+        "_start_measurement_runtime",
+        lambda: runtime_starts.append(True),
     )
 
     assert window._primary_control_buttons[:2] == (
@@ -2545,8 +2562,8 @@ def test_hardware_start_requires_separate_completed_preparation(
     )
     assert window._prepare_button.text() == "Előkészítés"
     window._start()
-    assert errors and "Előkészítést" in errors[-1]
-    assert not started
+    assert preflight_requests == [True]
+    assert not runtime_starts
 
     window._devices.start()
     window._devices.set_measurement_state(MeasurementState.WAITING_CONFIRMATION)
@@ -2555,7 +2572,7 @@ def test_hardware_start_requires_separate_completed_preparation(
     assert window._state_label.text() == "ELŐKÉSZÍTVE"
     window._start()
 
-    assert started == [True]
+    assert runtime_starts == [True]
     window._run_mode = RunMode.SIMULATION
     window._devices.stop()
     window.close()

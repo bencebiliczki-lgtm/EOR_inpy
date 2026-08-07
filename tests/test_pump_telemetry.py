@@ -1,12 +1,19 @@
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event, Thread
 from time import monotonic, sleep
 
 import pytest
 
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
 from eor_control.domain import DataQuality
+from eor_control.pump_commands import (
+    PumpCommand,
+    PumpCommandKind,
+    PumpCommandPriority,
+    PumpCommandStatus,
+)
 from eor_control.pump_telemetry import (
     PollingPump,
     PumpConnectionState,
@@ -24,6 +31,7 @@ class SlowPollablePump:
     delay_seconds: float = 0.02
     fail_stop: bool = False
     calls: Counter[str] = field(default_factory=Counter)
+    operating_status: str = "STOP REMOTE"
 
     def _read(self, name: str, value: float | str) -> float | str:
         self.calls[name] += 1
@@ -43,10 +51,11 @@ class SlowPollablePump:
         return float(self._read("volume", 240.0))
 
     def read_operating_status(self) -> str:
-        return str(self._read("status", "STOP REMOTE"))
+        return str(self._read("status", self.operating_status))
 
     def enter_remote(self) -> None:
         self.calls["remote"] += 1
+        self.operating_status = "STOP REMOTE"
 
     def set_constant_flow(self, flow_ml_per_hour: float) -> None:
         self.calls["set_flow"] += 1
@@ -56,11 +65,13 @@ class SlowPollablePump:
 
     def run(self) -> None:
         self.calls["run"] += 1
+        self.operating_status = "RUN REMOTE"
 
     def request_stop(self) -> None:
         self.calls["stop"] += 1
         if self.fail_stop:
             raise ConnectionError("PROBLEM=LOCAL MODE")
+        self.operating_status = "STOP REMOTE"
 
     def clear(self) -> None:
         self.calls["clear"] += 1
@@ -96,6 +107,28 @@ class BlockingSlowTelemetryPump(SlowPollablePump):
         self.calls["volume"] += 1
         sleep(self.slow_delay_seconds)
         return 240.0
+
+
+@dataclass
+class CommandPriorityPump(SlowPollablePump):
+    flow_started: Event = field(default_factory=Event)
+    release_flow: Event = field(default_factory=Event)
+    operations: list[str] = field(default_factory=list)
+
+    def read_flow_ml_per_hour(self) -> float:
+        self.operations.append("FLOW_START")
+        self.flow_started.set()
+        assert self.release_flow.wait(timeout=1.0)
+        self.operations.append("FLOW_END")
+        return 12.0
+
+    def read_remaining_volume_ml(self) -> float:
+        self.operations.append("VOLA")
+        return 240.0
+
+    def enter_remote(self) -> None:
+        self.operations.append("REMOTE")
+        super().enter_remote()
 
 
 @dataclass
@@ -258,6 +291,116 @@ def test_control_commands_do_not_add_pressure_reads_outside_polling_cadence() ->
     assert raw.calls["pressure"] == pressure_reads_after_connect
     assert pump.read_telemetry().pressure.quality is DataQuality.GOOD
     pump.disconnect()
+
+
+def test_queued_control_command_precedes_next_polling_transaction() -> None:
+    raw = CommandPriorityPump(delay_seconds=0.0)
+    intervals = PumpPollingIntervals(
+        pressure_seconds=1.0,
+        slow_telemetry_seconds=0.3,
+        pressure_stale_seconds=3.0,
+        slow_telemetry_stale_seconds=1.0,
+        startup_timeout_seconds=1.0,
+    )
+    pump = PollingPump(raw, name="test", intervals=intervals)
+    pump.connect()
+    assert raw.flow_started.wait(timeout=1.0)
+    command = Thread(target=pump.enter_remote)
+    command.start()
+    sleep(0.02)
+
+    raw.release_flow.set()
+    command.join(timeout=1.0)
+    assert not command.is_alive()
+    deadline = monotonic() + 1.0
+    while "VOLA" not in raw.operations and monotonic() < deadline:
+        sleep(0.01)
+
+    assert raw.operations.index("FLOW_END") < raw.operations.index("REMOTE")
+    assert raw.operations.index("REMOTE") < raw.operations.index("VOLA")
+    pump.disconnect()
+
+
+def test_command_timeout_is_not_reported_as_control_cycle_deadline() -> None:
+    class DelayedStopPump(SlowPollablePump):
+        def request_stop(self) -> None:
+            sleep(0.12)
+            super().request_stop()
+
+    raw = DelayedStopPump(delay_seconds=0.0)
+    pump = PollingPump(raw, name="injection", intervals=slow_intervals())
+    pump.connect()
+    command_id = pump.submit_command(
+        PumpCommand(
+            PumpCommandKind.STOP,
+            PumpCommandPriority.HIGH,
+            timeout_seconds=0.05,
+            verify_status=True,
+        )
+    )
+
+    deadline = monotonic() + 1.0
+    while True:
+        result = pump.command_result(command_id)
+        if result.status.terminal:
+            break
+        assert monotonic() < deadline
+        sleep(0.01)
+
+    assert result.status is PumpCommandStatus.TIMED_OUT
+    assert result.error is not None
+    assert "command timeout" in result.error
+    assert "control cycle" not in result.error
+    pump.disconnect()
+
+
+def test_stop_fails_when_status_does_not_confirm_stop() -> None:
+    class UnconfirmedStopPump(SlowPollablePump):
+        def request_stop(self) -> None:
+            self.calls["stop"] += 1
+
+    raw = UnconfirmedStopPump(delay_seconds=0.0)
+    pump = PollingPump(raw, name="injection", intervals=slow_intervals())
+    pump.connect()
+    pump.run()
+
+    with pytest.raises(RuntimeError, match="did not confirm STOP"):
+        pump.request_stop()
+
+    assert raw.calls["stop"] == 1
+    pump.disconnect()
+
+
+def test_command_submission_requires_a_running_worker() -> None:
+    pump = PollingPump(
+        SlowPollablePump(delay_seconds=0.0),
+        name="injection",
+        intervals=slow_intervals(),
+    )
+
+    with pytest.raises(ConnectionError, match="worker is not running"):
+        pump.submit_stop(emergency=True)
+
+
+def test_one_pump_worker_progresses_while_other_pump_is_blocked() -> None:
+    blocked_raw = CommandPriorityPump(delay_seconds=0.0)
+    blocked = PollingPump(blocked_raw, name="injection", intervals=slow_intervals())
+    responsive_raw = SlowPollablePump(delay_seconds=0.0)
+    responsive = PollingPump(
+        responsive_raw,
+        name="jacket",
+        intervals=slow_intervals(),
+    )
+    blocked.connect()
+    responsive.connect()
+    assert blocked_raw.flow_started.wait(timeout=1.0)
+
+    responsive.enter_remote()
+
+    assert responsive_raw.calls["remote"] == 1
+    blocked_raw.release_flow.set()
+    blocked.disconnect()
+    responsive.disconnect()
 
 
 @pytest.mark.parametrize("failed_field", ["pressure", "flow", "volume"])

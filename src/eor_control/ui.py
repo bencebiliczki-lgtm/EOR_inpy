@@ -157,7 +157,13 @@ from eor_control.projects import (
     PidProfile,
     ProjectRepository,
 )
-from eor_control.pump_control import PumpControlService, PumpOperatingMode, PumpRole
+from eor_control.pump_control import (
+    PumpControlService,
+    PumpControlTiming,
+    PumpOperatingMode,
+    PumpRole,
+    PumpStartupPlan,
+)
 from eor_control.pump_telemetry import (
     PollingPump,
     PumpPollingIntervals,
@@ -2979,26 +2985,7 @@ class ManualTelemetryResult:
     pressure_errors: dict[str, str]
 
 
-@dataclass(frozen=True, slots=True)
-class MeasurementPumpPlan:
-    jacket_target_pressure_bar: float
-    jacket_buildup_flow_ml_per_hour: float
-    injection_start_pressure_bar: float
-    injection_startup_flow_ml_per_hour: float
-    injection_measurement_flow_ml_per_hour: float | None = None
-    jacket_pressure_limit_bar: float | None = None
-    injection_pressure_limit_bar: float | None = None
-    margin_stability_seconds: float = 2.0
-
-    @property
-    def injection_target_flow_ml_per_hour(self) -> float:
-        """Compatibility alias for pre-split startup configurations."""
-        return self.injection_startup_flow_ml_per_hour
-
-    @property
-    def effective_measurement_flow_ml_per_hour(self) -> float:
-        value = self.injection_measurement_flow_ml_per_hour
-        return self.injection_startup_flow_ml_per_hour if value is None else value
+MeasurementPumpPlan = PumpStartupPlan
 
 
 class PumpControlDialog(ResizableDialog):
@@ -5579,7 +5566,13 @@ class MeasurementPumpStartupDialog(ResizableDialog):
 class PreflightDialog(ResizableDialog):
     """Operator-facing, itemized gate shown before every measurement start."""
 
-    def __init__(self, report: PreflightReport, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        report: PreflightReport,
+        parent: QWidget | None = None,
+        *,
+        accept_text: str = "Tovább az előkészítéshez",
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Mérés előtti kötelező ellenőrzés")
         self.resize(900, 480)
@@ -5624,7 +5617,7 @@ class PreflightDialog(ResizableDialog):
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         self._start_button = buttons.addButton(
-            "Tovább az előkészítéshez",
+            accept_text,
             QDialogButtonBox.ButtonRole.AcceptRole,
         )
         self._start_button.setEnabled(report.can_start and not report.has_warnings)
@@ -5908,6 +5901,7 @@ class DashboardWindow(QMainWindow):
         self._hardware_status_active = False
         self._hardware_status_generation = 0
         self._preflight_active = False
+        self._preflight_starts_measurement = False
         self._shutdown_started = False
         self._critical_hardware_recovery_active = False
         self._overview_dialog: MeasurementOverviewDialog | None = None
@@ -6075,134 +6069,78 @@ class DashboardWindow(QMainWindow):
         self._layout_editor_active = False
         root = QWidget()
         layout = QVBoxLayout(root)
-        self._alarm_container = QWidget()
-        self._alarm_container.setObjectName("dashboard_alarm_container")
-        alarm_layout = QHBoxLayout(self._alarm_container)
-        alarm_layout.setContentsMargins(9, 6, 6, 6)
-        self._alarm_label = QLabel()
-        self._alarm_label.setObjectName("dashboard_alarm_label")
-        self._alarm_label.setWordWrap(True)
-        self._alarm_label.setAccessibleName("Aktív biztonsági riasztás")
-        alarm_layout.addWidget(self._alarm_label, 1)
-        self._alarm_close_button = QPushButton("×")
-        self._alarm_close_button.setObjectName("dashboard_alarm_close")
-        self._alarm_close_button.setAccessibleName("Riasztás bezárása")
-        self._alarm_close_button.setToolTip(
-            "Friss biztonsági ellenőrzés után bezárja a riasztást"
-        )
-        self._alarm_close_button.setFixedSize(32, 32)
-        self._alarm_close_button.clicked.connect(self._dismiss_alarm)
-        alarm_layout.addWidget(self._alarm_close_button)
-        self._alarm_label.hide()
-        self._alarm_close_button.hide()
-        self._alarm_container.hide()
+        self._alarm_container = self._create_alarm_banner_component()
         layout.addWidget(self._alarm_container)
         self._refresh_mode_label()
         self._refresh_alarm_banner()
+        status_container = self._create_status_sidebar_component()
+        right_container = self._create_control_sidebar_component()
+        self._measurement_tabs = self._create_measurement_tabs_component()
+        splitter = self._create_dashboard_splitter_component(
+            status_container,
+            right_container,
+        )
+        layout.addWidget(splitter, stretch=1)
+        self._layout_editor_bar = self._create_layout_editor_bar()
+        layout.addWidget(self._layout_editor_bar)
+        self._restore_dashboard_layout()
+        self.setCentralWidget(root)
 
-        status_container = QWidget()
-        status_container.setObjectName("status_sidebar")
-        status_container.setMinimumWidth(0)
-        status_container.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding
+    def _create_dashboard_splitter_component(
+        self,
+        status_container: QWidget,
+        control_container: QWidget,
+    ) -> QSplitter:
+        left_scroll = QScrollArea()
+        left_scroll.setObjectName("status_scroll_area")
+        left_scroll.setMinimumWidth(170)
+        left_scroll.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
         )
-        status_layout = QVBoxLayout(status_container)
-        status_layout.setContentsMargins(4, 0, 4, 4)
-        status_title = QLabel("ÉLŐ ÁLLAPOTOK")
-        status_title.setStyleSheet("font-size:13px;font-weight:700;padding:4px")
-        status_layout.addWidget(status_title)
-        self._state_label = QLabel()
-        self._jacket_label = QLabel("— bar")
-        self._injection_label = QLabel("— bar")
-        self._jacket_remaining_label = QLabel("Maradék folyadék: — ml")
-        self._jacket_net_volume_label = QLabel(
-            "Indítás óta nettó köpenytérfogat: — ml"
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        left_scroll.setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
         )
-        self._injection_remaining_label = QLabel("Maradék folyadék: — ml")
-        self._injection_flow_label = QLabel("Besajtolási sebesség: — ml/h")
-        self._injected_volume_label = QLabel("Indítás óta nettó besajtolt: — ml")
-        volume_tooltip = (
-            "Negatív érték esetén a pumpa maradék térfogata az indításkori "
-            "érték fölé nőtt."
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        left_scroll.setWidget(status_container)
+        right_scroll = QScrollArea()
+        right_scroll.setObjectName("control_scroll_area")
+        right_scroll.setMinimumWidth(260)
+        right_scroll.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
         )
-        self._jacket_net_volume_label.setToolTip(volume_tooltip)
-        self._injected_volume_label.setToolTip(volume_tooltip)
-        self._line_label = QLabel("— bar")
-        self._delta_label = QLabel("— bar")
-        self._valve_label = QLabel("— %")
-        self._pressure_margin_label = QLabel("— bar")
-        labels = (
-            ("system_state", "Rendszerállapot", self._state_label),
-            ("jacket_pump", "Köpenypumpa", self._jacket_label),
-            ("injection_pump", "Besajtolópumpa", self._injection_label),
-            ("line_pressure", "Vonali nyomás", self._line_label),
-            (
-                "differential_pressure",
-                "Differenciálnyomás",
-                self._delta_label,
-            ),
-            (
-                "pressure_margin",
-                "Nyomáskülönbség (tájékoztató)",
-                self._pressure_margin_label,
-            ),
-            ("valve_status", "Szelep", self._valve_label),
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        right_scroll.setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
         )
-        self._connection_labels: dict[str, QLabel] = {}
-        connection_keys = (
-            None,
-            "jacket",
-            "injection",
-            "line_daq",
-            "delta_daq",
-            None,
-            "valve",
+        right_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        for index, (key, title, value) in enumerate(labels):
-            box = self._dashboard_box(key, title, "left")
-            box.setMinimumHeight(76)
-            box_layout = QVBoxLayout(box)
-            value.setStyleSheet(
-                "background:transparent;font-size:20px;font-weight:600"
-            )
-            value.setWordWrap(True)
-            box_layout.addWidget(value)
-            if title == "Köpenypumpa":
-                self._jacket_remaining_label.setStyleSheet(
-                    "background:transparent;color:#66788a;font-size:12px;font-weight:600"
-                )
-                self._jacket_remaining_label.setWordWrap(True)
-                box_layout.addWidget(self._jacket_remaining_label)
-                self._jacket_net_volume_label.setStyleSheet(
-                    "background:transparent;color:#66788a;font-size:12px;font-weight:600"
-                )
-                self._jacket_net_volume_label.setWordWrap(True)
-                box_layout.addWidget(self._jacket_net_volume_label)
-            elif title == "Besajtolópumpa":
-                for detail in (
-                    self._injection_remaining_label,
-                    self._injection_flow_label,
-                    self._injected_volume_label,
-                ):
-                    detail.setStyleSheet(
-                        "background:transparent;color:#66788a;"
-                        "font-size:12px;font-weight:600"
-                    )
-                    detail.setWordWrap(True)
-                    box_layout.addWidget(detail)
-            connection_key = connection_keys[index]
-            if connection_key is not None:
-                connection = QLabel("NINCS ADAT")
-                connection.setStyleSheet(
-                    "background:transparent;color:#66788a;"
-                    "font-size:11px;font-weight:600"
-                )
-                connection.setWordWrap(True)
-                box_layout.addWidget(connection)
-                self._connection_labels[connection_key] = connection
-            status_layout.addWidget(box)
-        status_layout.addStretch(1)
+        right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        right_scroll.setWidget(control_container)
+        self._dashboard_sidebars = {
+            "left": left_scroll,
+            "right": right_scroll,
+        }
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setObjectName("dashboard_splitter")
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(5)
+        splitter.setOpaqueResize(True)
+        splitter.addWidget(left_scroll)
+        splitter.addWidget(self._measurement_tabs)
+        splitter.addWidget(right_scroll)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 5)
+        splitter.setStretchFactor(2, 0)
+        splitter.setSizes([270, 760, 340])
+        self._dashboard_splitter = splitter
+        return splitter
 
+    def _create_control_sidebar_component(self) -> QWidget:
         right_container = QWidget()
         right_container.setObjectName("control_sidebar")
         right_container.setMinimumWidth(0)
@@ -6212,170 +6150,33 @@ class DashboardWindow(QMainWindow):
         right_layout = QVBoxLayout(right_container)
         right_layout.setContentsMargins(4, 0, 4, 4)
 
-        control_box = self._dashboard_box(
-            "measurement_controls", "Mérésvezérlés", "right"
-        )
-        controls = QGridLayout(control_box)
-        self._connect_button = QPushButton("Csatlakozás")
-        self._disconnect_button = QPushButton("Leválasztás")
-        self._connect_button.hide()
-        self._disconnect_button.hide()
-        self._start_button = QPushButton("Mérés indítása")
-        self._prepare_button = QPushButton("Előkészítés")
-        self._pause_button = QPushButton("Mérés szüneteltetése")
-        self._stop_button = QPushButton("Mérés leállítása")
-        self._emergency_button = QPushButton("VÉSZLEÁLLÍTÁS")
-        self._emergency_button.setStyleSheet(
-            "background:#b00020;color:white;font-weight:700;padding:10px"
-        )
-        self._connect_button.clicked.connect(self._connect_devices)
-        self._disconnect_button.clicked.connect(self._disconnect_devices)
-        self._start_button.clicked.connect(self._start)
-        self._prepare_button.clicked.connect(self._prepare)
-        self._pause_button.clicked.connect(self._pause_measurement)
-        self._stop_button.clicked.connect(self._stop)
-        self._emergency_button.clicked.connect(self._emergency_stop)
-        self._primary_control_buttons = (
-            self._start_button,
-            self._prepare_button,
-            self._pause_button,
-            self._stop_button,
-            self._emergency_button,
-        )
-        for row, button in enumerate(self._primary_control_buttons):
-            button.setMinimumWidth(0)
-            button.setSizePolicy(
-                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-            )
-            controls.addWidget(button, row, 0)
-        controls.setColumnStretch(0, 1)
-        right_layout.addWidget(control_box)
-
-        flow_box = self._dashboard_box(
-            "measurement_flow", "BES mérési térfogatáram", "right"
-        )
-        flow_layout = QFormLayout(flow_box)
-        flow_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        flow_layout.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
-        )
-        self._current_measurement_flow = QLabel("— ml/h")
-        self._current_measurement_flow.setObjectName("current_measurement_flow")
-        self._new_measurement_flow = QDoubleSpinBox()
-        self._new_measurement_flow.setObjectName("new_measurement_flow")
-        self._new_measurement_flow.setRange(0.001, 600000.0)
-        self._new_measurement_flow.setDecimals(3)
-        self._new_measurement_flow.setSuffix(" ml/h")
-        self._new_measurement_flow.setMinimumWidth(160)
-        self._new_measurement_flow.setMaximumWidth(240)
-        self._new_measurement_flow.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
-        )
-        self._apply_measurement_flow_button = QPushButton("Alkalmazás")
-        self._apply_measurement_flow_button.setMaximumWidth(240)
-        self._apply_measurement_flow_button.clicked.connect(
-            self._apply_running_measurement_flow
-        )
-        flow_layout.addRow("Aktuális", self._current_measurement_flow)
-        flow_layout.addRow("Új érték", self._new_measurement_flow)
-        flow_layout.addRow(self._apply_measurement_flow_button)
-        right_layout.addWidget(flow_box)
-
-        recording_box = self._dashboard_box(
-            "measurement_recording", "Mérési adatrögzítés", "right"
-        )
-        recording_layout = QVBoxLayout(recording_box)
-        self._recording_status_label = QLabel("RÖGZÍTÉS NEM AKTÍV")
-        self._recording_status_label.setObjectName("recording_status_label")
-        self._recording_status_label.setWordWrap(True)
-        self._recording_details_label = QLabel("Nincs aktív mérési fájl.")
-        self._recording_details_label.setWordWrap(True)
-        self._recording_details_label.setMinimumWidth(0)
-        self._recording_details_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
-        self._recording_details_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self._nas_runtime_label = QLabel("NAS: kikapcsolva")
-        self._nas_runtime_label.setWordWrap(True)
-        self._nas_runtime_label.setMinimumWidth(0)
-        self._nas_runtime_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
-        recording_layout.addWidget(self._recording_status_label)
-        recording_layout.addWidget(self._recording_details_label)
-        recording_layout.addWidget(self._nas_runtime_label)
-        right_layout.addWidget(recording_box)
-
-        configuration_box = self._dashboard_box(
-            "startup_configuration", "Indulási konfiguráció", "right"
-        )
-        configuration_layout = QVBoxLayout(configuration_box)
-        self._configuration_summary_label = QLabel()
-        self._configuration_summary_label.setObjectName("configuration_summary")
-        self._configuration_summary_label.setWordWrap(True)
-        self._configuration_summary_label.setMinimumWidth(0)
-        self._configuration_summary_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
-        configuration_layout.addWidget(self._configuration_summary_label)
-        right_layout.addWidget(configuration_box)
-
-        project_box = QGroupBox("Mérési projekt és szakasz")
-        project_layout = QGridLayout(project_box)
-        self._project = QComboBox()
-        self._project.setObjectName("project_selector")
-        self._stage = QComboBox()
-        self._stage.setObjectName("stage_selector")
-        self._stage.setMinimumWidth(160)
-        self._stage.setMaximumWidth(240)
-        self._stage.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
-        )
-        self._last_selected_stage_id: int | None = None
-        new_project = QPushButton("Új projekt")
-        add_stage = QPushButton("Új szakasz")
-        rename_stage = QPushButton("Szakasz átnevezése")
-        self._project.currentIndexChanged.connect(self._reload_stages)
-        self._stage.currentIndexChanged.connect(self._stage_changed)
-        new_project.clicked.connect(self._create_project)
-        add_stage.clicked.connect(self._add_stage)
-        rename_stage.clicked.connect(self._rename_stage)
-        project_layout.addWidget(input_field_label("Projekt", self._project), 0, 0)
-        project_layout.addWidget(self._project, 0, 1, 1, 2)
-        project_layout.addWidget(new_project, 1, 0, 1, 3)
-        project_layout.addWidget(add_stage, 3, 0)
-        project_layout.addWidget(rename_stage, 3, 1, 1, 2)
-        right_layout.addWidget(project_box)
-        project_box.setVisible(False)
-        project_summary = self._dashboard_box(
-            "active_project", "Aktív projekt", "right"
-        )
-        project_summary.setObjectName("active_project_summary")
-        project_summary_layout = QFormLayout(project_summary)
-        project_summary_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        project_summary_layout.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
-        )
-        self._active_project_label = QLabel("Nincs kiválasztva")
-        self._active_project_label.setWordWrap(True)
-        self._active_project_label.setMinimumWidth(0)
-        self._active_project_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
-        self._active_stage_label = QLabel("Nincs kiválasztva", project_summary)
-        self._active_stage_label.hide()
-        open_projects = QPushButton("Másik projekt megnyitása…")
-        open_projects.clicked.connect(self._open_project_selector)
-        open_overview = QPushButton("Részletes mérési áttekintés…")
-        open_overview.clicked.connect(self._open_measurement_overview)
-        project_summary_layout.addRow("Projekt", self._active_project_label)
-        project_summary_layout.addRow("Szakasz", self._stage)
-        project_summary_layout.addRow(open_projects)
-        project_summary_layout.addRow(open_overview)
+        right_layout.addWidget(self._create_measurement_controls_component())
+        right_layout.addWidget(self._create_measurement_flow_component())
+        right_layout.addWidget(self._create_recording_status_component())
+        right_layout.addWidget(self._create_startup_summary_component())
+        project_editor, project_summary = self._create_project_component()
+        right_layout.addWidget(project_editor)
         right_layout.addWidget(project_summary)
+        right_layout.addWidget(self._create_valve_control_component())
+        self._measurement_settings = CalibrationSettingsDialog(self)
+        self._line_voltage_min = self._measurement_settings.line_voltage_min
+        self._line_voltage_max = self._measurement_settings.line_voltage_max
+        self._line_value_min = self._measurement_settings.line_value_min
+        self._line_value_max = self._measurement_settings.line_value_max
+        self._delta_voltage_min = self._measurement_settings.delta_voltage_min
+        self._delta_voltage_max = self._measurement_settings.delta_voltage_max
+        self._delta_value_min = self._measurement_settings.delta_value_min
+        self._delta_value_max = self._measurement_settings.delta_value_max
+        self._max_jacket = self._measurement_settings.max_jacket
+        self._max_injection = self._measurement_settings.max_injection
+        self._max_delta = self._measurement_settings.max_delta
+        self._max_line = self._measurement_settings.max_line
+        self._minimum_margin = self._measurement_settings.minimum_margin
+        self._max_overshoot = self._measurement_settings.max_overshoot
+        right_layout.addStretch(1)
+        return right_container
 
+    def _create_valve_control_component(self) -> QWidget:
         settings = self._dashboard_box(
             "valve_control", "Szelepvezérlés", "right"
         )
@@ -6600,24 +6401,201 @@ class DashboardWindow(QMainWindow):
         )
         self._configure_control_tooltips()
         self._set_service_controls_visible(self._developer_mode)
-        right_layout.addWidget(settings)
+        return settings
 
-        self._measurement_settings = CalibrationSettingsDialog(self)
-        self._line_voltage_min = self._measurement_settings.line_voltage_min
-        self._line_voltage_max = self._measurement_settings.line_voltage_max
-        self._line_value_min = self._measurement_settings.line_value_min
-        self._line_value_max = self._measurement_settings.line_value_max
-        self._delta_voltage_min = self._measurement_settings.delta_voltage_min
-        self._delta_voltage_max = self._measurement_settings.delta_voltage_max
-        self._delta_value_min = self._measurement_settings.delta_value_min
-        self._delta_value_max = self._measurement_settings.delta_value_max
-        self._max_jacket = self._measurement_settings.max_jacket
-        self._max_injection = self._measurement_settings.max_injection
-        self._max_delta = self._measurement_settings.max_delta
-        self._max_line = self._measurement_settings.max_line
-        self._minimum_margin = self._measurement_settings.minimum_margin
-        self._max_overshoot = self._measurement_settings.max_overshoot
-        right_layout.addStretch(1)
+    def _create_project_component(self) -> tuple[QWidget, QWidget]:
+        project_box = QGroupBox("Mérési projekt és szakasz")
+        project_layout = QGridLayout(project_box)
+        self._project = QComboBox()
+        self._project.setObjectName("project_selector")
+        self._stage = QComboBox()
+        self._stage.setObjectName("stage_selector")
+        self._stage.setMinimumWidth(160)
+        self._stage.setMaximumWidth(240)
+        self._stage.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        self._last_selected_stage_id: int | None = None
+        new_project = QPushButton("Új projekt")
+        add_stage = QPushButton("Új szakasz")
+        rename_stage = QPushButton("Szakasz átnevezése")
+        self._project.currentIndexChanged.connect(self._reload_stages)
+        self._stage.currentIndexChanged.connect(self._stage_changed)
+        new_project.clicked.connect(self._create_project)
+        add_stage.clicked.connect(self._add_stage)
+        rename_stage.clicked.connect(self._rename_stage)
+        project_layout.addWidget(input_field_label("Projekt", self._project), 0, 0)
+        project_layout.addWidget(self._project, 0, 1, 1, 2)
+        project_layout.addWidget(new_project, 1, 0, 1, 3)
+        project_layout.addWidget(add_stage, 3, 0)
+        project_layout.addWidget(rename_stage, 3, 1, 1, 2)
+        project_box.setVisible(False)
+        project_summary = self._dashboard_box(
+            "active_project", "Aktív projekt", "right"
+        )
+        project_summary.setObjectName("active_project_summary")
+        project_summary_layout = QFormLayout(project_summary)
+        project_summary_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        project_summary_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        self._active_project_label = QLabel("Nincs kiválasztva")
+        self._active_project_label.setWordWrap(True)
+        self._active_project_label.setMinimumWidth(0)
+        self._active_project_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self._active_stage_label = QLabel("Nincs kiválasztva", project_summary)
+        self._active_stage_label.hide()
+        open_projects = QPushButton("Másik projekt megnyitása…")
+        open_projects.clicked.connect(self._open_project_selector)
+        open_overview = QPushButton("Részletes mérési áttekintés…")
+        open_overview.clicked.connect(self._open_measurement_overview)
+        project_summary_layout.addRow("Projekt", self._active_project_label)
+        project_summary_layout.addRow("Szakasz", self._stage)
+        project_summary_layout.addRow(open_projects)
+        project_summary_layout.addRow(open_overview)
+        return project_box, project_summary
+
+    def _create_measurement_controls_component(self) -> QWidget:
+        control_box = self._dashboard_box(
+            "measurement_controls", "Mérésvezérlés", "right"
+        )
+        controls = QGridLayout(control_box)
+        self._connect_button = QPushButton("Csatlakozás")
+        self._disconnect_button = QPushButton("Leválasztás")
+        self._connect_button.hide()
+        self._disconnect_button.hide()
+        self._start_button = QPushButton("Mérés indítása")
+        self._prepare_button = QPushButton("Előkészítés")
+        self._pause_button = QPushButton("Mérés szüneteltetése")
+        self._stop_button = QPushButton("Mérés leállítása")
+        self._emergency_button = QPushButton("VÉSZLEÁLLÍTÁS")
+        self._emergency_button.setStyleSheet(
+            "background:#b00020;color:white;font-weight:700;padding:10px"
+        )
+        self._connect_button.clicked.connect(self._connect_devices)
+        self._disconnect_button.clicked.connect(self._disconnect_devices)
+        self._start_button.clicked.connect(self._start)
+        self._prepare_button.clicked.connect(self._prepare)
+        self._pause_button.clicked.connect(self._pause_measurement)
+        self._stop_button.clicked.connect(self._stop)
+        self._emergency_button.clicked.connect(self._emergency_stop)
+        self._primary_control_buttons = (
+            self._start_button,
+            self._prepare_button,
+            self._pause_button,
+            self._stop_button,
+            self._emergency_button,
+        )
+        for row, button in enumerate(self._primary_control_buttons):
+            button.setMinimumWidth(0)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+            controls.addWidget(button, row, 0)
+        controls.setColumnStretch(0, 1)
+        return control_box
+
+    def _create_measurement_flow_component(self) -> QWidget:
+        flow_box = self._dashboard_box(
+            "measurement_flow", "BES mérési térfogatáram", "right"
+        )
+        flow_layout = QFormLayout(flow_box)
+        flow_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        flow_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        self._current_measurement_flow = QLabel("— ml/h")
+        self._current_measurement_flow.setObjectName("current_measurement_flow")
+        self._new_measurement_flow = QDoubleSpinBox()
+        self._new_measurement_flow.setObjectName("new_measurement_flow")
+        self._new_measurement_flow.setRange(0.001, 600000.0)
+        self._new_measurement_flow.setDecimals(3)
+        self._new_measurement_flow.setSuffix(" ml/h")
+        self._new_measurement_flow.setMinimumWidth(160)
+        self._new_measurement_flow.setMaximumWidth(240)
+        self._new_measurement_flow.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        self._apply_measurement_flow_button = QPushButton("Alkalmazás")
+        self._apply_measurement_flow_button.setMaximumWidth(240)
+        self._apply_measurement_flow_button.clicked.connect(
+            self._apply_running_measurement_flow
+        )
+        flow_layout.addRow("Aktuális", self._current_measurement_flow)
+        flow_layout.addRow("Új érték", self._new_measurement_flow)
+        flow_layout.addRow(self._apply_measurement_flow_button)
+        return flow_box
+
+    def _create_recording_status_component(self) -> QWidget:
+        recording_box = self._dashboard_box(
+            "measurement_recording", "Mérési adatrögzítés", "right"
+        )
+        recording_layout = QVBoxLayout(recording_box)
+        self._recording_status_label = QLabel("RÖGZÍTÉS NEM AKTÍV")
+        self._recording_status_label.setObjectName("recording_status_label")
+        self._recording_status_label.setWordWrap(True)
+        self._recording_details_label = QLabel("Nincs aktív mérési fájl.")
+        self._recording_details_label.setWordWrap(True)
+        self._recording_details_label.setMinimumWidth(0)
+        self._recording_details_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self._recording_details_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._nas_runtime_label = QLabel("NAS: kikapcsolva")
+        self._nas_runtime_label.setWordWrap(True)
+        self._nas_runtime_label.setMinimumWidth(0)
+        self._nas_runtime_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        recording_layout.addWidget(self._recording_status_label)
+        recording_layout.addWidget(self._recording_details_label)
+        recording_layout.addWidget(self._nas_runtime_label)
+        return recording_box
+
+    def _create_startup_summary_component(self) -> QWidget:
+        configuration_box = self._dashboard_box(
+            "startup_configuration", "Indulási konfiguráció", "right"
+        )
+        configuration_layout = QVBoxLayout(configuration_box)
+        self._configuration_summary_label = QLabel()
+        self._configuration_summary_label.setObjectName("configuration_summary")
+        self._configuration_summary_label.setWordWrap(True)
+        self._configuration_summary_label.setMinimumWidth(0)
+        self._configuration_summary_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        configuration_layout.addWidget(self._configuration_summary_label)
+        return configuration_box
+
+    def _create_alarm_banner_component(self) -> QWidget:
+        self._alarm_container = QWidget()
+        self._alarm_container.setObjectName("dashboard_alarm_container")
+        alarm_layout = QHBoxLayout(self._alarm_container)
+        alarm_layout.setContentsMargins(9, 6, 6, 6)
+        self._alarm_label = QLabel()
+        self._alarm_label.setObjectName("dashboard_alarm_label")
+        self._alarm_label.setWordWrap(True)
+        self._alarm_label.setAccessibleName("Aktív biztonsági riasztás")
+        alarm_layout.addWidget(self._alarm_label, 1)
+        self._alarm_close_button = QPushButton("×")
+        self._alarm_close_button.setObjectName("dashboard_alarm_close")
+        self._alarm_close_button.setAccessibleName("Riasztás bezárása")
+        self._alarm_close_button.setToolTip(
+            "Friss biztonsági ellenőrzés után bezárja a riasztást"
+        )
+        self._alarm_close_button.setFixedSize(32, 32)
+        self._alarm_close_button.clicked.connect(self._dismiss_alarm)
+        alarm_layout.addWidget(self._alarm_close_button)
+        self._alarm_label.hide()
+        self._alarm_close_button.hide()
+        self._alarm_container.hide()
+        return self._alarm_container
+
+    def _create_measurement_tabs_component(self) -> QTabWidget:
 
         self._plot = pg.PlotWidget(title="Elmúlt 10 perc nyomásai")
         self._plot.setObjectName("live_measurement_plot")
@@ -6679,58 +6657,114 @@ class DashboardWindow(QMainWindow):
         self._measurement_tabs.addTab(live_measurement_page, "Élő mérés")
         self._measurement_tabs.addTab(self._history_view, "Teljes mérés")
         self._measurement_tabs.currentChanged.connect(self._measurement_tab_changed)
-        left_scroll = QScrollArea()
-        left_scroll.setObjectName("status_scroll_area")
-        left_scroll.setMinimumWidth(170)
-        left_scroll.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        return self._measurement_tabs
+
+    def _create_status_sidebar_component(self) -> QWidget:
+
+        status_container = QWidget()
+        status_container.setObjectName("status_sidebar")
+        status_container.setMinimumWidth(0)
+        status_container.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding
         )
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        left_scroll.setSizeAdjustPolicy(
-            QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+        status_layout = QVBoxLayout(status_container)
+        status_layout.setContentsMargins(4, 0, 4, 4)
+        status_title = QLabel("ÉLŐ ÁLLAPOTOK")
+        status_title.setStyleSheet("font-size:13px;font-weight:700;padding:4px")
+        status_layout.addWidget(status_title)
+        self._state_label = QLabel()
+        self._jacket_label = QLabel("— bar")
+        self._injection_label = QLabel("— bar")
+        self._jacket_remaining_label = QLabel("Maradék folyadék: — ml")
+        self._jacket_net_volume_label = QLabel(
+            "Indítás óta nettó köpenytérfogat: — ml"
         )
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        left_scroll.setWidget(status_container)
-        right_scroll = QScrollArea()
-        right_scroll.setObjectName("control_scroll_area")
-        right_scroll.setMinimumWidth(260)
-        right_scroll.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        self._injection_remaining_label = QLabel("Maradék folyadék: — ml")
+        self._injection_flow_label = QLabel("Besajtolási sebesség: — ml/h")
+        self._injected_volume_label = QLabel("Indítás óta nettó besajtolt: — ml")
+        volume_tooltip = (
+            "Negatív érték esetén a pumpa maradék térfogata az indításkori "
+            "érték fölé nőtt."
         )
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        right_scroll.setSizeAdjustPolicy(
-            QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+        self._jacket_net_volume_label.setToolTip(volume_tooltip)
+        self._injected_volume_label.setToolTip(volume_tooltip)
+        self._line_label = QLabel("— bar")
+        self._delta_label = QLabel("— bar")
+        self._valve_label = QLabel("— %")
+        self._pressure_margin_label = QLabel("— bar")
+        labels = (
+            ("system_state", "Rendszerállapot", self._state_label),
+            ("jacket_pump", "Köpenypumpa", self._jacket_label),
+            ("injection_pump", "Besajtolópumpa", self._injection_label),
+            ("line_pressure", "Vonali nyomás", self._line_label),
+            (
+                "differential_pressure",
+                "Differenciálnyomás",
+                self._delta_label,
+            ),
+            (
+                "pressure_margin",
+                "Nyomáskülönbség (tájékoztató)",
+                self._pressure_margin_label,
+            ),
+            ("valve_status", "Szelep", self._valve_label),
         )
-        right_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        self._connection_labels: dict[str, QLabel] = {}
+        connection_keys = (
+            None,
+            "jacket",
+            "injection",
+            "line_daq",
+            "delta_daq",
+            None,
+            "valve",
         )
-        right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        right_scroll.setWidget(right_container)
-        self._dashboard_sidebars = {
-            "left": left_scroll,
-            "right": right_scroll,
-        }
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setObjectName("dashboard_splitter")
-        splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(5)
-        splitter.setOpaqueResize(True)
-        splitter.addWidget(left_scroll)
-        splitter.addWidget(self._measurement_tabs)
-        splitter.addWidget(right_scroll)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 5)
-        splitter.setStretchFactor(2, 0)
-        splitter.setSizes([270, 760, 340])
-        self._dashboard_splitter = splitter
-        layout.addWidget(splitter, stretch=1)
-        self._layout_editor_bar = self._create_layout_editor_bar()
-        layout.addWidget(self._layout_editor_bar)
-        self._restore_dashboard_layout()
-        self.setCentralWidget(root)
+        for index, (key, title, value) in enumerate(labels):
+            box = self._dashboard_box(key, title, "left")
+            box.setMinimumHeight(76)
+            box_layout = QVBoxLayout(box)
+            value.setStyleSheet(
+                "background:transparent;font-size:20px;font-weight:600"
+            )
+            value.setWordWrap(True)
+            box_layout.addWidget(value)
+            if title == "Köpenypumpa":
+                self._jacket_remaining_label.setStyleSheet(
+                    "background:transparent;color:#66788a;font-size:12px;font-weight:600"
+                )
+                self._jacket_remaining_label.setWordWrap(True)
+                box_layout.addWidget(self._jacket_remaining_label)
+                self._jacket_net_volume_label.setStyleSheet(
+                    "background:transparent;color:#66788a;font-size:12px;font-weight:600"
+                )
+                self._jacket_net_volume_label.setWordWrap(True)
+                box_layout.addWidget(self._jacket_net_volume_label)
+            elif title == "Besajtolópumpa":
+                for detail in (
+                    self._injection_remaining_label,
+                    self._injection_flow_label,
+                    self._injected_volume_label,
+                ):
+                    detail.setStyleSheet(
+                        "background:transparent;color:#66788a;"
+                        "font-size:12px;font-weight:600"
+                    )
+                    detail.setWordWrap(True)
+                    box_layout.addWidget(detail)
+            connection_key = connection_keys[index]
+            if connection_key is not None:
+                connection = QLabel("NINCS ADAT")
+                connection.setStyleSheet(
+                    "background:transparent;color:#66788a;"
+                    "font-size:11px;font-weight:600"
+                )
+                connection.setWordWrap(True)
+                box_layout.addWidget(connection)
+                self._connection_labels[connection_key] = connection
+            status_layout.addWidget(box)
+        status_layout.addStretch(1)
+
+        return status_container
 
     def _create_layout_editor_bar(self) -> QWidget:
         bar = QWidget()
@@ -9873,6 +9907,9 @@ class DashboardWindow(QMainWindow):
                 self._handle_runtime_fault(str(error))
 
     def _start(self) -> None:
+        if self._devices.status.state is ApplicationState.READY:
+            self._start_measurement_preflight(start_measurement=True)
+            return
         if (
             self._devices.status.state is not ApplicationState.RUNNING
             or self._devices.status.measurement
@@ -9880,16 +9917,16 @@ class DashboardWindow(QMainWindow):
             or self._pending_measurement_pump_plan is None
         ):
             self._show_error(
-                "A mérés indítása előtt futtasd le az Előkészítést."
+                "A mérés csak Kész vagy Előkészítve állapotból indítható."
             )
             self._refresh_state()
             return
-        self._start_prepared_measurement()
+        self._start_measurement_runtime()
 
     def _prepare(self) -> None:
-        self._start_measurement_preflight()
+        self._start_measurement_preflight(start_measurement=False)
 
-    def _start_measurement_preflight(self) -> None:
+    def _start_measurement_preflight(self, *, start_measurement: bool) -> None:
         if self._stage.currentData() is None:
             self._show_error("A méréshez válassz projektet és mérési szakaszt.")
             return
@@ -9910,6 +9947,7 @@ class DashboardWindow(QMainWindow):
             return
         if self._preflight_active:
             return
+        self._preflight_starts_measurement = start_measurement
         self._preflight_active = True
         self._refresh_state()
         active_stage = self._stage.currentText()
@@ -9920,7 +9958,7 @@ class DashboardWindow(QMainWindow):
                     self._control_loop.observe_pump_startup_once(
                         active_stage=active_stage
                     )
-                    if self._run_mode is RunMode.HARDWARE
+                    if self._run_mode is RunMode.HARDWARE and not start_measurement
                     else self._control_loop.observe_once(active_stage=active_stage)
                 )
             except Exception as error:
@@ -9932,20 +9970,48 @@ class DashboardWindow(QMainWindow):
 
     def _measurement_preflight_completed(self, result: object) -> None:
         self._preflight_active = False
+        start_measurement = self._preflight_starts_measurement
         if not isinstance(result, MeasurementRecord):
             self._measurement_preflight_failed("érvénytelen előellenőrzési eredmény")
             return
         report = self._build_preflight_report(result)
-        dialog = PreflightDialog(report, self)
+        dialog = PreflightDialog(
+            report,
+            self,
+            accept_text=(
+                "Mérés indítása"
+                if start_measurement
+                else "Tovább az előkészítéshez"
+            ),
+        )
         accepted = (
             dialog.exec() == QDialog.DialogCode.Accepted
             if self.isVisible()
             else report.can_start
         )
         if not accepted:
+            self._preflight_starts_measurement = False
             self._refresh_state()
             return
-        self._begin_measurement_after_preflight()
+        if start_measurement:
+            self._begin_direct_measurement_after_preflight()
+        else:
+            self._begin_measurement_after_preflight()
+
+    def _begin_direct_measurement_after_preflight(self) -> None:
+        """Start acquisition and valve control without changing either pump."""
+        self._preflight_starts_measurement = False
+        self._pending_measurement_pump_plan = None
+        try:
+            # This only advances the application state. With simulated device
+            # autostart disabled it sends no FLOW/PRESS/RUN/STOP pump command.
+            self._devices.start(start_simulated_devices=False)
+            self._devices.set_measurement_state(MeasurementState.WAITING_CONFIRMATION)
+        except Exception as error:
+            self._show_error(f"A mérés nem indítható: {error}")
+            self._refresh_state()
+            return
+        self._start_measurement_runtime()
 
     def _begin_measurement_after_preflight(self) -> None:
         plan: MeasurementPumpPlan | None = None
@@ -9992,33 +10058,13 @@ class DashboardWindow(QMainWindow):
                     return record.safety_reasons
 
                 try:
-                    pump_control.start_measurement_pumps(
-                        jacket_target_pressure_bar=(
-                            plan.jacket_target_pressure_bar
-                        ),
-                        jacket_buildup_flow_ml_per_hour=(
-                            plan.jacket_buildup_flow_ml_per_hour
-                        ),
-                        injection_start_pressure_bar=(
-                            plan.injection_start_pressure_bar
-                        ),
-                        injection_target_flow_ml_per_hour=(
-                            plan.injection_startup_flow_ml_per_hour
-                        ),
-                        jacket_pressure_limit_bar=(
-                            plan.jacket_pressure_limit_bar
-                            if plan.jacket_pressure_limit_bar is not None
-                            else self._max_jacket.value()
-                        ),
-                        injection_pressure_limit_bar=(
-                            plan.injection_pressure_limit_bar
-                            if plan.injection_pressure_limit_bar is not None
-                            else self._max_injection.value()
-                        ),
-                        margin_stability_seconds=plan.margin_stability_seconds,
-                        control_interval_seconds=control_interval_seconds,
-                        control_watchdog_tolerance_seconds=(
-                            control_watchdog_tolerance_seconds
+                    pump_control.prepare_measurement_pumps(
+                        plan,
+                        timing=PumpControlTiming(
+                            control_interval_seconds=control_interval_seconds,
+                            watchdog_tolerance_seconds=(
+                                control_watchdog_tolerance_seconds
+                            ),
                         ),
                         confirmation=confirmation,
                         startup_safety_check=startup_safety_check,
@@ -10088,12 +10134,8 @@ class DashboardWindow(QMainWindow):
         self._preflight_active = False
         self._refresh_state()
 
-    def _start_prepared_measurement(self) -> None:
-        plan = self._pending_measurement_pump_plan
-        if plan is None or self._pump_control is None:
-            self._show_error("Az előkészített pumpabeállítás nem érhető el.")
-            self._refresh_state()
-            return
+    def _start_measurement_runtime(self) -> None:
+        """Start valve control and recording from prepared or manual pump state."""
         self._preflight_active = True
         self._refresh_state()
         try:
@@ -10608,6 +10650,7 @@ class DashboardWindow(QMainWindow):
 
     def _measurement_preflight_failed(self, message: str) -> None:
         self._preflight_active = False
+        self._preflight_starts_measurement = False
         self._show_error(f"A mérés nem indítható: {message}")
         self._refresh_state()
 
@@ -11277,6 +11320,7 @@ class DashboardWindow(QMainWindow):
         preparation_ready = (
             state is ApplicationState.READY and common_start_conditions
         )
+        direct_start = state is ApplicationState.READY and common_start_conditions
         prepared_start = (
             state is ApplicationState.RUNNING
             and self._devices.status.measurement
@@ -11284,7 +11328,8 @@ class DashboardWindow(QMainWindow):
             and self._pending_measurement_pump_plan is not None
             and common_start_conditions
         )
-        self._start_button.setEnabled(prepared_start)
+        measurement_start_ready = direct_start or prepared_start
+        self._start_button.setEnabled(measurement_start_ready)
         if not project_selected:
             self._start_button.setToolTip(
                 "Válasszon aktív projektet és mérési szakaszt."
@@ -11312,21 +11357,21 @@ class DashboardWindow(QMainWindow):
             self._start_button.setToolTip(
                 "Futtassa le sikeresen minden konfigurált eszköz kapcsolati tesztjét."
             )
-        elif not prepared_start:
-            self._start_button.setToolTip(
-                "Előbb futtasd le az Előkészítést; utána ez a gomb "
-                "azonnal elindítja a mérést."
-            )
-        elif state is not ApplicationState.READY:
-            self._start_button.setToolTip(
-                "Aktiválja a hardvermódot; ez egyben létrehozza az élő "
-                "hardverkapcsolatot."
-            )
         elif self._preflight_active:
             self._start_button.setToolTip("A mérés előtti ellenőrzés folyamatban van.")
+        elif direct_start:
+            self._start_button.setToolTip(
+                "Friss biztonsági ellenőrzés után elindítja a szelepvezérlést "
+                "és az adatrögzítést. A kézzel beállított pumpákat nem módosítja."
+            )
+        elif prepared_start:
+            self._start_button.setToolTip(
+                "Elindítja a szelepvezérlést és az adatrögzítést az előkészített "
+                "pumpaállapot módosítása nélkül."
+            )
         else:
             self._start_button.setToolTip(
-                "Tételes biztonsági előellenőrzés után indítja a mérést."
+                "A mérés csak Kész vagy Előkészítve állapotból indítható."
             )
         self._prepare_button.setEnabled(preparation_ready)
         if self._preflight_active:

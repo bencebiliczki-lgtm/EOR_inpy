@@ -4,6 +4,13 @@ import pytest
 
 from eor_control.application import ApplicationState, DeviceControlService, RunMode
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
+from eor_control.pump_commands import (
+    PumpCommand,
+    PumpCommandKind,
+    PumpCommandPriority,
+    PumpCommandResult,
+    PumpCommandStatus,
+)
 from eor_control.simulators import SimulatedDataAcquisition, SimulatedPump
 
 
@@ -107,6 +114,70 @@ def test_emergency_stop_is_latched_until_acknowledged() -> None:
 
     control.acknowledge_fault()
     assert control.status.state is ApplicationState.READY
+
+
+class QueuedStopPump(SimulatedPump):
+    def __init__(self, role: str, events: list[str]) -> None:
+        super().__init__()
+        self.role = role
+        self.events = events
+
+    def cancel_pending_commands(self) -> None:
+        self.events.append(f"{self.role}:cancel")
+
+    def submit_stop(self, *, emergency: bool = False) -> str:
+        assert emergency
+        self.events.append(f"{self.role}:submit")
+        return f"{self.role}-stop"
+
+    def command_result(self, command_id: str) -> PumpCommandResult:
+        assert "jacket:submit" in self.events
+        assert "injection:submit" in self.events
+        self.events.append(f"{self.role}:result")
+        command = PumpCommand(
+            PumpCommandKind.STOP,
+            PumpCommandPriority.EMERGENCY,
+            verify_status=True,
+        )
+        return PumpCommandResult(
+            command_id,
+            command,
+            PumpCommandStatus.SUCCEEDED,
+            submitted_monotonic=0.0,
+            started_monotonic=0.0,
+            completed_monotonic=0.0,
+            operating_status="STOP REMOTE",
+        )
+
+
+class OrderingDaq(SimulatedDataAcquisition):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self.events = events
+
+    def set_safe_state(self) -> None:
+        self.events.append("daq:safe")
+        super().set_safe_state()
+
+
+def test_emergency_queues_both_stops_before_waiting_for_results() -> None:
+    events: list[str] = []
+    daq = OrderingDaq(events)
+    control = DeviceControlService(
+        jacket_pump=QueuedStopPump("jacket", events),
+        injection_pump=QueuedStopPump("injection", events),
+        daq=daq,
+    )
+    control.connect()
+    control.start()
+
+    control.emergency_stop()
+
+    first_result = min(events.index("jacket:result"), events.index("injection:result"))
+    assert events.index("jacket:submit") < first_result
+    assert events.index("injection:submit") < first_result
+    assert events.index("daq:safe") < first_result
+    assert daq.safe_state_requested
 
 
 def test_safe_state_logs_every_action_and_result(tmp_path: Path) -> None:

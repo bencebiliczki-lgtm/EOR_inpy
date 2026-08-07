@@ -22,10 +22,13 @@ vészleállítót és a pumpák saját nyomásvédelmét.
    biztonsági mintát vesz, majd elindítja a szelep PID-vezérlését és az
    adatrögzítési ciklust. Pumpaparancsot nem ad ki.
 
-A **Mérés indítása** nem kéri be újra az előkészítési adatokat, és
-befejezett előkészítés nélkül sem hardver-, sem szimulációs módban nem
-használható. A szimuláció ugyanazt az állapotgépet és pumpaindítási sorrendet
-gyakorolja, de fizikai kimeneti parancs nélkül.
+A **Mérés indítása** nem kéri be az előkészítési adatokat. READY állapotban is
+használható, ha a kezelő előzőleg manuálisan állította be a pumpákat: ilyenkor a
+rendszer friss biztonsági előellenőrzést kér, majd közvetlenül a szelepvezérlést
+és az adatrögzítést indítja. Ez az út nem hívja a pumpa-előkészítést, és nem ad
+ki pumpa-`STOP`, `FLOW`, `PRESS` vagy `RUN` parancsot. Az **Előkészítés** továbbra
+is választható automatikus út; annak befejezése után ugyanez a közös mérési
+runtime indul el.
 
 ## Rétegek és felelősségek
 
@@ -40,6 +43,12 @@ gyakorolja, de fizikai kimeneti parancs nélkül.
 
 A UI nem beszél közvetlenül a soros driverrel. Minden fizikai pumpaművelet
 az alkalmazási és pumpavezérlési szolgáltatáson keresztül fut.
+
+Az UI és a pumpaszolgáltatás ugyanazt a `PumpStartupPlan` adatmodellt
+használja. A szolgáltatás egyetlen `prepare_measurement_pumps` belépési pontja
+végzi a validálást, a friss olvasási kaput, a KÖP-felfutást, a BES-indítást,
+a célértékek stabilizálását és a hibánál kötelező rollbacket. A korábbi
+sokparaméteres `start_measurement_pumps` csak kompatibilitási adapter.
 
 ## Állapotgép
 
@@ -215,11 +224,12 @@ FLOW = KÖP előkészítési flow
 RUN
 ```
 
-A BES pumpa ekkor még nem indul. A rendszer megvárja, amíg a
-`KÖP nyomás − BES nyomás` legalább a konfigurált minimum, alapértelmezetten
-20 bar, és a megadott stabilitási ideig fennáll. A beállítás 0,1 bar vagy
-nagyobb pozitív érték lehet; a program nem helyettesíti fix 20 baros
-konstanssal.
+A BES pumpa ekkor még nem kap konfigurációs vagy `RUN` parancsot. A rendszer
+megvárja a KÖP saját célnyomását és azt, hogy a `KÖP nyomás − BES nyomás`
+legalább a konfigurált minimum, alapértelmezetten 20 bar legyen. Ezután külön
+állapotátmenetekben fut a `KÖP STOP → CONST PRESS → PRESS → RUN` sorrend. A
+KÖP nyomástartásának a megadott stabilitási ideig fenn kell maradnia; csak
+ezután kezdődhet a BES konfigurálása.
 
 ### 2. BES nyomásfelépítés
 
@@ -238,18 +248,25 @@ a KÖP a kezelő által megadott fix célnyomást tartja.
 
 A kaput a rendszer három ponton biztosítja:
 
-1. a KÖP felfutási ciklus addig nem fejeződik be, amíg nincs meg a stabil
+1. a KÖP felfutása addig nem fejeződik be, amíg nincs meg a saját célja és a
    konfigurált vagy annál nagyobb különbség;
-2. a BES `REMOTE` és flow-konfigurációja előtt újra ellenőrzi a különbséget;
+2. a BES konfigurálása csak a stabil KÖP nyomástartás után kezdődhet;
 3. közvetlenül a BES `RUN` előtt ismét ellenőrzi azt.
 
 Ha a különbség a BES konfigurálása alatt visszaesik a konfigurált minimum alá, a BES nem
 indul el, az előkészítés hibával megszakad, és mindkét pumpa STOP-ot kap.
 
-Amikor a KÖP eléri saját célját:
+Az állapotgép parancsonként külön aszinkron állapotot használ:
 
 ```text
-KÖP STOP → CONST PRESS → PRESS = KÖP célnyomás → RUN
+KÖP cél elérve
+→ KÖP STOP queue → STOPPING, közben safety ciklusok
+→ igazolt STOP → CONST PRESS/PRESS queue
+→ igazolt konfiguráció → KÖP RUN queue
+→ STATUS által igazolt RUN → stabil nyomástartás
+→ BES REMOTE/konfiguráció, eredményenként külön állapot
+→ STATUS által igazolt BES RUN → célérték figyelése
+→ BES STOP queue → STATUS által igazolt STOP → záró safety ciklus
 ```
 
 Amikor a BES első alkalommal eléri vagy meghaladja a kezdőnyomást, azonnal
@@ -265,9 +282,24 @@ időzítést. Ugyanazt a Developer beállítást kapja, mint a mérési runtime:
 - `developer/control_interval_seconds`: vezérlési ciklusidő;
 - `developer/watchdog_tolerance_seconds`: watchdog-tűrés.
 
-A ciklus abszolút monotonic ütemen fut. Ha egy ellenőrzés hosszabb, mint
+A tisztán telemetriai és biztonsági ciklus abszolút monotonic ütemen fut. Ha
+egy ilyen ellenőrzés hosszabb, mint
 `ciklusidő + watchdog-tűrés`, `control cycle deadline missed` hiba keletkezik,
 az előkészítés megszakad, és mindkét pumpán megkísérli a STOP-ot.
+
+A DASNET `STOP`, konfigurációs és `RUN` tranzakciók saját soros timeout- és
+retry-kerettel rendelkeznek. A vezérlési szál csak `PumpCommand` objektumot tesz
+queue-ba, majd későbbi ciklusokban olvassa a `CommandResult` állapotát
+(`QUEUED/RUNNING/SUCCEEDED/FAILED/TIMED_OUT/CANCELLED`), ezért a soros művelet
+ideje nem kerül a control-cycle watchdog alá. Az érintett pumpa workerének
+pollingja a tranzakció idejére szünetel, de a másik pumpa workerét ez nem
+blokkolja. A már sorba állított vezérlő- vagy biztonsági parancs a következő
+pollingtranzakció előtt kap lehetőséget.
+
+`REMOTE`, `RUN` és `STOP` csak célzott STATUS-visszaolvasás után sikeres. Minden
+parancs egyedi azonosítóval naplózza a queue-várakozást, tranzakcióidőt,
+ellenőrzési időt és eredményt. A parancstimeout külön hiba, például
+`injection command timeout: STOP`; nem jelenhet meg control-cycle deadline-ként.
 
 A vezérlési ciklus és a pumpa polling nem ugyanaz:
 

@@ -508,11 +508,12 @@ cél-nyomás elérésekor `STOP → CONST PRESS → RUN` váltás következik. �
 felfutás után a kezelő által megadott nyomást tartja.
 A köpenynyomás felépülése alatt a minimális különbség átmenetileg nem hibafeltétel,
 mert ekkor a besajtolópumpa még tiltott; minden más biztonsági ellenőrzés aktív.
-A program a szükséges stabil köpenynyomás-többlet elérésekor engedélyezi a
-besajtolópumpa megadott térfogatáramú `RUN` parancsát. A besajtoló `RUN` után a
-különbség már nem reteszelési feltétel: a második előkészítési ciklus csak a két
-megadott kezdőnyomást várja ki. A köpenypumpa saját célértékének elérésekor
-`STOP → CONST PRESS → RUN` sorrenddel a kezelő fix nyomáscéljára vált. A mérési
+A program előbb megvárja a köpenypumpa saját célértékét és a szükséges
+köpenynyomás-többletet. Ezután `STOP → CONST PRESS → RUN` sorrenddel a kezelő
+fix nyomáscéljára vált, és kivárja a stabil nyomástartást. A besajtolópumpa csak
+ezután konfigurálható és indítható. A besajtoló `RUN` után a különbség már nem
+reteszelési feltétel: a második előkészítési szakasz a BES kezdőnyomását várja.
+A mérési
 runtime sem próbál 20 bar-os követési különbséget fenntartani. A két cél
 elérésekor a BES pumpa azonnal leáll, és a stabilitási ablak alatt is STOP
 állapotban marad. Az előkészítés ezután `WAITING_CONFIRMATION` állapotban
@@ -521,11 +522,32 @@ gomb megnyomásakor indul. Bármelyik felfutás 120
 másodperces timeoutja, megszakítása vagy más biztonsági oka mindkét pumpát
 leállítja, és a runtime nem indul.
 
+Az automatikus előkészítés nem kötelező indítási út. Ha a kezelő manuálisan
+állította be a pumpákat, READY állapotban közvetlenül megnyomhatja a **Mérés
+indítása** gombot. A rendszer ilyenkor normál mérési telemetriával friss
+biztonsági előellenőrzést végez, majd a `DeviceControlService` állapotát
+előreléptetve ugyanazt a szelep-PID- és adatrögzítési runtime-ot indítja. A
+`PumpControlService.prepare_measurement_pumps` ezen az ágon nem fut le, és a
+pumpák nem kapnak `STOP`, `FLOW`, `PRESS` vagy `RUN` parancsot.
+
 A BES automatikus előkészítése háromszoros indítási kaput használ: a stabil
-minimum eléréséig semmilyen BES-konfiguráció nem indul, majd a BES `REMOTE`
-előtt és közvetlenül a BES `RUN` előtt is újraolvassa a cache-elt KÖP–BES
-különbséget. Ez az automatikus kapu nem kapcsolható ki a manuális
+KÖP-cél és nyomástartás eléréséig semmilyen BES-konfiguráció nem indul, majd a
+BES konfigurálása alatt és közvetlenül a BES `RUN` előtt is újraolvassa a
+cache-elt KÖP–BES különbséget. Ez az automatikus kapu nem kapcsolható ki a manuális
 pumpavezérlés eltérő szabályával.
+
+Az előkészítés explicit, aszinkron állapotgép. A `STOP`, konfiguráció és `RUN`
+`PumpCommand` objektumként kerül a megfelelő pumpa prioritásos queue-jába; a
+vezérlési szál későbbi ciklusokban csak a `CommandResult` állapotát ellenőrzi.
+Pumpánként egy `PollingPump` worker az adott COM-port kizárólagos tulajdonosa,
+ugyanott ütemezi a pollingot és a parancsokat. Emiatt ugyanazon porton nem
+keveredhet két keret, miközben a KÖP és BES külön workerén párhuzamosan haladhat.
+A vezérlési watchdog csak a cache-/NI-kiértékelést méri; a queue-várakozásnak,
+parancstranzakciónak, állapotátmenetnek és teljes nyomásfelépítésnek külön
+időkorlátja van. A rollback mindkét STOP-ot előbb queue-ba helyezi, majd
+egymástól
+függetlenül megkísérli; `PROBLEM=LOCAL MODE` esetén egyszeri `REMOTE → STOP`
+helyreállítást végez, és annak hibáját is megőrzi.
 
 A besajtolópumpa `RUN` előtt a szolgáltatás friss státuszt olvas mindkét pumpáról,
 és a konfigurált minimum alatti köpenynyomás-többletnél megtagadja az indítást. A `STOP ALL`
@@ -586,8 +608,9 @@ A mérésindítás állapotai és írási kapuja
 
 Az alkalmazási mód (`HARDWARE`/`SIMULATION`), a hardverkapcsolat
 (`CONNECTED`/`PARTIAL`/`DISCONNECTED`) és a mérés állapota egymástól
-független. A mérési sorrend: `IDLE → PREPARING →
-WAITING_CONFIRMATION → RUNNING`; hiba esetén `STOPPED_BY_FAULT` következik,
+független. Az előkészített mérési sorrend: `IDLE → PREPARING →
+WAITING_CONFIRMATION → RUNNING`; a manuális pumpaállapotból induló rövid út
+`IDLE → WAITING_CONFIRMATION → RUNNING`. Hiba esetén `STOPPED_BY_FAULT` következik,
 miközben az alkalmazás hardvermódban és a profil megmarad.
 
 A pumpaszolgáltatás írási kapuja mindkét pumpa teljes, friss
@@ -597,6 +620,20 @@ előkészítési flow-ja csak a kezdőnyomás felépítéséhez használható. A
 stabil kezdőnyomás után a KÖP pumpa a konfigurált nyomástartásban marad, a BES
 pumpa pedig STOP állapotban vár. A PID és az adatmentés a dashboard külön
 **Mérés indítása** gombjáig nem indul; további felugró megerősítés nincs.
+
+A pumpa-előkészítés kanonikus bemenete a `PumpStartupPlan`, időzítése a
+`PumpControlTiming`. A `DashboardWindow` nem bontja ezeket ismét pumpaparancsokra:
+egyetlen alkalmazási szolgáltatáshívást indít. A szolgáltatáson belül minden
+`MAXPRESS`, konfiguráció, STOP és RUN a közös állapot- és biztonsági
+kapukon halad át.
+
+A `DashboardWindow` felépítése prezentációs komponensekre tagolt. Külön
+factory építi a riasztási sávot, az élő státuszpanelt, a mérési
+diagramfüleket, a két oldalsávot összefogó splittert, valamint a jobb oldali
+mérés-, flow-, rögzítés-, projekt-, konfiguráció- és szelepvezérlési
+dobozokat. Ezek a komponensek csak widgetet hoznak létre és a meglévő
+alkalmazási metódusokra kötik a signalokat; hardver- vagy vezérlési döntést
+nem tartalmaznak.
 
 Az előkészítés és a mérés ugyanazt a `PollingPump` cache-t olvassa. Az
 ütemező abszolút határidőkkel tartja a konfigurált periódust, kimaradt időrésnél

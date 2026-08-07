@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 from enum import StrEnum
+from time import monotonic, sleep
 
 from eor_control.devices import DataAcquisition, Pump
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
+from eor_control.pump_commands import PumpCommandResult, PumpCommandStatus
 
 
 class RunMode(StrEnum):
@@ -209,6 +211,13 @@ class DeviceControlService:
         self._measurement = MeasurementState.STOPPED_BY_FAULT
 
     def _request_safe_state(self, safety_rule: str) -> tuple[str, ...]:
+        asynchronous = all(
+            callable(getattr(pump, "submit_stop", None))
+            and callable(getattr(pump, "command_result", None))
+            for pump in (self._jacket_pump, self._injection_pump)
+        )
+        if asynchronous:
+            return self._request_queued_safe_state(safety_rule)
         errors: list[str] = []
         operations = (
             (
@@ -236,6 +245,96 @@ class DeviceControlService:
                     category,
                     label,
                     f"FAILED: {error}",
+                    "ERROR",
+                    safety_rule,
+                )
+            else:
+                self._log_safe_state(
+                    category,
+                    label,
+                    "OK",
+                    "WARNING",
+                    safety_rule,
+                )
+        return tuple(errors)
+
+    def _request_queued_safe_state(self, safety_rule: str) -> tuple[str, ...]:
+        errors: list[str] = []
+        pending: list[tuple[str, object, str, DiagnosticCategory]] = []
+        for label, pump, category in (
+            (
+                "jacket pump STOP",
+                self._jacket_pump,
+                DiagnosticCategory.JACKET_PUMP,
+            ),
+            (
+                "injection pump STOP",
+                self._injection_pump,
+                DiagnosticCategory.INJECTION_PUMP,
+            ),
+        ):
+            try:
+                cancel = getattr(pump, "cancel_pending_commands", None)
+                if callable(cancel):
+                    cancel()
+                submit_stop = getattr(pump, "submit_stop", None)
+                if not callable(submit_stop):
+                    raise RuntimeError("pump emergency command queue is unavailable")
+                command_id = submit_stop(emergency=True)
+                pending.append((label, pump, command_id, category))
+            except Exception as error:
+                errors.append(f"{label} failed: {error}")
+                self._log_safe_state(
+                    category,
+                    label,
+                    f"FAILED: {error}",
+                    "ERROR",
+                    safety_rule,
+                )
+
+        try:
+            self._daq.set_safe_state()
+        except Exception as error:
+            errors.append(f"DAQ safe state failed: {error}")
+            self._log_safe_state(
+                DiagnosticCategory.NI_VALVE,
+                "DAQ safe state",
+                f"FAILED: {error}",
+                "ERROR",
+                safety_rule,
+            )
+        else:
+            self._log_safe_state(
+                DiagnosticCategory.NI_VALVE,
+                "DAQ safe state",
+                "OK",
+                "WARNING",
+                safety_rule,
+            )
+
+        for label, queued_pump, command_id, category in pending:
+            deadline = monotonic() + 7.0
+            result: PumpCommandResult | None = None
+            result_reader = getattr(queued_pump, "command_result", None)
+            if not callable(result_reader):
+                errors.append(f"{label} failed: command result reader unavailable")
+                continue
+            while monotonic() < deadline:
+                result = result_reader(command_id)
+                if result.status.terminal:
+                    break
+                sleep(0.01)
+            if result is None or result.status is not PumpCommandStatus.SUCCEEDED:
+                detail = (
+                    "STOP acknowledgement timed out"
+                    if result is None or not result.status.terminal
+                    else result.error or result.status.value
+                )
+                errors.append(f"{label} failed: {detail}")
+                self._log_safe_state(
+                    category,
+                    label,
+                    f"FAILED: {detail}",
                     "ERROR",
                     safety_rule,
                 )
