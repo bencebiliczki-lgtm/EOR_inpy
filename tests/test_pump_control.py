@@ -112,6 +112,46 @@ def test_remote_configure_run_stop_and_local_sequence() -> None:
     assert jacket.commands == ["REMOTE", "FLOW=1.0", "RUN", "STOP", "LOCAL"]
 
 
+def test_ensure_remote_skips_command_when_device_already_confirms_remote() -> None:
+    class AlreadyRemotePump(FakePump):
+        def is_remote_mode(self) -> bool:
+            return True
+
+    jacket = AlreadyRemotePump(120.0, [])
+    control = PumpControlService(
+        jacket_pump=jacket,
+        injection_pump=FakePump(100.0, []),
+    )
+    control.authorize(PumpControlService.AUTHORIZATION)
+    control.connect(PumpRole.JACKET)
+    jacket.commands.clear()
+
+    control.ensure_remote(PumpRole.JACKET)
+
+    assert jacket.commands == []
+    assert control.state(PumpRole.JACKET).remote
+
+
+def test_ensure_remote_sends_command_when_device_is_not_remote() -> None:
+    class LocalPump(FakePump):
+        def is_remote_mode(self) -> bool:
+            return False
+
+    jacket = LocalPump(120.0, [])
+    control = PumpControlService(
+        jacket_pump=jacket,
+        injection_pump=FakePump(100.0, []),
+    )
+    control.authorize(PumpControlService.AUTHORIZATION)
+    control.connect(PumpRole.JACKET)
+    jacket.commands.clear()
+
+    control.ensure_remote(PumpRole.JACKET)
+
+    assert jacket.commands == ["REMOTE"]
+    assert control.state(PumpRole.JACKET).remote
+
+
 def test_measurement_start_preserves_hourly_flow_targets() -> None:
     control, jacket, injection = service()
 
@@ -132,6 +172,38 @@ def test_measurement_start_preserves_hourly_flow_targets() -> None:
     assert injection.commands == ["REMOTE", "FLOW=1000.0", "RUN", "STOP"]
     assert control.state(PumpRole.JACKET).running
     assert not control.state(PumpRole.INJECTION).running
+
+
+def test_measurement_preparation_skips_redundant_remote_commands() -> None:
+    class AlreadyRemotePump(FakePump):
+        def is_remote_mode(self) -> bool:
+            return True
+
+    jacket = AlreadyRemotePump(120.0, [])
+    injection = AlreadyRemotePump(100.0, [])
+    control = PumpControlService(jacket_pump=jacket, injection_pump=injection)
+    control.authorize(PumpControlService.AUTHORIZATION)
+    control.connect(PumpRole.JACKET)
+    control.connect(PumpRole.INJECTION)
+    jacket.commands.clear()
+    injection.commands.clear()
+
+    control.prepare_measurement_pumps(
+        PumpStartupPlan(120.0, 1000.0, 100.0, 1000.0),
+        timing=PumpControlTiming(),
+        confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+    )
+
+    assert "REMOTE" not in jacket.commands
+    assert "REMOTE" not in injection.commands
+    assert jacket.commands == [
+        "FLOW=1000.0",
+        "RUN",
+        "STOP",
+        "PRESS=120.0",
+        "RUN",
+    ]
+    assert injection.commands == ["FLOW=1000.0", "RUN", "STOP"]
 
 
 def test_local_pump_remote_failure_has_specific_preparation_error() -> None:
@@ -865,6 +937,31 @@ def test_global_safe_stop_observation_clears_running_state_without_new_command()
     assert len(jacket.commands) == command_count
 
 
+def test_remote_supervision_is_enabled_only_for_connected_pumps_and_stops_safely(
+) -> None:
+    class SupervisedPump(FakePump):
+        supervision: list[bool]
+
+        def __init__(self, pressure: float) -> None:
+            super().__init__(pressure, [])
+            self.supervision = []
+
+        def set_remote_supervision_active(self, active: bool) -> None:
+            self.supervision.append(active)
+
+    jacket = SupervisedPump(120.0)
+    injection = SupervisedPump(100.0)
+    control = PumpControlService(jacket_pump=jacket, injection_pump=injection)
+    control.authorize(PumpControlService.AUTHORIZATION)
+    control.connect(PumpRole.JACKET)
+
+    control.set_remote_supervision_active(True)
+    control.observe_safe_stop()
+
+    assert jacket.supervision == [True, False]
+    assert injection.supervision == [False]
+
+
 def test_full_safety_interlock_blocks_every_pump_run() -> None:
     jacket = FakePump(120.0, [])
     injection = FakePump(100.0, [])
@@ -908,7 +1005,7 @@ def test_pumps_connect_and_report_status_independently() -> None:
     assert errors[PumpRole.INJECTION] == "nincs csatlakoztatva"
 
 
-def test_manual_connect_enters_remote_as_one_operation() -> None:
+def test_manual_connect_does_not_change_pump_mode() -> None:
     jacket = FakePump(120.0, [])
     control = PumpControlService(
         jacket_pump=jacket,
@@ -916,12 +1013,12 @@ def test_manual_connect_enters_remote_as_one_operation() -> None:
     )
     control.authorize(PumpControlService.AUTHORIZATION)
 
-    status = control.connect_remote(PumpRole.JACKET)
+    status = control.connect(PumpRole.JACKET)
 
     assert status.pressure_bar == 120.0
-    assert jacket.commands == ["CONNECT", "REMOTE"]
+    assert jacket.commands == ["CONNECT"]
     assert control.connected(PumpRole.JACKET)
-    assert control.state(PumpRole.JACKET).remote
+    assert not control.state(PumpRole.JACKET).remote
 
 
 class RemoteFailingPump(FakePump):
@@ -929,7 +1026,7 @@ class RemoteFailingPump(FakePump):
         raise ConnectionError("REMOTE unavailable")
 
 
-def test_manual_connect_closes_port_when_remote_fails() -> None:
+def test_first_control_operation_reports_remote_failure_after_connect() -> None:
     jacket = RemoteFailingPump(120.0, [])
     control = PumpControlService(
         jacket_pump=jacket,
@@ -937,11 +1034,68 @@ def test_manual_connect_closes_port_when_remote_fails() -> None:
     )
     control.authorize(PumpControlService.AUTHORIZATION)
 
+    control.connect(PumpRole.JACKET)
     with pytest.raises(ConnectionError, match="REMOTE unavailable"):
-        control.connect_remote(PumpRole.JACKET)
+        control.configure(PumpRole.JACKET, PumpOperatingMode.CONSTANT_FLOW, 1.0)
 
-    assert jacket.commands == ["CONNECT", "DISCONNECT"]
-    assert not control.connected(PumpRole.JACKET)
+    assert jacket.commands == ["CONNECT"]
+    assert control.connected(PumpRole.JACKET)
+
+
+def test_control_operation_restores_remote_mode_after_runtime_loss() -> None:
+    class ModeTrackingPump(FakePump):
+        remote_mode = False
+
+        def is_remote_mode(self) -> bool:
+            return self.remote_mode
+
+        def enter_remote(self) -> None:
+            super().enter_remote()
+            self.remote_mode = True
+
+    jacket = ModeTrackingPump(120.0, [])
+    control = PumpControlService(
+        jacket_pump=jacket,
+        injection_pump=FakePump(100.0, []),
+    )
+    control.authorize(PumpControlService.AUTHORIZATION)
+    control.connect(PumpRole.JACKET)
+    control.configure(PumpRole.JACKET, PumpOperatingMode.CONSTANT_FLOW, 1.0)
+    jacket.commands.clear()
+    jacket.remote_mode = False
+
+    control.run(PumpRole.JACKET, PumpControlService.RUN_JACKET_CONFIRMATION)
+
+    assert jacket.commands == ["REMOTE", "RUN"]
+    assert control.state(PumpRole.JACKET).running
+
+
+def test_control_operation_recovers_local_mode_race_and_retries_once() -> None:
+    class LocalRacePump(FakePump):
+        flow_attempts = 0
+
+        def is_remote_mode(self) -> bool:
+            return True
+
+        def set_constant_flow(self, target: float) -> None:
+            self.flow_attempts += 1
+            if self.flow_attempts == 1:
+                raise RuntimeError("PROBLEM=LOCAL MODE")
+            super().set_constant_flow(target)
+
+    jacket = LocalRacePump(120.0, [])
+    control = PumpControlService(
+        jacket_pump=jacket,
+        injection_pump=FakePump(100.0, []),
+    )
+    control.authorize(PumpControlService.AUTHORIZATION)
+    control.connect(PumpRole.JACKET)
+    jacket.commands.clear()
+
+    control.configure(PumpRole.JACKET, PumpOperatingMode.CONSTANT_FLOW, 1.0)
+
+    assert jacket.flow_attempts == 2
+    assert jacket.commands == ["REMOTE", "FLOW=1.0"]
 
 
 class StopFailingPump(FakePump):

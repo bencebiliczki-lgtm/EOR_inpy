@@ -216,7 +216,7 @@ def _enter_hardware_pumps_remote(
     )
     pump_control.observe_connected(*enabled_roles)
     for role in enabled_roles:
-        pump_control.enter_remote(role)
+        pump_control.ensure_remote(role)
 
 
 LIGHT_STYLESHEET = """
@@ -3258,9 +3258,7 @@ class PumpControlDialog(ResizableDialog):
         form.addRow("Üzemmód", mode)
         form.addRow("Célérték", target)
         form.addRow(
-            self._button(
-                "CSATLAKOZÁS + REMOTE", lambda: self._connect_pump(role)
-            )
+            self._button("CSATLAKOZÁS", lambda: self._connect_pump(role))
         )
         form.addRow(self._button("LEVÁLASZTÁS", lambda: self._disconnect_pump(role)))
         form.addRow(self._button("BEÁLLÍTÁS", lambda: self._configure(role)))
@@ -3392,8 +3390,8 @@ class PumpControlDialog(ResizableDialog):
 
     def _connect_pump(self, role: PumpRole) -> None:
         self._execute(
-            lambda: self._service.connect_remote(role),
-            f"{role.value} pump connected in REMOTE mode",
+            lambda: self._service.connect(role),
+            f"{role.value} pump connected",
         )
 
     def _disconnect_pump(self, role: PumpRole) -> None:
@@ -10425,7 +10423,15 @@ class DashboardWindow(QMainWindow):
         self._line_pressures.clear()
         self._alarm_points.clear()
         self._alarm_scatter.setData([])
-        self._runtime.start(settings)
+        pump_control = self._pump_control
+        if pump_control is not None:
+            pump_control.set_remote_supervision_active(True)
+        try:
+            self._runtime.start(settings)
+        except Exception:
+            if pump_control is not None:
+                pump_control.set_remote_supervision_active(False)
+            raise
         # RUNNING is the terminal state of startup: the acquisition/control
         # worker must be active before the public measurement state advances.
         self._devices.set_measurement_state(MeasurementState.RUNNING)
@@ -10982,6 +10988,8 @@ class DashboardWindow(QMainWindow):
 
     def _stop(self) -> None:
         try:
+            if self._pump_control is not None:
+                self._pump_control.set_remote_supervision_active(False)
             self._runtime.stop()
             self._measurement_writer.complete_current_phase()
             self._devices.stop()
@@ -11496,6 +11504,8 @@ class DashboardWindow(QMainWindow):
         self._preflight_active = False
         errors: list[str] = []
         try:
+            if self._pump_control is not None:
+                self._pump_control.set_remote_supervision_active(False)
             if self._active_alarm_text == "Nincs aktív riasztás":
                 self._set_active_alarm(f"KRITIKUS HARDVERHIBA: {message}")
             if self._runtime.running:

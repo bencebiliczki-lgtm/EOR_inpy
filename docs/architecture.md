@@ -568,9 +568,13 @@ pumpánál tiltott. A dashboard globális STOP-ja szinkronizálja, a vészállap
 visszavonja a pumpavezérlési jogosultságot.
 
 A manuális pumpa- és szelepvezérlés csak Developer módban, egy közös ablakból
-érhető el. Részleges hardver tesztmódban az ablak `IDLE` állapotból is megnyitható,
-és minden profilhoz hozzáadott pumpán a kapcsolódás, azonosítás és REMOTE módba
-lépés egyetlen UI-művelet. A pumpastátuszok és az engedélyezett NI-bemenetek külön
+érhető el. Részleges hardver tesztmódban az ablak `IDLE` állapotból is megnyitható.
+A pumpa **Csatlakozás** művelete csak kapcsolódik és azonosít, módot nem vált.
+Minden ezt követő távoli vezérlőművelet közvetlenül a saját parancsa előtt
+ellenőrzi a Remote módot, és Local állapotnál automatikusan `REMOTE` módba vált.
+Ha a pumpa az ellenőrzés és a parancs között Local módba esik, a művelet egyszer
+helyreállítja a Remote módot és újrapróbálja a parancsot. A pumpastátuszok és az
+engedélyezett NI-bemenetek külön
 hibahatárral olvashatók, ezért egy nem hozzáadott érzékelő nem jelenik meg
 kapcsolathibaként. Pumpa-RUN előtt a `ManualSafetyMonitor` csak a megcélzott pumpa
 kapcsolatát, véges saját adatait és maximális nyomását ellenőrzi. A kézi
@@ -584,16 +588,24 @@ normál parancsok átrendezhetők vagy törölhetők; a futó parancs, valamint 
 prioritásos biztonsági `STOP` és safe-state művelet nem szerkeszthető és nem
 törölhető.
 
-A normál, kezelő által megerősített hardvermód-aktiválás is `REMOTE` módba állítja
-az összes engedélyezett pumpát a csatlakozás után. Az aktiválás csak akkor válik
-aktívvá, ha minden `REMOTE` parancs célzott státusz-visszaolvasása sikeres; hiba
-esetén a már megnyitott hardverkapcsolatok lezárási útvonala fut le.
+A normál, kezelő által megerősített hardvermód-aktiválás a csatlakozás után
+ellenőrzi az összes engedélyezett pumpa cache-elt STATUS állapotát. A már explicit
+Remote pumpán nem küld újabb `REMOTE` parancsot; Local vagy nem egyértelmű
+állapotnál elküldi, és célzott STATUS-visszaolvasással ellenőrzi. Az aktiválás csak
+igazolt Remote állapotokkal válik aktívvá; hiba esetén a már megnyitott
+hardverkapcsolatok lezárási útvonala fut le.
 
 A `LOCAL` pumpastátusz érvényes telemetria, nem `INVALID` adatminőség. Emiatt
 `IDLE`, `READY` és `PREPARING` állapotban önmagában nem vált ki
-`FULL_SAFE_STOP`-ot. Az előkészítési állapotgép küldi a REMOTE parancsot, majd
-célzott STATUS-visszaolvasással explicit Remote állapotot követel; csak ezután
-léphet tovább a konfigurálási és RUN fázisokra.
+`FULL_SAFE_STOP`-ot. Az előkészítési állapotgép a már explicit Remote pumpán
+kihagyja a redundáns parancsot; egyébként REMOTE parancsot küld, majd célzott
+STATUS-visszaolvasással explicit Remote állapotot követel. Csak ezután léphet
+tovább a konfigurálási és RUN fázisokra.
+A mérési runtime indulásakor a pumpaworkerek Remote-felügyelete aktiválódik. A
+periodikus STATUS olvasás `LOCAL` állapotnál magas prioritású, visszaellenőrzött
+`REMOTE` parancsot ütemez; leállítás vagy safe-state előtt a felügyelet kikapcsol,
+így nem állíthatja vissza a pumpát a biztonsági STOP után. A dashboard pollingja
+ugyanezt a telemetriacache-t olvassa, de önmagában soha nem kezdeményez módváltást.
 A manuális ablak időzített kapcsolatfrissítése nem hív közös `observe_once`
 mérési ciklust: a pumpák és az NI-bemenetek külön olvasása csak kapcsolat- és
 telemetriateszt. A teljes mérési `SafetyMonitor` kizárólag normál mérési

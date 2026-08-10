@@ -132,7 +132,7 @@ from eor_control.ui import (  # noqa: E402
 )
 
 
-def test_hardware_activation_enters_each_enabled_pump_remote() -> None:
+def test_hardware_activation_ensures_each_enabled_pump_is_remote() -> None:
     class RecordingPumpControl:
         def __init__(self) -> None:
             self.operations: list[object] = []
@@ -140,7 +140,7 @@ def test_hardware_activation_enters_each_enabled_pump_remote() -> None:
         def observe_connected(self, *roles: PumpRole) -> None:
             self.operations.append(("CONNECTED", roles))
 
-        def enter_remote(self, role: PumpRole) -> None:
+        def ensure_remote(self, role: PumpRole) -> None:
             self.operations.append(("REMOTE", role))
 
     control = RecordingPumpControl()
@@ -166,7 +166,7 @@ def test_hardware_activation_does_not_mark_success_after_remote_failure() -> Non
         def observe_connected(self, *roles: PumpRole) -> None:
             assert roles == (PumpRole.JACKET, PumpRole.INJECTION)
 
-        def enter_remote(self, role: PumpRole) -> None:
+        def ensure_remote(self, role: PumpRole) -> None:
             self.remote_attempts.append(role)
             if role is PumpRole.INJECTION:
                 raise RuntimeError("pump did not confirm REMOTE")
@@ -1050,16 +1050,16 @@ def test_manual_physical_outputs_use_button_confirmation_without_text_entry(
     dialog.close()
 
 
-def test_manual_control_has_combined_remote_connect_and_closes_ports() -> None:
+def test_manual_control_connects_without_remote_and_closes_ports() -> None:
     app = application()
 
     class ManualService:
         def __init__(self) -> None:
-            self.connect_remote_calls: list[PumpRole] = []
+            self.connect_calls: list[PumpRole] = []
             self.shutdown_calls = 0
 
-        def connect_remote(self, role: PumpRole) -> PumpStatus:
-            self.connect_remote_calls.append(role)
+        def connect(self, role: PumpRole) -> PumpStatus:
+            self.connect_calls.append(role)
             return PumpStatus(10.0, 0.0, 100.0)
 
         def shutdown_connections(self) -> tuple[str, ...]:
@@ -1075,17 +1075,18 @@ def test_manual_control_has_combined_remote_connect_and_closes_ports() -> None:
     dialog._telemetry_timer.stop()
     button_texts = {button.text() for button in dialog.findChildren(QPushButton)}
 
-    assert "CSATLAKOZÁS + REMOTE" in button_texts
+    assert "CSATLAKOZÁS" in button_texts
+    assert "CSATLAKOZÁS + REMOTE" not in button_texts
     assert "REMOTE" not in button_texts
     assert "LOCAL" not in button_texts
 
     dialog._connect_pump(PumpRole.JACKET)
     for _ in range(100):
         app.processEvents()
-        if service.connect_remote_calls:
+        if service.connect_calls:
             break
         sleep(0.01)
-    assert service.connect_remote_calls == [PumpRole.JACKET]
+    assert service.connect_calls == [PumpRole.JACKET]
 
     dialog._request_close()
     for _ in range(100):

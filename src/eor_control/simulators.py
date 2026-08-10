@@ -168,6 +168,15 @@ class SimulatedPump:
         self._delay()
         self.state = SimulatedPumpState.REMOTE
 
+    def is_remote_mode(self) -> bool:
+        return self.connected and self.state in {
+            SimulatedPumpState.REMOTE,
+            SimulatedPumpState.CONFIGURED,
+            SimulatedPumpState.RUNNING,
+            SimulatedPumpState.HOLDING,
+            SimulatedPumpState.STOPPED,
+        }
+
     def set_constant_flow(self, flow_ml_per_hour: float) -> None:
         self._require_configurable()
         self._validate_target(flow_ml_per_hour, "flow")

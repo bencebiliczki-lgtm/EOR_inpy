@@ -1,5 +1,4 @@
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
@@ -188,28 +187,13 @@ class PumpControlService:
         self._log(role.value, "CONNECTED")
         return self._supervision_status(role)
 
-    def connect_remote(self, role: PumpRole) -> PumpStatus:
-        """Connect, identify and enter REMOTE mode as one manual operation."""
-
-        try:
-            status = self.connect(role)
-            self.enter_remote(role)
-        except Exception:
-            if self._connected[role]:
-                with suppress(Exception):
-                    self._pumps[role].disconnect()
-                self._connected[role] = False
-                self._states[role] = PumpPreparationState()
-            raise
-        return status
-
     def disconnect(self, role: PumpRole) -> None:
         """Stop and disconnect one pump independently."""
 
         self._require_authorized()
         if self._states[role].running:
             raise RuntimeError("pump must be stopped before disconnect")
-        self._pumps[role].request_stop()
+        self.stop(role)
         self._pumps[role].disconnect()
         self._connected[role] = False
         self._states[role] = PumpPreparationState()
@@ -223,12 +207,29 @@ class PumpControlService:
 
     def observe_disconnected(self, *roles: PumpRole) -> None:
         for role in roles:
+            self._set_pump_remote_supervision(role, False)
             self._connected[role] = False
             self._states[role] = PumpPreparationState()
+
+    def set_remote_supervision_active(self, active: bool) -> None:
+        """Enable periodic Remote recovery for connected controlled pumps."""
+
+        self._require_authorized()
+        for role in PumpRole:
+            if active and not self._connected[role]:
+                continue
+            self._set_pump_remote_supervision(role, active)
+
+    def _set_pump_remote_supervision(self, role: PumpRole, active: bool) -> None:
+        setter = getattr(self._pumps[role], "set_remote_supervision_active", None)
+        if callable(setter):
+            setter(active)
 
     def shutdown_connections(self) -> tuple[str, ...]:
         """Attempt STOP and disconnect for every individually connected pump."""
 
+        for role in PumpRole:
+            self._set_pump_remote_supervision(role, False)
         errors: list[str] = []
         for role, pump in self._pumps.items():
             if self._connected[role] and not self._is_stopped_local(role):
@@ -301,9 +302,52 @@ class PumpControlService:
         self._states[role] = PumpPreparationState(remote=True)
         self._log(role.value, "REMOTE")
 
+    def ensure_remote(self, role: PumpRole) -> None:
+        """Enter Remote mode unless cached device state already confirms it."""
+
+        self._require_authorized()
+        self._require_connected(role)
+        if self._is_remote_mode(role):
+            self._mark_remote(role)
+            self._log(role.value, "REMOTE already confirmed; command skipped")
+            return
+        self._enter_remote_preserving_state(role)
+
+    def _enter_remote_preserving_state(self, role: PumpRole) -> None:
+        self._pumps[role].enter_remote()
+        self._mark_remote(role)
+        self._log(role.value, "REMOTE")
+
+    def _mark_remote(self, role: PumpRole) -> None:
+        state = self._states[role]
+        self._states[role] = PumpPreparationState(
+            remote=True,
+            configured=state.configured,
+            running=state.running,
+            mode=state.mode,
+            target=state.target,
+        )
+
+    def _execute_remote_write(
+        self,
+        role: PumpRole,
+        operation: Callable[[], None],
+    ) -> None:
+        """Ensure Remote and retry once if the device fell back to Local."""
+
+        self.ensure_remote(role)
+        try:
+            operation()
+        except Exception as error:
+            if "LOCAL" not in str(error).upper():
+                raise
+            self._enter_remote_preserving_state(role)
+            operation()
+
     def configure(self, role: PumpRole, mode: PumpOperatingMode, target: float) -> None:
         self._require_authorized()
         self._require_connected(role)
+        self.ensure_remote(role)
         state = self._states[role]
         if not state.remote or state.running:
             raise RuntimeError("pump must be stopped in REMOTE mode before configuration")
@@ -311,9 +355,9 @@ class PumpControlService:
             raise ValueError("pump target must be nonnegative and finite")
         pump = self._pumps[role]
         if mode is PumpOperatingMode.CONSTANT_FLOW:
-            pump.set_constant_flow(target)
+            self._execute_remote_write(role, lambda: pump.set_constant_flow(target))
         else:
-            pump.set_constant_pressure(target)
+            self._execute_remote_write(role, lambda: pump.set_constant_pressure(target))
         self._states[role] = PumpPreparationState(
             remote=True, configured=True, mode=mode, target=target
         )
@@ -355,12 +399,13 @@ class PumpControlService:
                 raise PermissionError(
                     "manual safety interlock active: " + "; ".join(reasons)
                 )
+        self.ensure_remote(role)
         state = self._states[role]
         if not state.remote or not state.configured or state.running:
             raise RuntimeError("pump must be configured and stopped in REMOTE mode")
         if role is PumpRole.INJECTION and enforce_injection_margin:
             self._require_injection_start_margin()
-        self._pumps[role].run()
+        self._execute_remote_write(role, self._pumps[role].run)
         self._states[role] = PumpPreparationState(
             remote=True,
             configured=True,
@@ -754,6 +799,13 @@ class PumpControlService:
         value: float | None = None,
     ) -> _PendingPreparationCommand | None:
         self._validate_preparation_command(role, kind, value)
+        if kind is PumpCommandKind.ENTER_REMOTE and self._is_remote_mode(role):
+            self._states[role] = PumpPreparationState(remote=True)
+            self._log(
+                role.value,
+                f"REMOTE already confirmed; command skipped; next={next_phase.value}",
+            )
+            return None
         pump = self._pumps[role]
         submit = getattr(pump, "submit_command", None)
         result_reader = getattr(pump, "command_result", None)
@@ -780,7 +832,7 @@ class PumpControlService:
             return _PendingPreparationCommand(role, command_id, command, next_phase)
 
         if kind is PumpCommandKind.ENTER_REMOTE:
-            self.enter_remote(role)
+            self.ensure_remote(role)
         elif kind is PumpCommandKind.SET_PRESSURE_LIMIT:
             assert value is not None
             self.set_pressure_limit(role, value)
@@ -938,6 +990,7 @@ class PumpControlService:
     def set_pressure_limit(self, role: PumpRole, pressure_bar: float) -> None:
         self._require_authorized()
         self._require_connected(role)
+        self.ensure_remote(role)
         state = self._states[role]
         if not state.remote or state.running:
             raise RuntimeError(
@@ -945,7 +998,10 @@ class PumpControlService:
             )
         if not isfinite(pressure_bar) or pressure_bar <= 0.0:
             raise ValueError("pump pressure limit must be positive and finite")
-        self._pumps[role].set_pressure_limit(pressure_bar)
+        self._execute_remote_write(
+            role,
+            lambda: self._pumps[role].set_pressure_limit(pressure_bar),
+        )
         self._log(
             role.value,
             f"hardware pressure limit={pressure_bar}",
@@ -1032,13 +1088,14 @@ class PumpControlService:
             or verification_tolerance_ml_per_hour < 0.0
         ):
             raise ValueError("flow verification tolerance must be finite and nonnegative")
-        state = self._states[PumpRole.INJECTION]
-        if not state.remote:
-            raise RuntimeError("injection pump must be in REMOTE mode")
+        self.ensure_remote(PumpRole.INJECTION)
 
         self.stop(PumpRole.INJECTION)
         pump = self._pumps[PumpRole.INJECTION]
-        pump.set_constant_flow(flow_ml_per_hour)
+        self._execute_remote_write(
+            PumpRole.INJECTION,
+            lambda: pump.set_constant_flow(flow_ml_per_hour),
+        )
         readback = pump.read_configured_flow_ml_per_hour()
         if (
             not isfinite(readback)
@@ -1073,7 +1130,11 @@ class PumpControlService:
     def stop(self, role: PumpRole) -> None:
         self._require_authorized()
         self._require_connected(role)
-        self._pumps[role].request_stop()
+        if self._is_stopped_local(role):
+            self._states[role] = PumpPreparationState()
+            self._log(role.value, "STOP skipped: pump is already STOP LOCAL")
+            return
+        self._execute_remote_write(role, self._pumps[role].request_stop)
         state = self._states[role]
         self._states[role] = PumpPreparationState(
             remote=state.remote,
@@ -1103,7 +1164,19 @@ class PumpControlService:
                 )
                 continue
             try:
-                self.stop(role)
+                # Safety rollback must not wait for an ordinary Remote-mode
+                # precheck. Issue STOP directly, then recover LOCAL MODE only
+                # when the pump is not already confirmed as STOP LOCAL.
+                self._pumps[role].request_stop()
+                state = self._states[role]
+                self._states[role] = PumpPreparationState(
+                    remote=state.remote,
+                    configured=state.configured,
+                    running=False,
+                    mode=state.mode,
+                    target=state.target,
+                )
+                self._log(role.value, "STOP", level="WARNING")
             except Exception as error:
                 if "LOCAL MODE" not in str(error).upper():
                     errors.append(f"{role.value}: {error}")
@@ -1235,12 +1308,19 @@ class PumpControlService:
         checker = getattr(self._pumps[role], "is_stopped_local", None)
         return bool(checker()) if callable(checker) else False
 
+    def _is_remote_mode(self, role: PumpRole) -> bool:
+        checker = getattr(self._pumps[role], "is_remote_mode", None)
+        if callable(checker):
+            return bool(checker())
+        return self._states[role].remote
+
     def clear(self, role: PumpRole) -> None:
         self._require_authorized()
         self._require_connected(role)
+        self.ensure_remote(role)
         if self._states[role].running:
             raise RuntimeError("pump must be stopped before CLEAR")
-        self._pumps[role].clear()
+        self._execute_remote_write(role, self._pumps[role].clear)
         self._states[role] = PumpPreparationState(remote=True)
         self._log(role.value, "CLEAR", level="WARNING")
 
@@ -1254,9 +1334,13 @@ class PumpControlService:
         self._log(role.value, "LOCAL")
 
     def revoke(self) -> None:
+        for role in PumpRole:
+            self._set_pump_remote_supervision(role, False)
         self._authorized = False
 
     def observe_safe_stop(self) -> None:
+        for role in PumpRole:
+            self._set_pump_remote_supervision(role, False)
         for role, state in self._states.items():
             self._states[role] = PumpPreparationState(
                 remote=state.remote,

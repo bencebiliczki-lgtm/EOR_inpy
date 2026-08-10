@@ -249,9 +249,14 @@ A startup-budget teszt két teljes PRESS/STATUS retry-keretet követel meg. A
 blokkolt worker leválasztási regressziója igazolja, hogy timeoutnál a port nem
 záródik be, reconnect nem indul, és a cleanup csak a régi worker befejezése
 után hajtható végre.
+A Remote-felügyeleti regresszió igazolja, hogy Local státusz dashboard/üresjárati
+polling alatt nem küld parancsot, aktív vezérlési felügyelet mellett viszont a
+következő periodikus STATUS után visszaellenőrzött `REMOTE` helyreállítás indul.
 A részleges kapcsolati tesztek igazolják, hogy az egyik pumpa vagy NI-bemenet hibája
-mellett a többi eszköz sikeres státusza megmarad, a kapcsolódás és REMOTE módba
-lépés egy műveletként fut, REMOTE-hibánál pedig a port bezáródik. Bezáráskor minden
+mellett a többi eszköz sikeres státusza megmarad. A közvetlen pumpakapcsolódás
+nem vált módot; az első vezérlőművelet ellenőrzi és szükség esetén helyreállítja
+a Remote módot. Külön regresszió fedi a futás közbeni Remote-vesztést és az
+ellenőrzés utáni `LOCAL MODE` válasz egyszeri helyreállítását. Bezáráskor minden
 pumpán külön STOP és portlezárás történik akkor is, ha az eszköz nem jutott el az
 azonosított állapotig. A Qt-teszt emellett igazolja, hogy a normál kezelői
 Csatlakozás/Leválasztás gombok rejtettek, a mérés szüneteltethető és folytatható,

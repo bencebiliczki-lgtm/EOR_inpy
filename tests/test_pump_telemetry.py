@@ -541,6 +541,7 @@ def test_remote_command_fails_when_pump_remains_in_local_mode() -> None:
     assert pump.read_cached_status()[1] is DataQuality.GOOD
     assert pump.read_telemetry().operating_status.quality is DataQuality.GOOD
     assert pump.is_stopped_local()
+    assert not pump.is_remote_mode()
     with pytest.raises(RuntimeError, match="did not confirm REMOTE"):
         pump.enter_remote()
 
@@ -562,7 +563,52 @@ def test_remote_command_rejects_status_without_explicit_remote_confirmation() ->
         pump.enter_remote()
 
     assert raw.calls["remote"] == 1
+    assert not pump.is_remote_mode()
     assert pump.read_telemetry().operating_status.quality is DataQuality.GOOD
+    pump.disconnect()
+
+
+@pytest.mark.parametrize("status_text", ["STOP REMOTE", "RUN REMOTE"])
+def test_explicit_remote_operating_status_is_recognized(status_text: str) -> None:
+    raw = SlowPollablePump(delay_seconds=0.0, operating_status=status_text)
+    pump = PollingPump(raw, name="test", intervals=slow_intervals())
+    pump.connect()
+
+    assert pump.is_remote_mode()
+    assert not pump.is_stopped_local()
+    pump.disconnect()
+
+
+def test_periodic_status_restores_remote_only_when_control_supervision_is_active(
+) -> None:
+    raw = SlowPollablePump(delay_seconds=0.0, operating_status="STOP REMOTE")
+    intervals = PumpPollingIntervals(
+        pressure_seconds=0.01,
+        slow_telemetry_seconds=0.01,
+        pressure_stale_seconds=1.0,
+        slow_telemetry_stale_seconds=1.0,
+        status_stale_seconds=1.0,
+        startup_timeout_seconds=1.0,
+    )
+    pump = PollingPump(raw, name="test", intervals=intervals)
+    pump.connect()
+    initial_status_reads = raw.calls["status"]
+    raw.operating_status = "RUN LOCAL"
+
+    deadline = monotonic() + 1.0
+    while raw.calls["status"] == initial_status_reads and monotonic() < deadline:
+        sleep(0.005)
+
+    assert raw.calls["status"] > initial_status_reads
+    assert raw.calls["remote"] == 0
+
+    pump.set_remote_supervision_active(True)
+    deadline = monotonic() + 1.0
+    while raw.calls["remote"] == 0 and monotonic() < deadline:
+        sleep(0.005)
+
+    assert raw.calls["remote"] == 1
+    assert raw.operating_status == "STOP REMOTE"
     pump.disconnect()
 
 

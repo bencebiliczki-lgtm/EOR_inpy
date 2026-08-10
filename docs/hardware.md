@@ -29,8 +29,10 @@ A `isco.py` adapter `RSVP` és `IDENTIFY` segítségével ellenőrzi a kapcsolat
 `CONST PRESS`, `PRESS=#`, `RUN`, `STOP`, `CLEAR` és `LOCAL` műveletek elérhetők.
 
 A kapcsolat létrehozása önmagában nem küld `REMOTE` vagy motorindító parancsot.
-A kezelő által megerősített hardvermód-aktiválás viszont a sikeres csatlakozás után
-minden engedélyezett pumpát `REMOTE` módba állít, és csak a visszaellenőrzött
+A kezelő által megerősített hardvermód-aktiválás a sikeres csatlakozás után
+ellenőrzi minden engedélyezett pumpa cache-elt STATUS válaszát. Explicit Remote
+állapotnál nem küld újabb parancsot; Local vagy nem egyértelmű állapotnál `REMOTE`
+parancsot küld, majd célzott STATUS-visszaolvasást követel. Csak az igazolt Remote
 állapot után jelzi sikeresnek az aktiválást. A `REMOTE` parancs nem indítja el a
 pumpamotorokat.
 A tényleges használathoz konfigurálni kell a COM-portot, a 0–9 egységazonosítót,
@@ -80,7 +82,10 @@ után indítható.
 
 A Developer közvetlen eszközkezelőben minden szerepkör önállóan próbálható,
 globális hardvermód aktiválása nélkül. A két pumpa és a két NI-bemenet saját,
-a többi eszköztől független kapcsolatot használ. A csak szelepet tartalmazó
+a többi eszköztől független kapcsolatot használ. A pumpakapcsolódás nem küld
+`REMOTE` parancsot. A konfigurálás, RUN, STOP és CLEAR közvetlenül a végrehajtás
+előtt ellenőrzi a Remote módot, és szükség esetén automatikusan helyreállítja.
+A csak szelepet tartalmazó
 profil is megnyitható, mert AO-kapcsolat olvasással nem igazolható; a tényleges
 kimeneti írás továbbra is külön kezelői megerősítést kér. A közvetlen
 kezelő bezárásakor minden ideiglenes pumpaport és NI-erőforrás lezárul.

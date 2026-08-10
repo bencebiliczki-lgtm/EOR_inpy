@@ -161,6 +161,8 @@ class PollingPump:
         self._field_error_counts: dict[str, int] = {}
         self._operating_status_text: str | None = None
         self._preparation_active = False
+        self._remote_supervision_active = False
+        self._remote_recovery_command_id: str | None = None
 
     @property
     def polling_intervals(self) -> PumpPollingIntervals:
@@ -323,6 +325,21 @@ class PollingPump:
         status_tokens = set(status_text.upper().replace("=", " ").split())
         return {"STOP", "LOCAL"}.issubset(status_tokens)
 
+    def is_remote_mode(self) -> bool:
+        """Return whether cached STATUS explicitly confirms Remote mode."""
+
+        with self._condition:
+            status_text = self._operating_status_text
+        if status_text is None:
+            return False
+        normalized = status_text.upper()
+        status_tokens = set(normalized.replace("=", " ").split())
+        return (
+            "REMOTE" in status_tokens
+            and "LOCAL" not in status_tokens
+            and "PROBLEM" not in normalized
+        )
+
     def enter_remote(self) -> None:
         self._execute_command(PumpCommandKind.ENTER_REMOTE, verify_status=True)
         with self._condition:
@@ -383,6 +400,8 @@ class PollingPump:
         self.cancel_pending_commands()
         with self._condition:
             self._connected = False
+            self._remote_supervision_active = False
+            self._remote_recovery_command_id = None
             stop_event = self._stop_event
             stop_event.set()
             thread = self._thread
@@ -442,6 +461,26 @@ class PollingPump:
 
         with self._condition:
             self._preparation_active = active
+            self._condition.notify_all()
+
+    def set_remote_supervision_active(self, active: bool) -> None:
+        """Restore Remote mode from periodic STATUS only during active control."""
+
+        with self._condition:
+            self._remote_supervision_active = active
+            if not active and self._remote_recovery_command_id is not None:
+                command_id = self._remote_recovery_command_id
+                result = self._command_results.get(command_id)
+                if result is not None and result.status is PumpCommandStatus.QUEUED:
+                    self._command_results[command_id] = PumpCommandResult(
+                        command_id=result.command_id,
+                        command=result.command,
+                        status=PumpCommandStatus.CANCELLED,
+                        submitted_monotonic=result.submitted_monotonic,
+                        completed_monotonic=monotonic(),
+                        error="Remote supervision disabled",
+                    )
+                self._remote_recovery_command_id = None
             self._condition.notify_all()
 
     def command_result(self, command_id: str) -> PumpCommandResult:
@@ -701,6 +740,7 @@ class PollingPump:
                             "STATUS", self._pump.read_operating_status
                         )
                         self._update_operating_status(status_text)
+                        self._schedule_remote_recovery(status_text)
                         log_health = True
                 except Exception as field_error:
                     self._record_field_error(field, field_error)
@@ -892,6 +932,12 @@ class PollingPump:
                 verification_started_monotonic=verification_started,
             )
             self._command_results[command_id] = final
+            if (
+                final.status is PumpCommandStatus.SUCCEEDED
+                and command.kind
+                in {PumpCommandKind.ENTER_REMOTE, PumpCommandKind.RUN}
+            ):
+                self._stop_latched = False
             self._condition.notify_all()
         self._log_command_event(
             command_id,
@@ -900,6 +946,28 @@ class PollingPump:
             verification_ms=verification_ms,
             error=final.error,
         )
+
+    def _schedule_remote_recovery(self, status_text: str) -> None:
+        normalized = status_text.upper()
+        tokens = set(normalized.replace("=", " ").split())
+        with self._condition:
+            if not self._remote_supervision_active or "LOCAL" not in tokens:
+                return
+            previous_id = self._remote_recovery_command_id
+            if previous_id is not None:
+                previous = self._command_results.get(previous_id)
+                if previous is not None and not previous.status.terminal:
+                    return
+        command_id = self.submit_command(
+            PumpCommand(
+                PumpCommandKind.ENTER_REMOTE,
+                PumpCommandPriority.HIGH,
+                verify_status=True,
+                queue_timeout_seconds=self.COMMAND_QUEUE_WAIT_SECONDS,
+            )
+        )
+        with self._condition:
+            self._remote_recovery_command_id = command_id
 
     def _perform_command(self, command: PumpCommand) -> float | None:
         value = command.value

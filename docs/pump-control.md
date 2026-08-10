@@ -334,10 +334,19 @@ control-cycle deadline-ként.
 
 A `STOP LOCAL` és `RUN LOCAL` érvényes STATUS parsereredmény, ezért adatminősége
 `GOOD`. A Local mód nem szenzorhiba, hanem érvényes, távolról nem vezérelhető
-állapot. Az előkészítés REMOTE paranccsal és célzott STATUS-visszaolvasással vált
-vezérelhető állapotba. Safe-state alatt a cache szerint már `STOP LOCAL` pumpa
+állapot. Az előkészítés explicit Remote STATUS esetén kihagyja a redundáns
+`REMOTE` parancsot. Local vagy nem egyértelmű állapotnál `REMOTE` paranccsal és
+célzott STATUS-visszaolvasással vált vezérelhető állapotba. Safe-state alatt a
+cache szerint már `STOP LOCAL` pumpa
 nem kap újabb STOP-ot; a többi pumpa és a szelep biztonsági művelete ettől még
 függetlenül lefut.
+
+Aktív mérési vezérlés alatt a periodikus STATUS polling egyben Remote-mód
+felügyeletet is végez. Ha `LOCAL` állapotot talál, magas prioritású `REMOTE`
+parancsot tesz a worker parancssorába, és célzott STATUS-visszaolvasással
+ellenőrzi a helyreállítást. Ez a felügyelet csak az aktív vezérlési időszakban
+engedélyezett. A dashboard és az üresjárati telemetria kizárólag olvas: Local
+állapotban sem küld `REMOTE` vagy más vezérlőparancsot.
 
 A vezérlési ciklus és a pumpa polling nem ugyanaz:
 
