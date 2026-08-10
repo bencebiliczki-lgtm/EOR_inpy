@@ -198,6 +198,27 @@ def _authorize_physical_hardware(
         daq.authorize_output(NidaqmxDataAcquisition.HARDWARE_CONFIRMATION)
 
 
+def _enter_hardware_pumps_remote(
+    pump_control: PumpControlService,
+    *,
+    jacket_enabled: bool,
+    injection_enabled: bool,
+) -> None:
+    """Record connected pumps and require confirmed REMOTE mode for activation."""
+
+    enabled_roles = tuple(
+        role
+        for role, enabled in (
+            (PumpRole.JACKET, jacket_enabled),
+            (PumpRole.INJECTION, injection_enabled),
+        )
+        if enabled
+    )
+    pump_control.observe_connected(*enabled_roles)
+    for role in enabled_roles:
+        pump_control.enter_remote(role)
+
+
 LIGHT_STYLESHEET = """
 QMainWindow, QWidget { background: #f5f7fa; color: #1f2933; }
 QLabel { background: transparent; }
@@ -2985,6 +3006,14 @@ class ManualTelemetryResult:
     pressure_errors: dict[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class ManualQueuedCommand:
+    command_id: str
+    operation: Callable[[], object]
+    success_message: str
+    safety_protected: bool = False
+
+
 MeasurementPumpPlan = PumpStartupPlan
 
 
@@ -3020,7 +3049,8 @@ class PumpControlDialog(ResizableDialog):
         self._closing = False
         self._shutdown_started = False
         self._shutdown_complete = False
-        self._pending_commands: deque[tuple[Callable[[], object], str]] = deque()
+        self._pending_commands: deque[ManualQueuedCommand] = deque()
+        self._active_command: ManualQueuedCommand | None = None
         self._buttons: list[QPushButton] = []
         self._status_labels: dict[PumpRole, QLabel] = {}
         self._modes: dict[PumpRole, QComboBox] = {}
@@ -3051,6 +3081,7 @@ class PumpControlDialog(ResizableDialog):
         self._operation_status.setWordWrap(True)
         self._operation_status.setStyleSheet("color:#66788a;font-weight:700")
         layout.addWidget(self._operation_status)
+        layout.addWidget(self._command_queue_panel())
         pumps = QGridLayout()
         for column, role in enumerate(PumpRole):
             panel = self._pump_panel(role)
@@ -3090,6 +3121,122 @@ class PumpControlDialog(ResizableDialog):
         self._telemetry_timer.setInterval(1000)
         self._telemetry_timer.timeout.connect(self._refresh_statuses)
         self._telemetry_timer.start()
+
+    def _command_queue_panel(self) -> QGroupBox:
+        box = QGroupBox("Parancssor megtekintése és szerkesztése")
+        layout = QVBoxLayout(box)
+        note = QLabel(
+            "A várakozó normál parancsok átrendezhetők vagy törölhetők. "
+            "A futó parancs és minden biztonsági művelet zárolt."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self._command_queue_table = QTableWidget(0, 2)
+        self._command_queue_table.setObjectName("manual_command_queue")
+        self._command_queue_table.setHorizontalHeaderLabels(("Állapot", "Parancs"))
+        self._command_queue_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self._command_queue_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self._command_queue_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self._command_queue_table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self._command_queue_table)
+        actions = QHBoxLayout()
+        move_up = QPushButton("Fel")
+        move_up.clicked.connect(lambda: self._move_selected_command(-1))
+        move_down = QPushButton("Le")
+        move_down.clicked.connect(lambda: self._move_selected_command(1))
+        remove = QPushButton("Kijelölt törlése")
+        remove.clicked.connect(self._remove_selected_command)
+        for button in (move_up, move_down, remove):
+            actions.addWidget(button)
+            self._buttons.append(button)
+        layout.addLayout(actions)
+        self._refresh_command_queue_table()
+        return box
+
+    def _refresh_command_queue_table(self) -> None:
+        table = self._command_queue_table
+        selected_id = self._selected_command_id()
+        rows: list[tuple[str, ManualQueuedCommand]] = []
+        if self._active_command is not None:
+            rows.append(("FOLYAMATBAN — ZÁROLT", self._active_command))
+        rows.extend(
+            (
+                "VÁRAKOZIK — BIZTONSÁGI, ZÁROLT"
+                if command.safety_protected
+                else "VÁRAKOZIK",
+                command,
+            )
+            for command in self._pending_commands
+        )
+        table.setRowCount(len(rows))
+        for row, (status, command) in enumerate(rows):
+            status_item = QTableWidgetItem(status)
+            status_item.setData(Qt.ItemDataRole.UserRole, command.command_id)
+            table.setItem(row, 0, status_item)
+            table.setItem(row, 1, QTableWidgetItem(command.success_message))
+            if command.command_id == selected_id:
+                table.selectRow(row)
+
+    def _selected_command_id(self) -> str | None:
+        table = getattr(self, "_command_queue_table", None)
+        if table is None:
+            return None
+        selected_rows = table.selectionModel().selectedRows()
+        if not selected_rows:
+            return None
+        item = table.item(selected_rows[0].row(), 0)
+        if item is None:
+            return None
+        command_id = item.data(Qt.ItemDataRole.UserRole)
+        return command_id if isinstance(command_id, str) else None
+
+    def _move_selected_command(self, offset: int) -> None:
+        command_id = self._selected_command_id()
+        commands = list(self._pending_commands)
+        index = next(
+            (i for i, command in enumerate(commands) if command.command_id == command_id),
+            None,
+        )
+        if index is None or commands[index].safety_protected:
+            return
+        target = index + offset
+        if (
+            target < 0
+            or target >= len(commands)
+            or commands[target].safety_protected
+        ):
+            return
+        commands[index], commands[target] = commands[target], commands[index]
+        self._pending_commands = deque(commands)
+        self._refresh_command_queue_table()
+
+    def _remove_selected_command(self) -> None:
+        command_id = self._selected_command_id()
+        command = next(
+            (
+                pending
+                for pending in self._pending_commands
+                if pending.command_id == command_id
+            ),
+            None,
+        )
+        if command is None or command.safety_protected:
+            return
+        self._pending_commands = deque(
+            pending
+            for pending in self._pending_commands
+            if pending.command_id != command_id
+        )
+        self._operation_status.setText(
+            f"TÖRÖLVE A PARANCSSORBÓL — {command.success_message}"
+        )
+        self._refresh_command_queue_table()
 
     def _pump_panel(self, role: PumpRole) -> QGroupBox:
         title = "Köpenypumpa" if role is PumpRole.JACKET else "Besajtolópumpa"
@@ -3153,11 +3300,17 @@ class PumpControlDialog(ResizableDialog):
         *,
         priority: bool = False,
     ) -> None:
-        command = (operation, success_message)
+        command = ManualQueuedCommand(
+            uuid4().hex,
+            operation,
+            success_message,
+            safety_protected=priority,
+        )
         if priority:
             self._pending_commands.appendleft(command)
         else:
             self._pending_commands.append(command)
+        self._refresh_command_queue_table()
         if self._command_active or self._telemetry_active:
             self._operation_status.setText(
                 f"{len(self._pending_commands)} parancs várakozik; a DASNET "
@@ -3176,8 +3329,12 @@ class PumpControlDialog(ResizableDialog):
         if not self._pending_commands:
             QTimer.singleShot(100, self._refresh_statuses)
             return
-        operation, success_message = self._pending_commands.popleft()
+        command = self._pending_commands.popleft()
+        operation = command.operation
+        success_message = command.success_message
+        self._active_command = command
         self._command_active = True
+        self._refresh_command_queue_table()
         self._operation_status.setText(f"Folyamatban: {success_message}")
         self._operation_status.setStyleSheet("color:#1565c0;font-weight:700")
 
@@ -3193,6 +3350,8 @@ class PumpControlDialog(ResizableDialog):
 
     def _command_succeeded(self, payload: object) -> None:
         self._command_active = False
+        self._active_command = None
+        self._refresh_command_queue_table()
         if not isinstance(payload, tuple) or len(payload) != 2:
             self._run_next_command()
             return
@@ -3218,6 +3377,8 @@ class PumpControlDialog(ResizableDialog):
 
     def _command_failed(self, message: str) -> None:
         self._command_active = False
+        self._active_command = None
+        self._refresh_command_queue_table()
         if self._closing:
             if self._shutdown_started:
                 self._finish_close()
@@ -3395,6 +3556,7 @@ class PumpControlDialog(ResizableDialog):
         self._closing = True
         self._telemetry_timer.stop()
         self._pending_commands.clear()
+        self._refresh_command_queue_table()
         for button in self._buttons:
             button.setEnabled(False)
         self._operation_status.setText(
@@ -9062,7 +9224,11 @@ class DashboardWindow(QMainWindow):
         pump_control.authorize(PumpControlService.AUTHORIZATION)
         try:
             new_devices.connect()
-            pump_control.observe_connected(*tuple(PumpRole))
+            _enter_hardware_pumps_remote(
+                pump_control,
+                jacket_enabled=configuration.jacket_pump_enabled,
+                injection_enabled=configuration.injection_pump_enabled,
+            )
         except Exception:
             with suppress(Exception):
                 new_devices.disconnect()
@@ -9104,6 +9270,7 @@ class DashboardWindow(QMainWindow):
         self._refresh_mode_label()
         self._set_all_connections("KAPCSOLÓDVA", ok=True)
         self._refresh_state()
+
 
     def _activate_simulation(
         self,

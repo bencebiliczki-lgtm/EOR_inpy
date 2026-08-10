@@ -29,6 +29,10 @@ A `isco.py` adapter `RSVP` és `IDENTIFY` segítségével ellenőrzi a kapcsolat
 `CONST PRESS`, `PRESS=#`, `RUN`, `STOP`, `CLEAR` és `LOCAL` műveletek elérhetők.
 
 A kapcsolat létrehozása önmagában nem küld `REMOTE` vagy motorindító parancsot.
+A kezelő által megerősített hardvermód-aktiválás viszont a sikeres csatlakozás után
+minden engedélyezett pumpát `REMOTE` módba állít, és csak a visszaellenőrzött
+állapot után jelzi sikeresnek az aktiválást. A `REMOTE` parancs nem indítja el a
+pumpamotorokat.
 A tényleges használathoz konfigurálni kell a COM-portot, a 0–9 egységazonosítót,
 az A–D pumpacsatornát, a baud rate-et és az aktuális pumpamértékegységeket.
 Az ismert célgépen a `COM1`, `COM2` és `COM4` lehet fizikai pumpaport. A `COM3`

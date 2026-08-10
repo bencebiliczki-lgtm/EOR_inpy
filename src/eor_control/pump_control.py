@@ -108,8 +108,9 @@ class PumpControlTiming:
     pressure_buildup_timeout_seconds: float = 120.0
     control_interval_seconds: float = 0.2
     watchdog_tolerance_seconds: float = 0.05
-    command_timeout_seconds: float = 5.0
-    queue_timeout_seconds: float = 2.0
+    execution_timeout_seconds: float = 5.0
+    queue_timeout_seconds: float = 5.0
+    verification_timeout_seconds: float = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,7 +231,7 @@ class PumpControlService:
 
         errors: list[str] = []
         for role, pump in self._pumps.items():
-            if self._connected[role]:
+            if self._connected[role] and not self._is_stopped_local(role):
                 try:
                     pump.request_stop()
                 except Exception as error:
@@ -423,6 +424,7 @@ class PumpControlService:
         for role in PumpRole:
             self._require_connected(role)
 
+        self._set_preparation_polling(True)
         try:
             self._run_preparation_state_machine(
                 plan,
@@ -436,6 +438,8 @@ class PumpControlService:
                     f"{error}; pump startup rollback errors: {'; '.join(stop_errors)}"
                 ) from error
             raise
+        finally:
+            self._set_preparation_polling(False)
 
     def _run_preparation_state_machine(
         self,
@@ -491,12 +495,20 @@ class PumpControlService:
                         stable_since = None
                     pending = None
                 elif result.status is PumpCommandStatus.TIMED_OUT:
+                    if pending.command.kind is PumpCommandKind.ENTER_REMOTE:
+                        raise RuntimeError(
+                            f"A {pending.role.value} pumpa nem állítható Remote módba."
+                        )
                     raise TimeoutError(
                         result.error
                         or f"{pending.role.value} command timed out: "
                         f"{pending.command.kind.value}"
                     )
                 else:
+                    if pending.command.kind is PumpCommandKind.ENTER_REMOTE:
+                        raise RuntimeError(
+                            f"A {pending.role.value} pumpa nem állítható Remote módba."
+                        )
                     raise RuntimeError(
                         result.error
                         or f"{pending.role.value} command failed: "
@@ -752,19 +764,17 @@ class PumpControlService:
         if callable(submit) and callable(result_reader):
             command = PumpCommand(
                 kind,
-                (
-                    PumpCommandPriority.HIGH
-                    if kind is PumpCommandKind.STOP
-                    else PumpCommandPriority.NORMAL
-                ),
+                PumpCommandPriority.HIGH,
                 value,
-                timeout_seconds=timing.command_timeout_seconds,
+                execution_timeout_seconds=timing.execution_timeout_seconds,
                 verify_status=kind
                 in {
                     PumpCommandKind.ENTER_REMOTE,
                     PumpCommandKind.RUN,
                     PumpCommandKind.STOP,
                 },
+                queue_timeout_seconds=timing.queue_timeout_seconds,
+                verification_timeout_seconds=timing.verification_timeout_seconds,
             )
             command_id = cast(str, submit(command))
             return _PendingPreparationCommand(role, command_id, command, next_phase)
@@ -801,6 +811,12 @@ class PumpControlService:
         if not callable(reader):
             raise RuntimeError("asynchronous pump command result reader disappeared")
         return cast(PumpCommandResult, reader(pending.command_id))
+
+    def _set_preparation_polling(self, active: bool) -> None:
+        for pump in self._pumps.values():
+            setter = getattr(pump, "set_preparation_active", None)
+            if callable(setter):
+                setter(active)
 
     def _validate_preparation_command(
         self,
@@ -886,8 +902,9 @@ class PumpControlService:
             plan.injection_startup_flow_ml_per_hour,
             timing.pressure_buildup_timeout_seconds,
             timing.control_interval_seconds,
-            timing.command_timeout_seconds,
+            timing.execution_timeout_seconds,
             timing.queue_timeout_seconds,
+            timing.verification_timeout_seconds,
         )
         if not all(isfinite(value) and value > 0.0 for value in values):
             raise ValueError("measurement pump targets and timings must be positive and finite")
@@ -1077,11 +1094,27 @@ class PumpControlService:
             return self._stop_all_queued()
         errors: list[str] = []
         for role in PumpRole:
+            if self._is_stopped_local(role):
+                self._states[role] = PumpPreparationState()
+                self._log(
+                    role.value,
+                    "STOP skipped: pump is already STOP LOCAL",
+                    level="WARNING",
+                )
+                continue
             try:
                 self.stop(role)
             except Exception as error:
                 if "LOCAL MODE" not in str(error).upper():
                     errors.append(f"{role.value}: {error}")
+                    continue
+                if self._is_stopped_local(role):
+                    self._states[role] = PumpPreparationState()
+                    self._log(
+                        role.value,
+                        "STOP already satisfied by STOP LOCAL",
+                        level="WARNING",
+                    )
                     continue
                 try:
                     # A pump that fell back to LOCAL rejects STOP. During a
@@ -1118,6 +1151,14 @@ class PumpControlService:
                 cancel = getattr(pump, "cancel_pending_commands", None)
                 if callable(cancel):
                     cancel()
+                if self._is_stopped_local(role):
+                    self._states[role] = PumpPreparationState()
+                    self._log(
+                        role.value,
+                        "STOP skipped: pump is already STOP LOCAL",
+                        level="WARNING",
+                    )
+                    continue
                 submit_stop = getattr(pump, "submit_stop", None)
                 if not callable(submit_stop):
                     raise RuntimeError("pump emergency command queue is unavailable")
@@ -1151,6 +1192,14 @@ class PumpControlService:
                         target=state.target,
                     )
                 elif result.error is not None and "LOCAL MODE" in result.error.upper():
+                    if self._is_stopped_local(role):
+                        self._states[role] = PumpPreparationState()
+                        self._log(
+                            role.value,
+                            "STOP already satisfied by STOP LOCAL",
+                            level="WARNING",
+                        )
+                        continue
                     try:
                         self._pumps[role].enter_remote()
                         self._pumps[role].request_stop()
@@ -1181,6 +1230,10 @@ class PumpControlService:
         for role in unfinished:
             errors.append(f"{role.value}: STOP acknowledgement timed out")
         return tuple(errors)
+
+    def _is_stopped_local(self, role: PumpRole) -> bool:
+        checker = getattr(self._pumps[role], "is_stopped_local", None)
+        return bool(checker()) if callable(checker) else False
 
     def clear(self, role: PumpRole) -> None:
         self._require_authorized()

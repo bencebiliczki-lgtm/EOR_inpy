@@ -374,7 +374,7 @@ def test_queued_control_command_precedes_next_polling_transaction() -> None:
     pump.disconnect()
 
 
-def test_pressure_refresh_runs_between_normal_control_commands() -> None:
+def test_all_control_commands_run_before_next_pressure_refresh() -> None:
     @dataclass
     class InterCommandPressurePump(SlowPollablePump):
         operations: list[str] = field(default_factory=list)
@@ -422,8 +422,8 @@ def test_pressure_refresh_runs_between_normal_control_commands() -> None:
     pump.disconnect()
     assert first_result.status is PumpCommandStatus.SUCCEEDED, raw.operations
     assert second_result.status is PumpCommandStatus.SUCCEEDED, raw.operations
-    assert raw.operations.index("CONFIG_FLOW") < raw.operations.index("PRESS")
-    assert raw.operations.index("PRESS") < raw.operations.index("CONFIG_PRESSURE")
+    assert raw.operations.index("CONFIG_FLOW") < raw.operations.index("CONFIG_PRESSURE")
+    assert raw.operations.index("CONFIG_PRESSURE") < raw.operations.index("PRESS")
 
 
 def test_stop_precedes_overdue_pressure_and_normal_command() -> None:
@@ -472,7 +472,8 @@ def test_stop_precedes_overdue_pressure_and_normal_command() -> None:
         sleep(0.01)
 
     assert raw.operations.index("STOP") < raw.operations.index("PRESS")
-    assert raw.operations.index("PRESS") < raw.operations.index("CONFIG")
+    assert raw.operations.index("STOP") < raw.operations.index("CONFIG")
+    assert raw.operations.index("CONFIG") < raw.operations.index("PRESS")
     pump.disconnect()
 
 
@@ -489,7 +490,7 @@ def test_command_timeout_is_not_reported_as_control_cycle_deadline() -> None:
         PumpCommand(
             PumpCommandKind.STOP,
             PumpCommandPriority.HIGH,
-            timeout_seconds=0.05,
+            execution_timeout_seconds=0.05,
             verify_status=True,
         )
     )
@@ -504,7 +505,7 @@ def test_command_timeout_is_not_reported_as_control_cycle_deadline() -> None:
 
     assert result.status is PumpCommandStatus.TIMED_OUT
     assert result.error is not None
-    assert "command timeout" in result.error
+    assert "command execution timeout" in result.error
     assert "control cycle" not in result.error
     pump.disconnect()
 
@@ -537,6 +538,9 @@ def test_remote_command_fails_when_pump_remains_in_local_mode() -> None:
     pump = PollingPump(raw, name="injection", intervals=slow_intervals())
     pump.connect()
 
+    assert pump.read_cached_status()[1] is DataQuality.GOOD
+    assert pump.read_telemetry().operating_status.quality is DataQuality.GOOD
+    assert pump.is_stopped_local()
     with pytest.raises(RuntimeError, match="did not confirm REMOTE"):
         pump.enter_remote()
 
@@ -544,7 +548,7 @@ def test_remote_command_fails_when_pump_remains_in_local_mode() -> None:
     pump.disconnect()
 
 
-def test_remote_command_accepts_standard_run_stop_status_without_remote_word() -> None:
+def test_remote_command_rejects_status_without_explicit_remote_confirmation() -> None:
     class StandardStatusPump(SlowPollablePump):
         def enter_remote(self) -> None:
             self.calls["remote"] += 1
@@ -554,14 +558,30 @@ def test_remote_command_accepts_standard_run_stop_status_without_remote_word() -
     pump = PollingPump(raw, name="injection", intervals=slow_intervals())
     pump.connect()
 
-    pump.enter_remote()
+    with pytest.raises(RuntimeError, match="did not confirm REMOTE"):
+        pump.enter_remote()
 
     assert raw.calls["remote"] == 1
     assert pump.read_telemetry().operating_status.quality is DataQuality.GOOD
     pump.disconnect()
 
 
-def test_queued_command_timeout_cancels_command_before_it_can_run() -> None:
+@pytest.mark.parametrize("status_text", ["STOP LOCAL", "RUN LOCAL"])
+def test_local_operating_status_is_valid_telemetry(status_text: str) -> None:
+    raw = SlowPollablePump(delay_seconds=0.0, operating_status=status_text)
+    pump = PollingPump(raw, name="test", intervals=slow_intervals())
+    pump.connect()
+
+    telemetry = pump.read_telemetry()
+
+    assert telemetry.operating_status.quality is DataQuality.GOOD
+    assert telemetry.operating_status.last_error is None
+    assert pump.read_cached_status()[1] is DataQuality.GOOD
+    assert pump.is_stopped_local() is status_text.startswith("STOP")
+    pump.disconnect()
+
+
+def test_queued_command_timeout_prevents_command_from_running_later() -> None:
     class ShortQueueWaitPump(PollingPump):
         COMMAND_QUEUE_WAIT_SECONDS = 0.05
 
@@ -570,12 +590,107 @@ def test_queued_command_timeout_cancels_command_before_it_can_run() -> None:
     pump.connect()
     assert raw.flow_started.wait(timeout=1.0)
 
-    with pytest.raises(TimeoutError, match="was cancelled"):
+    with pytest.raises(TimeoutError, match="queue timeout"):
         pump.set_constant_flow(10.0)
 
     raw.release_flow.set()
     sleep(0.1)
     assert raw.calls["set_flow"] == 0
+    pump.disconnect()
+
+
+def test_worker_discards_expired_queue_item_without_result_polling() -> None:
+    raw = CommandPriorityPump(delay_seconds=0.0)
+    pump = PollingPump(raw, name="test", intervals=slow_intervals())
+    pump.connect()
+    assert raw.flow_started.wait(timeout=1.0)
+    command_id = pump.submit_command(
+        PumpCommand(
+            PumpCommandKind.SET_CONSTANT_FLOW,
+            PumpCommandPriority.HIGH,
+            value=10.0,
+            queue_timeout_seconds=0.05,
+        )
+    )
+
+    sleep(0.1)
+    raw.release_flow.set()
+    deadline = monotonic() + 1.0
+    while not pump._command_results[command_id].status.terminal:
+        assert monotonic() < deadline
+        sleep(0.01)
+
+    assert pump.command_result(command_id).status is PumpCommandStatus.TIMED_OUT
+    assert raw.calls["set_flow"] == 0
+    pump.disconnect()
+
+
+def test_preparation_suspends_flow_and_volume_polling_until_released() -> None:
+    raw = SlowPollablePump(delay_seconds=0.0)
+    intervals = PumpPollingIntervals(
+        pressure_seconds=0.02,
+        slow_telemetry_seconds=0.02,
+        pressure_stale_seconds=1.0,
+        slow_telemetry_stale_seconds=1.0,
+        startup_timeout_seconds=1.0,
+    )
+    pump = PollingPump(raw, name="test", intervals=intervals)
+    pump.set_preparation_active(True)
+    pump.connect()
+    sleep(0.1)
+
+    assert raw.calls["pressure"] > 1
+    assert raw.calls["status"] > 1
+    assert raw.calls["flow"] == 0
+    assert raw.calls["volume"] == 0
+
+    pump.set_preparation_active(False)
+    deadline = monotonic() + 1.0
+    while raw.calls["flow"] == 0:
+        assert monotonic() < deadline
+        sleep(0.01)
+    pump.disconnect()
+
+
+def test_verification_timeout_is_separate_from_execution_timeout() -> None:
+    class SlowVerificationPump(SlowPollablePump):
+        delay_verification = False
+
+        def request_stop(self) -> None:
+            super().request_stop()
+            self.delay_verification = True
+
+        def read_operating_status(self) -> str:
+            if self.delay_verification:
+                sleep(0.12)
+            return super().read_operating_status()
+
+    raw = SlowVerificationPump(delay_seconds=0.0)
+    pump = PollingPump(raw, name="test", intervals=slow_intervals())
+    pump.connect()
+    command_id = pump.submit_command(
+        PumpCommand(
+            PumpCommandKind.STOP,
+            PumpCommandPriority.HIGH,
+            execution_timeout_seconds=0.5,
+            verify_status=True,
+            verification_timeout_seconds=0.05,
+        )
+    )
+
+    deadline = monotonic() + 1.0
+    while True:
+        result = pump.command_result(command_id)
+        if result.status.terminal:
+            break
+        assert monotonic() < deadline
+        sleep(0.01)
+
+    assert result.status is PumpCommandStatus.TIMED_OUT
+    assert result.error is not None
+    assert "verification timeout" in result.error
+    assert result.execution_seconds is not None
+    assert result.execution_seconds < 0.05
     pump.disconnect()
 
 

@@ -118,6 +118,7 @@ from eor_control.ui import (  # noqa: E402
     SimulationSettingsPage,
     StageSettingsDialog,
     _authorize_physical_hardware,
+    _enter_hardware_pumps_remote,
     application_icon,
     application_icon_path,
     build_simulated_dashboard,
@@ -129,6 +130,57 @@ from eor_control.ui import (  # noqa: E402
     resolved_theme_stylesheet,
     user_data_root_path,
 )
+
+
+def test_hardware_activation_enters_each_enabled_pump_remote() -> None:
+    class RecordingPumpControl:
+        def __init__(self) -> None:
+            self.operations: list[object] = []
+
+        def observe_connected(self, *roles: PumpRole) -> None:
+            self.operations.append(("CONNECTED", roles))
+
+        def enter_remote(self, role: PumpRole) -> None:
+            self.operations.append(("REMOTE", role))
+
+    control = RecordingPumpControl()
+
+    _enter_hardware_pumps_remote(
+        control,  # type: ignore[arg-type]
+        jacket_enabled=True,
+        injection_enabled=True,
+    )
+
+    assert control.operations == [
+        ("CONNECTED", (PumpRole.JACKET, PumpRole.INJECTION)),
+        ("REMOTE", PumpRole.JACKET),
+        ("REMOTE", PumpRole.INJECTION),
+    ]
+
+
+def test_hardware_activation_does_not_mark_success_after_remote_failure() -> None:
+    class FailingPumpControl:
+        def __init__(self) -> None:
+            self.remote_attempts: list[PumpRole] = []
+
+        def observe_connected(self, *roles: PumpRole) -> None:
+            assert roles == (PumpRole.JACKET, PumpRole.INJECTION)
+
+        def enter_remote(self, role: PumpRole) -> None:
+            self.remote_attempts.append(role)
+            if role is PumpRole.INJECTION:
+                raise RuntimeError("pump did not confirm REMOTE")
+
+    control = FailingPumpControl()
+
+    with pytest.raises(RuntimeError, match="did not confirm REMOTE"):
+        _enter_hardware_pumps_remote(
+            control,  # type: ignore[arg-type]
+            jacket_enabled=True,
+            injection_enabled=True,
+        )
+
+    assert control.remote_attempts == [PumpRole.JACKET, PumpRole.INJECTION]
 
 
 def application() -> QApplication:
@@ -874,6 +926,67 @@ def test_manual_control_queues_multiple_commands_in_order() -> None:
 
     assert executed == ["REMOTE", "CONFIGURE", "RUN"]
     assert not dialog._pending_commands
+    dialog.close()
+
+
+def test_manual_command_queue_can_be_viewed_reordered_and_deleted() -> None:
+    application()
+    dialog = PumpControlDialog(  # type: ignore[arg-type]
+        object(),
+        object(),
+        lambda: "Teszt szakasz",
+    )
+    dialog._telemetry_timer.stop()
+    dialog._telemetry_active = True
+
+    dialog._execute(lambda: None, "remote")
+    dialog._execute(lambda: None, "configure")
+    dialog._execute(lambda: None, "run")
+
+    assert dialog._command_queue_table.rowCount() == 3
+    assert [
+        dialog._command_queue_table.item(row, 1).text() for row in range(3)
+    ] == ["remote", "configure", "run"]
+
+    dialog._command_queue_table.selectRow(2)
+    dialog._move_selected_command(-1)
+    assert [command.success_message for command in dialog._pending_commands] == [
+        "remote",
+        "run",
+        "configure",
+    ]
+
+    dialog._command_queue_table.selectRow(1)
+    dialog._remove_selected_command()
+    assert [command.success_message for command in dialog._pending_commands] == [
+        "remote",
+        "configure",
+    ]
+    dialog.close()
+
+
+def test_manual_command_queue_does_not_edit_or_delete_safety_stop() -> None:
+    application()
+    dialog = PumpControlDialog(  # type: ignore[arg-type]
+        object(),
+        object(),
+        lambda: "Teszt szakasz",
+    )
+    dialog._telemetry_timer.stop()
+    dialog._telemetry_active = True
+
+    dialog._execute(lambda: None, "normal")
+    dialog._execute(lambda: None, "STOP ALL", priority=True)
+
+    dialog._command_queue_table.selectRow(0)
+    dialog._remove_selected_command()
+    dialog._move_selected_command(1)
+
+    assert [command.success_message for command in dialog._pending_commands] == [
+        "STOP ALL",
+        "normal",
+    ]
+    assert "ZÁROLT" in dialog._command_queue_table.item(0, 0).text()
     dialog.close()
 
 

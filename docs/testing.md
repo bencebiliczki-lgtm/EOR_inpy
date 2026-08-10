@@ -222,8 +222,10 @@ az aszinkron worker alatt tovább futó safety ciklust és azt, hogy a lassú
 parancs nem okoz control-cycle deadline hibát, miközben a lassú biztonsági
 kiértékelés továbbra is watchdoghibát okoz. Parancssorrend-teszt
 igazolja a KÖP átállítási lépései közötti friss safety ciklust. A rollback-teszt
-`PROBLEM=LOCAL MODE` válasznál ellenőrzi az egyszeri `REMOTE → STOP` helyreállítást
-és azt, hogy a másik pumpa STOP-ja ettől függetlenül lefut.
+`PROBLEM=LOCAL MODE` válasznál ellenőrzi az egyszeri `REMOTE → STOP` helyreállítást,
+ha az álló Local állapot nem igazolható cache-ből. Igazolt `STOP LOCAL` esetén
+külön regresszió ellenőrzi a felesleges STOP kihagyását és azt, hogy a másik pumpa
+STOP-ja ettől függetlenül lefut.
 Worker-regresszió ellenőrzi, hogy a már sorban álló STOP megelőzi a következő
 telemetriát, az egyik pumpa blokkolt tranzakciója nem állítja meg a másik workerét,
 a STATUS igazolja a STOP/RUN eredményt, és a parancstimeout nem control-cycle
@@ -234,10 +236,15 @@ prioritást, a `FLOW → VOLA` körforgást, a tényleges tranzakcióidő utáni
 újraütemezést és a felzárkózó burst hiányát. A UI-teszt különböző
 értékekkel ellenőrzi a mentett és az aktív pollingbeállítás megjelenítését.
 Prioritási regresszió blokkolt telemetriakeret után igazolja a
-`STOP → PRESS → CONFIG` sorrendet, továbbá azt, hogy két normál parancs közé
-nyomásfrissítés kerül. LOCAL módban maradó BES esetén a REMOTE-visszaigazolás
-hibás, ezért RUN parancs nem követheti; a szabványos `STATUS=STOP/RUN` válasz
-viszont akkor is érvényes, ha nem ismétli meg szó szerint a `REMOTE` szót.
+`STOP → CONFIG → PRESS` sorrendet, továbbá azt, hogy a sorban álló normál
+vezérlőparancsok is megelőzik a következő nyomásfrissítést. Külön teszt ellenőrzi,
+hogy előkészítés alatt csak `PRESS/STATUS` fut, majd a `FLOW/VOLA` polling az
+előkészítés lezárása után helyreáll. A queue-, execution- és verification-timeout
+külön regressziót kap. LOCAL módban maradó pumpa esetén a REMOTE-visszaigazolás
+hibás, ezért konfiguráció vagy RUN parancs nem követheti. A puszta
+`STATUS=STOP/RUN` sem elegendő: az előkészítés explicit Remote állapotot követel.
+Más tesztek igazolják, hogy a `STOP LOCAL` és `RUN LOCAL` ettől még `GOOD`
+adatminőségű, valamint a REMOTE-hiba pumpaszerepet megnevező üzenetet ad.
 A startup-budget teszt két teljes PRESS/STATUS retry-keretet követel meg. A
 blokkolt worker leválasztási regressziója igazolja, hogy timeoutnál a port nem
 záródik be, reconnect nem indul, és a cleanup csak a régi worker befejezése

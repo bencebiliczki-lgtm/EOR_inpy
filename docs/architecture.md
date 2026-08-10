@@ -542,18 +542,24 @@ vezérlési szál későbbi ciklusokban csak a `CommandResult` állapotát ellen
 Pumpánként egy `PollingPump` worker az adott COM-port kizárólagos tulajdonosa,
 ugyanott ütemezi a pollingot és a parancsokat. Emiatt ugyanazon porton nem
 keveredhet két keret, miközben a KÖP és BES külön workerén párhuzamosan haladhat.
-A worker a STOP-ot, majd az esedékes biztonságkritikus `PRESS` és `STATUS`
-lekérdezést részesíti előnyben; a `FLOW/VOLA` mezőket külön körforgásban olvassa.
-Az esedékes `STATUS`-t normál konfigurációs parancsfolyam sem éheztetheti ki.
+A worker prioritási sorrendje: biztonsági `STOP`; előkészítési és kezelői
+`REMOTE/MAXPRESS/CONST_FLOW/CONST_PRESS/RUN` parancsok; majd telemetria
+`PRESS/STATUS/FLOW/VOLA` sorrendben. A `Condition` minden parancsbehelyezéskor
+azonnal felébreszti a workert, amely minden egyes pollingtranzakció után újra
+ellenőrzi a parancssort. Nem futtat előre teljes pollingciklust. Előkészítés alatt
+csak a szükséges `PRESS/STATUS` polling fut; a `FLOW/VOLA` az előkészítés végéig
+várhat.
 Az időköz a tranzakció befejezésétől számítódik,
 így a soros válaszidő nem hoz létre behozandó pollinghátralékot. Aktív
 vezérlőparancs alatt normál telemetria-tranzakció nem indul.
-A vezérlési watchdog csak a cache-/NI-kiértékelést méri; a queue-várakozásnak,
-parancstranzakciónak, állapotátmenetnek és teljes nyomásfelépítésnek külön
-időkorlátja van. A rollback mindkét STOP-ot előbb queue-ba helyezi, majd
+A vezérlési watchdog csak a cache-/NI-kiértékelést méri. A queue-várakozás,
+parancsvégrehajtás és célzott STATUS-visszaellenőrzés három külön időkeretet kap;
+a queue alapértéke átmenetileg 5 másodperc. Az állapotátmenetnek és a teljes
+nyomásfelépítésnek szintén külön időkorlátja van. A rollback mindkét STOP-ot előbb queue-ba helyezi, majd
 egymástól
-függetlenül megkísérli; `PROBLEM=LOCAL MODE` esetén egyszeri `REMOTE → STOP`
-helyreállítást végez, és annak hibáját is megőrzi.
+függetlenül megkísérli. A cache szerint már `STOP LOCAL` pumpán a STOP-ot kihagyja,
+mert a pumpa áll; ha csak a STOP válaszából derül ki a Local mód és a cache nem
+igazolja az álló állapotot, az egyszeri `REMOTE → STOP` helyreállítás megmarad.
 
 A besajtolópumpa `RUN` előtt a szolgáltatás friss státuszt olvas mindkét pumpáról,
 és a konfigurált minimum alatti köpenynyomás-többletnél megtagadja az indítást. A `STOP ALL`
@@ -573,6 +579,21 @@ tartományellenőrzéssel jut az aktuátorra. A STOP, safe-state és leválaszt�
 mindig külön-külön megkísérelhető. A manuális ablak minden bezárási útvonala
 leállítja az időzített telemetriát, kivárja az aktív DASNET-műveletet, majd minden
 pumpán megkísérli a STOP-ot és a soros kliens lezárását.
+Az ablak megjeleníti a saját várakozó manuális parancssorát. A még el nem indult
+normál parancsok átrendezhetők vagy törölhetők; a futó parancs, valamint a
+prioritásos biztonsági `STOP` és safe-state művelet nem szerkeszthető és nem
+törölhető.
+
+A normál, kezelő által megerősített hardvermód-aktiválás is `REMOTE` módba állítja
+az összes engedélyezett pumpát a csatlakozás után. Az aktiválás csak akkor válik
+aktívvá, ha minden `REMOTE` parancs célzott státusz-visszaolvasása sikeres; hiba
+esetén a már megnyitott hardverkapcsolatok lezárási útvonala fut le.
+
+A `LOCAL` pumpastátusz érvényes telemetria, nem `INVALID` adatminőség. Emiatt
+`IDLE`, `READY` és `PREPARING` állapotban önmagában nem vált ki
+`FULL_SAFE_STOP`-ot. Az előkészítési állapotgép küldi a REMOTE parancsot, majd
+célzott STATUS-visszaolvasással explicit Remote állapotot követel; csak ezután
+léphet tovább a konfigurálási és RUN fázisokra.
 A manuális ablak időzített kapcsolatfrissítése nem hív közös `observe_once`
 mérési ciklust: a pumpák és az NI-bemenetek külön olvasása csak kapcsolat- és
 telemetriateszt. A teljes mérési `SafetyMonitor` kizárólag normál mérési

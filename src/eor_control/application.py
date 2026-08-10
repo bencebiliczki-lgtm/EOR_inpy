@@ -219,7 +219,7 @@ class DeviceControlService:
         if asynchronous:
             return self._request_queued_safe_state(safety_rule)
         errors: list[str] = []
-        operations = (
+        pump_operations = (
             (
                 "jacket pump STOP",
                 self._jacket_pump.request_stop,
@@ -230,13 +230,22 @@ class DeviceControlService:
                 self._injection_pump.request_stop,
                 DiagnosticCategory.INJECTION_PUMP,
             ),
-            (
-                "DAQ safe state",
-                self._daq.set_safe_state,
-                DiagnosticCategory.NI_VALVE,
-            ),
         )
-        for label, operation, category in operations:
+        for label, operation, category in pump_operations:
+            pump = (
+                self._jacket_pump
+                if category is DiagnosticCategory.JACKET_PUMP
+                else self._injection_pump
+            )
+            if self._is_stopped_local(pump):
+                self._log_safe_state(
+                    category,
+                    label,
+                    "SKIPPED_ALREADY_STOPPED_LOCAL",
+                    "WARNING",
+                    safety_rule,
+                )
+                continue
             try:
                 operation()
             except Exception as error:
@@ -256,6 +265,25 @@ class DeviceControlService:
                     "WARNING",
                     safety_rule,
                 )
+        try:
+            self._daq.set_safe_state()
+        except Exception as error:
+            errors.append(f"DAQ safe state failed: {error}")
+            self._log_safe_state(
+                DiagnosticCategory.NI_VALVE,
+                "DAQ safe state",
+                f"FAILED: {error}",
+                "ERROR",
+                safety_rule,
+            )
+        else:
+            self._log_safe_state(
+                DiagnosticCategory.NI_VALVE,
+                "DAQ safe state",
+                "OK",
+                "WARNING",
+                safety_rule,
+            )
         return tuple(errors)
 
     def _request_queued_safe_state(self, safety_rule: str) -> tuple[str, ...]:
@@ -277,6 +305,15 @@ class DeviceControlService:
                 cancel = getattr(pump, "cancel_pending_commands", None)
                 if callable(cancel):
                     cancel()
+                if self._is_stopped_local(pump):
+                    self._log_safe_state(
+                        category,
+                        label,
+                        "SKIPPED_ALREADY_STOPPED_LOCAL",
+                        "WARNING",
+                        safety_rule,
+                    )
+                    continue
                 submit_stop = getattr(pump, "submit_stop", None)
                 if not callable(submit_stop):
                     raise RuntimeError("pump emergency command queue is unavailable")
@@ -347,6 +384,11 @@ class DeviceControlService:
                     safety_rule,
                 )
         return tuple(errors)
+
+    @staticmethod
+    def _is_stopped_local(pump: object) -> bool:
+        checker = getattr(pump, "is_stopped_local", None)
+        return bool(checker()) if callable(checker) else False
 
     def _log_safe_state(
         self,

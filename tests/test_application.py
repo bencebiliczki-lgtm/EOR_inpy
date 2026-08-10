@@ -180,6 +180,49 @@ def test_emergency_queues_both_stops_before_waiting_for_results() -> None:
     assert daq.safe_state_requested
 
 
+def test_safe_state_skips_stop_for_pump_already_stopped_local() -> None:
+    class StoppedLocalPump(QueuedStopPump):
+        def is_stopped_local(self) -> bool:
+            return True
+
+        def submit_stop(self, *, emergency: bool = False) -> str:
+            pytest.fail("STOP LOCAL pump must not receive another STOP")
+
+    class IndependentQueuedPump(QueuedStopPump):
+        def command_result(self, command_id: str) -> PumpCommandResult:
+            self.events.append(f"{self.role}:result")
+            return PumpCommandResult(
+                command_id,
+                PumpCommand(
+                    PumpCommandKind.STOP,
+                    PumpCommandPriority.EMERGENCY,
+                    verify_status=True,
+                ),
+                PumpCommandStatus.SUCCEEDED,
+                submitted_monotonic=0.0,
+                started_monotonic=0.0,
+                completed_monotonic=0.0,
+                operating_status="STOP REMOTE",
+            )
+
+    events: list[str] = []
+    daq = OrderingDaq(events)
+    control = DeviceControlService(
+        jacket_pump=StoppedLocalPump("jacket", events),
+        injection_pump=IndependentQueuedPump("injection", events),
+        daq=daq,
+    )
+    control.connect()
+    control.start()
+
+    control.emergency_stop()
+
+    assert "jacket:cancel" in events
+    assert "jacket:submit" not in events
+    assert "injection:submit" in events
+    assert daq.safe_state_requested
+
+
 def test_safe_state_logs_every_action_and_result(tmp_path: Path) -> None:
     logger = DiagnosticLogger(tmp_path / "application.html")
     logger.configure(enabled=True, categories=DiagnosticCategory)

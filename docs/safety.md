@@ -79,7 +79,9 @@ portbontást.
 A fizikai pumpaadapter a safe-state `STOP` kérést élvezérelten reteszeli. Egy
 hibaeseményben pumpánként legfeljebb egy `STOP` kerül a soros vonalra akkor is, ha
 a pumpa `PROBLEM=LOCAL MODE` választ ad vagy több felügyeleti réteg ugyanazt a
-safe-state-et kéri. Új STOP csak sikeres biztonsági hibatörlés, REMOTE módba lépés
+safe-state-et kéri. A cache szerint már `STOP LOCAL` pumpára a safe-state nem küld
+új STOP-ot; ez érvényes, álló, de távolról nem vezérelhető állapot. Új STOP csak
+sikeres biztonsági hibatörlés, REMOTE módba lépés
 vagy új pumpafutás után engedélyezett. Ez a parancsismétlést korlátozza, a fizikai
 vészleállítás és a pumpa saját védelmei továbbra is elsődlegesek.
 

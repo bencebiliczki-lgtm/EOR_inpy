@@ -3,7 +3,14 @@ from time import sleep
 
 import pytest
 
-from eor_control.domain import PumpStatus
+from eor_control.domain import DataQuality, PumpStatus
+from eor_control.pump_commands import (
+    PumpCommand,
+    PumpCommandKind,
+    PumpCommandPriority,
+    PumpCommandResult,
+    PumpCommandStatus,
+)
 from eor_control.pump_control import (
     PumpControlService,
     PumpControlTiming,
@@ -125,6 +132,91 @@ def test_measurement_start_preserves_hourly_flow_targets() -> None:
     assert injection.commands == ["REMOTE", "FLOW=1000.0", "RUN", "STOP"]
     assert control.state(PumpRole.JACKET).running
     assert not control.state(PumpRole.INJECTION).running
+
+
+def test_local_pump_remote_failure_has_specific_preparation_error() -> None:
+    class AsyncPreparationPump(FakePump):
+        def __init__(self, pressure: float, *, stopped_local: bool) -> None:
+            super().__init__(pressure, [])
+            self.stopped_local = stopped_local
+            self.submitted: dict[str, PumpCommand] = {}
+            self.preparation_states: list[bool] = []
+
+        def read_cached_status(self) -> tuple[PumpStatus, DataQuality]:
+            return self.read_status(), DataQuality.GOOD
+
+        def set_preparation_active(self, active: bool) -> None:
+            self.preparation_states.append(active)
+
+        def is_stopped_local(self) -> bool:
+            return self.stopped_local
+
+        def cancel_pending_commands(self) -> None:
+            return
+
+        def submit_command(self, command: PumpCommand) -> str:
+            command_id = f"command-{len(self.submitted) + 1}"
+            self.submitted[command_id] = command
+            return command_id
+
+        def submit_stop(self, *, emergency: bool = False) -> str:
+            assert emergency
+            if self.stopped_local:
+                pytest.fail("STOP LOCAL pump must not receive rollback STOP")
+            return self.submit_command(
+                PumpCommand(
+                    PumpCommandKind.STOP,
+                    PumpCommandPriority.EMERGENCY,
+                    verify_status=True,
+                )
+            )
+
+        def command_result(self, command_id: str) -> PumpCommandResult:
+            command = self.submitted[command_id]
+            failed_remote = (
+                command.kind is PumpCommandKind.ENTER_REMOTE and self.stopped_local
+            )
+            return PumpCommandResult(
+                command_id,
+                command,
+                (
+                    PumpCommandStatus.FAILED
+                    if failed_remote
+                    else PumpCommandStatus.SUCCEEDED
+                ),
+                submitted_monotonic=0.0,
+                started_monotonic=0.0,
+                completed_monotonic=0.0,
+                operating_status="STOP LOCAL" if failed_remote else "STOP REMOTE",
+                error=(
+                    "RuntimeError: pump STATUS did not confirm REMOTE"
+                    if failed_remote
+                    else None
+                ),
+            )
+
+    jacket = AsyncPreparationPump(120.0, stopped_local=True)
+    injection = AsyncPreparationPump(100.0, stopped_local=False)
+    control = PumpControlService(jacket_pump=jacket, injection_pump=injection)
+    control.authorize(PumpControlService.AUTHORIZATION)
+    control.connect(PumpRole.JACKET)
+    control.connect(PumpRole.INJECTION)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"A jacket pumpa nem állítható Remote módba\.",
+    ):
+        control.prepare_measurement_pumps(
+            PumpStartupPlan(120.0, 60.0, 100.0, 10.0),
+            timing=PumpControlTiming(control_interval_seconds=0.001),
+            confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+        )
+
+    remote = next(iter(jacket.submitted.values()))
+    assert remote.kind is PumpCommandKind.ENTER_REMOTE
+    assert remote.verify_status
+    assert jacket.preparation_states == [True, False]
+    assert injection.preparation_states == [True, False]
 
 
 def test_measurement_preparation_enforces_configured_control_deadline() -> None:
@@ -257,13 +349,31 @@ def test_async_pump_workers_keep_slow_stop_outside_control_deadline() -> None:
             timing=PumpControlTiming(
                 control_interval_seconds=0.01,
                 watchdog_tolerance_seconds=0.04,
-                command_timeout_seconds=0.5,
+                execution_timeout_seconds=0.5,
             ),
         confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
     )
 
     assert not control.state(PumpRole.INJECTION).running
     assert control.state(PumpRole.JACKET).running
+    queued_commands = [
+        result.command
+        for result in (*jacket._command_results.values(), *injection._command_results.values())
+    ]
+    assert queued_commands
+    assert all(
+        command.priority is PumpCommandPriority.HIGH for command in queued_commands
+    )
+    assert all(command.queue_timeout_seconds == 5.0 for command in queued_commands)
+    assert all(
+        command.execution_timeout_seconds == 0.5 for command in queued_commands
+    )
+    assert all(
+        command.verification_timeout_seconds == 5.0
+        for command in queued_commands
+    )
+    assert not jacket._preparation_active
+    assert not injection._preparation_active
     jacket.disconnect()
     injection.disconnect()
 

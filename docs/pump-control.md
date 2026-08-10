@@ -309,20 +309,35 @@ queue-ba, majd későbbi ciklusokban olvassa a `CommandResult` állapotát
 (`QUEUED/RUNNING/SUCCEEDED/FAILED/TIMED_OUT/CANCELLED`), ezért a soros művelet
 ideje nem kerül a control-cycle watchdog alá. Az érintett pumpa workerének
 pollingja a tranzakció idejére szünetel, de a másik pumpa workerét ez nem
-blokkolja. A már sorba állított vezérlő- vagy biztonsági parancs a következő
-pollingtranzakció előtt kap lehetőséget.
+blokkolja. A `Condition` a queue-ba helyezéskor azonnal felébreszti a workert.
+A worker minden egyes pollingtranzakció után ellenőrzi a queue-t, és minden
+vezérlőparancsot a következő telemetria-tranzakció előtt indít el. A prioritási
+sorrend: biztonsági `STOP`; előkészítési/kezelői parancsok; majd
+`PRESS/STATUS/FLOW/VOLA` telemetria. Előkészítés közben a `FLOW/VOLA` szünetel.
 
-Ha egy normál parancs a queue-várakozási határig még nem indult el, a worker
-`CANCELLED` állapotba teszi. Így a hívó által már timeoutként kezelt parancs a
-blokkoló DASNET-tranzakció után sem futhat le későn. A már `RUNNING` parancsot a
-soros keret közepén nem szakítja meg; arra a külön tranzakció-timeout vonatkozik.
+Ha egy parancs a queue-várakozási határig még nem indult el, `TIMED_OUT`
+állapotba kerül és a worker a heap-bejegyzését végrehajtás nélkül eldobja. Így a
+hívó által már timeoutként kezelt parancs a blokkoló DASNET-tranzakció után sem
+futhat le későn. A queue-, execution- és verification-timeout egymástól független;
+alapértékük jelenleg 5 másodperc. A már futó soros keret fizikailag nem szakítható
+meg biztonságosan, ezért a késői befejezés külön naplóeseményt kap.
 
 `REMOTE`, `RUN` és `STOP` csak célzott STATUS-visszaolvasás után sikeres. A
-REMOTE ellenőrzés a szabványos `STATUS=STOP` vagy `STATUS=RUN` választ elfogadja,
-ha nincs `LOCAL`/problémajelzés; nem követeli meg a `REMOTE` szó visszhangját. Minden
-parancs egyedi azonosítóval naplózza a queue-várakozást, tranzakcióidőt,
-ellenőrzési időt és eredményt. A parancstimeout külön hiba, például
-`injection command timeout: STOP`; nem jelenhet meg control-cycle deadline-ként.
+REMOTE ellenőrzés csak explicit Remote állapotot fogad el, például
+`STOP REMOTE`; a puszta `STATUS=STOP/RUN`, a `LOCAL` és a problémajelzés nem
+elegendő. Sikertelen váltáskor az előkészítés a pumpaszerepet megnevező hibával
+áll le, és nem folytatja a `MAXPRESS → CONST_FLOW → RUN` sorozatot. Minden
+parancs egyedi azonosítóval naplózza a queue-várakozást, teljes tranzakcióidőt,
+végrehajtási időt, ellenőrzési időt és eredményt. A timeout megnevezi a fázist,
+például `injection command execution timeout: STOP`; nem jelenhet meg
+control-cycle deadline-ként.
+
+A `STOP LOCAL` és `RUN LOCAL` érvényes STATUS parsereredmény, ezért adatminősége
+`GOOD`. A Local mód nem szenzorhiba, hanem érvényes, távolról nem vezérelhető
+állapot. Az előkészítés REMOTE paranccsal és célzott STATUS-visszaolvasással vált
+vezérelhető állapotba. Safe-state alatt a cache szerint már `STOP LOCAL` pumpa
+nem kap újabb STOP-ot; a többi pumpa és a szelep biztonsági művelete ettől még
+függetlenül lefut.
 
 A vezérlési ciklus és a pumpa polling nem ugyanaz:
 
