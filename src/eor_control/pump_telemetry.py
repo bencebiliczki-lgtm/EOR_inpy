@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from heapq import heappop, heappush
 from math import isfinite
-from threading import Condition, Event, Lock, Thread, current_thread
+from threading import Condition, Event, Lock, Thread, current_thread, get_ident
 from time import monotonic
 from typing import Protocol, TypeVar
 
@@ -56,9 +56,9 @@ class PollablePump(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class PumpPollingIntervals:
-    pressure_seconds: float = 0.5
-    slow_telemetry_seconds: float = 0.5
-    status_poll_seconds: float = 3.0
+    pressure_seconds: float = 1.0
+    slow_telemetry_seconds: float = 10.0
+    status_poll_seconds: float = 4.0
     pressure_stale_seconds: float = 6.0
     slow_telemetry_stale_seconds: float = 33.0
     status_stale_seconds: float = 8.0
@@ -112,6 +112,24 @@ class PumpTelemetrySnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class PumpWorkerSnapshot:
+    """Cache-only diagnostics for one pump's isolated serial worker."""
+
+    name: str
+    serial_port: str
+    worker_name: str
+    worker_ident: int | None
+    running: bool
+    queue_size: int
+    active_command: str | None
+    pressure_age_seconds: float | None
+    status_age_seconds: float | None
+    last_transaction: str
+    last_transaction_seconds: float
+    polling_deadline_misses: int
+
+
+@dataclass(frozen=True, slots=True)
 class _CachedTelemetry:
     status: PumpStatus
     pressure_at: float
@@ -136,12 +154,14 @@ class PollingPump:
         pump: PollablePump,
         *,
         name: str,
+        serial_port: str = "—",
         intervals: PumpPollingIntervals | None = None,
         diagnostics: DiagnosticLogger | None = None,
         diagnostic_category: DiagnosticCategory = DiagnosticCategory.SYSTEM,
     ) -> None:
         self._pump = pump
         self._name = name
+        self._serial_port = serial_port
         self._intervals = intervals or PumpPollingIntervals()
         self._diagnostics = diagnostics
         self._diagnostic_category = diagnostic_category
@@ -167,11 +187,39 @@ class PollingPump:
         self._remote_supervision_active = False
         self._remote_recovery_command_id: str | None = None
         self._local_status_streak = 0
+        self._active_command_id: str | None = None
+        self._polling_deadline_misses = 0
+        self._last_successful_write: tuple[PumpCommandKind, float | None] | None = None
+        self._last_successful_command_id: str | None = None
 
     @property
     def polling_intervals(self) -> PumpPollingIntervals:
         """Return the immutable timing configuration active in this worker."""
         return self._intervals
+
+    def worker_snapshot(self) -> PumpWorkerSnapshot:
+        """Return worker/queue health without initiating serial traffic."""
+
+        with self._condition:
+            thread = self._thread
+            active = self._active_command_id
+            active_result = self._command_results.get(active) if active else None
+            return PumpWorkerSnapshot(
+                name=self._name,
+                serial_port=self._serial_port,
+                worker_name=(thread.name if thread is not None else f"eor-{self._name}-pump-poll"),
+                worker_ident=thread.ident if thread is not None else None,
+                running=bool(thread is not None and thread.is_alive()),
+                queue_size=self._pending_commands,
+                active_command=(
+                    active_result.command.kind.value if active_result is not None else None
+                ),
+                pressure_age_seconds=self._field_age_locked("pressure"),
+                status_age_seconds=self._field_age_locked("status"),
+                last_transaction=self._last_command,
+                last_transaction_seconds=self._last_command_elapsed_ms / 1000.0,
+                polling_deadline_misses=self._polling_deadline_misses,
+            )
 
     def connect(self) -> None:
         with self._condition:
@@ -191,6 +239,9 @@ class PollingPump:
             self._stop_latched = False
             self._worker_error = None
             self._cache = None
+            self._last_successful_write = None
+            self._last_successful_command_id = None
+            self._polling_deadline_misses = 0
             stop_event = Event()
             self._stop_event = stop_event
             self._thread = Thread(
@@ -292,19 +343,14 @@ class PollingPump:
                 connected=False,
             )
             state = PumpConnectionState.DISCONNECTED
-        elif (
-            pressure.quality is not DataQuality.GOOD
-            or any(
-                field.last_error is not None
-                for field in (flow, volume, operating_status)
-            )
+        elif pressure.quality is not DataQuality.GOOD or any(
+            field.last_error is not None for field in (flow, volume, operating_status)
         ):
             state = PumpConnectionState.DEGRADED
         elif flow.age_seconds is None or volume.age_seconds is None:
             state = PumpConnectionState.TELEMETRY_PARTIAL
         elif any(
-            field.quality is not DataQuality.GOOD
-            for field in (flow, volume, operating_status)
+            field.quality is not DataQuality.GOOD for field in (flow, volume, operating_status)
         ):
             state = PumpConnectionState.DEGRADED
         else:
@@ -360,6 +406,10 @@ class PollingPump:
             self._stop_latched = False
 
     def enter_remote_for_recovery(self, reason: str) -> None:
+        with self._condition:
+            if self._last_successful_write == (PumpCommandKind.ENTER_REMOTE, None):
+                self._last_successful_write = None
+                self._last_successful_command_id = None
         command = PumpCommand(
             PumpCommandKind.ENTER_REMOTE,
             PumpCommandPriority.HIGH,
@@ -456,6 +506,26 @@ class PollingPump:
                 raise ConnectionError(f"{self._name} pump is disconnected")
             if self._thread is None or not self._thread.is_alive():
                 raise ConnectionError(f"{self._name} pump worker is not running")
+            deduplicated_kinds = {
+                PumpCommandKind.ENTER_REMOTE,
+                PumpCommandKind.SET_PRESSURE_LIMIT,
+                PumpCommandKind.SET_CONSTANT_FLOW,
+                PumpCommandKind.SET_CONSTANT_PRESSURE,
+            }
+            signature = (command.kind, command.value)
+            if command.kind in deduplicated_kinds:
+                for existing_id, existing in self._command_results.items():
+                    if (
+                        existing.command.kind is command.kind
+                        and existing.command.value == command.value
+                        and existing.status in {PumpCommandStatus.QUEUED, PumpCommandStatus.RUNNING}
+                    ):
+                        return existing_id
+                if (
+                    self._last_successful_write == signature
+                    and self._last_successful_command_id is not None
+                ):
+                    return self._last_successful_command_id
             self._command_sequence += 1
             command_id = f"{self._name}-{self._command_sequence:06d}"
             submitted = monotonic()
@@ -512,8 +582,7 @@ class PollingPump:
             timeout_limit = 0.0
             if (
                 result.status is PumpCommandStatus.QUEUED
-                and now - result.submitted_monotonic
-                > result.command.queue_timeout_seconds
+                and now - result.submitted_monotonic > result.command.queue_timeout_seconds
             ):
                 timeout_phase = "queue"
                 timeout_limit = result.command.queue_timeout_seconds
@@ -521,8 +590,7 @@ class PollingPump:
                 if (
                     result.started_monotonic is not None
                     and result.execution_completed_monotonic is None
-                    and now - result.started_monotonic
-                    > result.command.execution_timeout_seconds
+                    and now - result.started_monotonic > result.command.execution_timeout_seconds
                 ):
                     timeout_phase = "execution"
                     timeout_limit = result.command.execution_timeout_seconds
@@ -545,12 +613,8 @@ class PollingPump:
                         f"{self._name} command {timeout_phase} timeout: "
                         f"{result.command.kind.value} exceeded {timeout_limit:.3g} s"
                     ),
-                    execution_completed_monotonic=(
-                        result.execution_completed_monotonic
-                    ),
-                    verification_started_monotonic=(
-                        result.verification_started_monotonic
-                    ),
+                    execution_completed_monotonic=(result.execution_completed_monotonic),
+                    verification_started_monotonic=(result.verification_started_monotonic),
                 )
                 self._command_results[command_id] = result
                 self._pending_commands = sum(
@@ -559,6 +623,30 @@ class PollingPump:
                 )
                 self._condition.notify_all()
             return result
+
+    def command_queue_snapshot(self) -> tuple[PumpCommandResult, ...]:
+        """Return running and queued commands in their effective execution order."""
+
+        with self._condition:
+            active = tuple(
+                result
+                for result in self._command_results.values()
+                if result.status
+                in {
+                    PumpCommandStatus.RUNNING,
+                    PumpCommandStatus.QUEUED,
+                }
+            )
+        return tuple(
+            sorted(
+                active,
+                key=lambda result: (
+                    0 if result.status is PumpCommandStatus.RUNNING else 1,
+                    int(result.command.priority),
+                    result.submitted_monotonic,
+                ),
+            )
+        )
 
     def cancel_pending_commands(self) -> None:
         with self._condition:
@@ -609,20 +697,18 @@ class PollingPump:
         with self._condition:
             if self._stop_command_id is not None:
                 previous = self._command_results.get(self._stop_command_id)
-                if previous is not None and (
-                    self._stop_latched or not previous.status.terminal
-                ) and previous.status is not PumpCommandStatus.CANCELLED:
+                if (
+                    previous is not None
+                    and (self._stop_latched or not previous.status.terminal)
+                    and previous.status is not PumpCommandStatus.CANCELLED
+                ):
                     return self._stop_command_id
             # Latch before queueing so concurrent safe-state paths share one STOP.
             self._stop_latched = True
             command_id = self.submit_command(
                 PumpCommand(
                     PumpCommandKind.STOP,
-                    (
-                        PumpCommandPriority.EMERGENCY
-                        if emergency
-                        else PumpCommandPriority.HIGH
-                    ),
+                    (PumpCommandPriority.EMERGENCY if emergency else PumpCommandPriority.HIGH),
                     verify_status=True,
                 ),
                 require_connected=False,
@@ -657,12 +743,8 @@ class PollingPump:
                     return result
                 if result.status is PumpCommandStatus.TIMED_OUT:
                     raise TimeoutError(result.error or "pump command timed out")
-                if result.error is not None and result.error.startswith(
-                    "ConnectionError:"
-                ):
-                    raise ConnectionError(
-                        result.error.removeprefix("ConnectionError:").strip()
-                    )
+                if result.error is not None and result.error.startswith("ConnectionError:"):
+                    raise ConnectionError(result.error.removeprefix("ConnectionError:").strip())
                 raise RuntimeError(result.error or f"pump command {result.status.value}")
             with self._condition:
                 # Queueing, execution and verification are supervised separately.
@@ -690,6 +772,9 @@ class PollingPump:
             next_status = schedule_origin + self._intervals.status_poll_seconds
             next_slow = schedule_origin
             slow_fields = ("flow", "volume")
+            slow_step_seconds = self._intervals.slow_telemetry_seconds / len(
+                slow_fields
+            )
             slow_field_index = 0
             while not stop_event.is_set():
                 # Every control command precedes scheduling another telemetry
@@ -704,13 +789,8 @@ class PollingPump:
                         queued[1].verify_status
                         and command_result.status is PumpCommandStatus.SUCCEEDED
                     ):
-                        next_status = (
-                            command_completed
-                            + self._intervals.status_poll_seconds
-                        )
-                    next_slow = (
-                        command_completed + self._intervals.slow_telemetry_seconds
-                    )
+                        next_status = command_completed + self._intervals.status_poll_seconds
+                    next_slow = command_completed + slow_step_seconds
                     continue
                 now = monotonic()
                 if now >= next_pressure:
@@ -729,8 +809,7 @@ class PollingPump:
                     field, due = min(candidates, key=lambda candidate: candidate[1])
                 with self._condition:
                     self._condition.wait_for(
-                        lambda: bool(self._command_queue)
-                        or stop_event.is_set(),
+                        lambda: bool(self._command_queue) or stop_event.is_set(),
                         timeout=max(0.0, due - monotonic()),
                     )
                     if stop_event.is_set():
@@ -744,9 +823,11 @@ class PollingPump:
                     if field == "pressure"
                     else self._intervals.status_poll_seconds
                     if field == "status"
-                    else self._intervals.slow_telemetry_seconds
+                    else slow_step_seconds
                 )
                 if lateness > interval:
+                    with self._condition:
+                        self._polling_deadline_misses += 1
                     self._log_field_event(
                         "POLLING_DEADLINE_MISSED",
                         field,
@@ -775,9 +856,7 @@ class PollingPump:
                             self._read("VOLA", self._pump.read_remaining_volume_ml),
                         )
                     else:
-                        status_text = self._read(
-                            "STATUS", self._pump.read_operating_status
-                        )
+                        status_text = self._read("STATUS", self._pump.read_operating_status)
                         self._update_operating_status(status_text)
                         self._schedule_remote_recovery(status_text)
                         log_health = True
@@ -799,7 +878,7 @@ class PollingPump:
                         slow_field_index = (slow_field_index + 1) % len(slow_fields)
                         next_slow = self._next_polling_deadline(
                             completed,
-                            self._intervals.slow_telemetry_seconds,
+                            slow_step_seconds,
                         )
                     if log_health:
                         self._log_telemetry_health()
@@ -854,6 +933,7 @@ class PollingPump:
                     started_monotonic=started,
                 )
                 self._pending_commands = len(self._command_queue)
+                self._active_command_id = command_id
                 self._condition.notify_all()
                 return command_id, result.command
             self._pending_commands = 0
@@ -872,9 +952,7 @@ class PollingPump:
         except Exception as command_error:
             error = command_error
         execution_completed = monotonic()
-        execution_elapsed = execution_completed - (
-            result.started_monotonic or execution_completed
-        )
+        execution_elapsed = execution_completed - (result.started_monotonic or execution_completed)
 
         if (
             error is None
@@ -885,6 +963,7 @@ class PollingPump:
             with self._condition:
                 current = self._command_results[command_id]
                 if current.status is PumpCommandStatus.TIMED_OUT:
+                    self._active_command_id = None
                     self._condition.notify_all()
                     self._log_command_event(
                         command_id,
@@ -915,6 +994,7 @@ class PollingPump:
         with self._condition:
             current = self._command_results[command_id]
             if current.status is PumpCommandStatus.TIMED_OUT:
+                self._active_command_id = None
                 self._condition.notify_all()
                 self._log_command_event(
                     command_id,
@@ -924,9 +1004,7 @@ class PollingPump:
                 )
                 return
             verification_elapsed = (
-                completed - verification_started
-                if verification_started is not None
-                else 0.0
+                completed - verification_started if verification_started is not None else 0.0
             )
             timeout_phase = (
                 "execution"
@@ -971,17 +1049,19 @@ class PollingPump:
                 verification_started_monotonic=verification_started,
             )
             self._command_results[command_id] = final
-            if (
-                final.status is PumpCommandStatus.SUCCEEDED
-                and command.kind
-                in {PumpCommandKind.ENTER_REMOTE, PumpCommandKind.RUN}
-            ):
+            self._active_command_id = None
+            if final.status is PumpCommandStatus.SUCCEEDED and command.kind in {
+                PumpCommandKind.ENTER_REMOTE,
+                PumpCommandKind.RUN,
+            }:
                 self._stop_latched = False
             elif (
-                final.status is PumpCommandStatus.SUCCEEDED
-                and command.kind is PumpCommandKind.STOP
+                final.status is PumpCommandStatus.SUCCEEDED and command.kind is PumpCommandKind.STOP
             ):
                 self._stop_latched = True
+            if final.status is PumpCommandStatus.SUCCEEDED:
+                self._last_successful_write = (command.kind, command.value)
+                self._last_successful_command_id = command_id
             self._condition.notify_all()
         self._log_command_event(
             command_id,
@@ -1004,6 +1084,9 @@ class PollingPump:
             self._local_status_streak += 1
             if self._local_status_streak < 3:
                 return
+            if self._last_successful_write == (PumpCommandKind.ENTER_REMOTE, None):
+                self._last_successful_write = None
+                self._last_successful_command_id = None
             previous_id = self._remote_recovery_command_id
             if previous_id is not None:
                 previous = self._command_results.get(previous_id)
@@ -1020,10 +1103,7 @@ class PollingPump:
                     PumpCommandPriority.HIGH,
                     verify_status=True,
                     queue_timeout_seconds=self.COMMAND_QUEUE_WAIT_SECONDS,
-                    reason=(
-                        "automatic recovery after 3 consecutive LOCAL "
-                        "periodic STATUS samples"
-                    ),
+                    reason=("automatic recovery after 3 consecutive LOCAL periodic STATUS samples"),
                 )
             )
             self._remote_recovery_command_id = command_id
@@ -1059,14 +1139,9 @@ class PollingPump:
         normalized = status.upper()
         if kind is PumpCommandKind.ENTER_REMOTE:
             status_tokens = set(normalized.replace("=", " ").split())
-            if (
-                "LOCAL" in status_tokens
-                or "PROBLEM" in normalized
-                or "REMOTE" not in status_tokens
-            ):
+            if "LOCAL" in status_tokens or "PROBLEM" in normalized or "REMOTE" not in status_tokens:
                 raise RuntimeError(
-                    "pump STATUS did not confirm REMOTE: "
-                    f"{status or 'empty response'}"
+                    f"pump STATUS did not confirm REMOTE: {status or 'empty response'}"
                 )
             return
         expected = (
@@ -1094,16 +1169,12 @@ class PollingPump:
             errors.pop(field, None)
             self._cache = _CachedTelemetry(
                 PumpStatus(
-                    pressure_bar=(
-                        numeric_value if field == "pressure" else status.pressure_bar
-                    ),
+                    pressure_bar=(numeric_value if field == "pressure" else status.pressure_bar),
                     flow_ml_per_hour=(
                         numeric_value if field == "flow" else status.flow_ml_per_hour
                     ),
                     remaining_volume_ml=(
-                        numeric_value
-                        if field == "volume"
-                        else status.remaining_volume_ml
+                        numeric_value if field == "volume" else status.remaining_volume_ml
                     ),
                 ),
                 now if field == "pressure" else cache.pressure_at,
@@ -1128,6 +1199,14 @@ class PollingPump:
     def _update_operating_status(self, status_text: str) -> None:
         with self._condition:
             self._operating_status_text = status_text
+            tokens = set(status_text.upper().replace("=", " ").split())
+            if (
+                "LOCAL" in tokens
+                and self._last_successful_write
+                == (PumpCommandKind.ENTER_REMOTE, None)
+            ):
+                self._last_successful_write = None
+                self._last_successful_command_id = None
         self._update("status", None)
 
     def _record_field_error(self, field: str, error: Exception) -> None:
@@ -1174,8 +1253,7 @@ class PollingPump:
                 age_seconds=self._field_age(field),
                 action="retain_last_successful_value",
                 action_result=(
-                    f"FAILED: {type(error).__name__}: {error}; "
-                    f"repeat_count={error_count}"
+                    f"FAILED: {type(error).__name__}: {error}; repeat_count={error_count}"
                 ),
                 level="WARNING",
             )
@@ -1200,9 +1278,7 @@ class PollingPump:
             quality = DataQuality.GOOD
         return TelemetryFieldState(quality, age, updated_at, error)
 
-    def _log_quality_transitions(
-        self, fields: dict[str, TelemetryFieldState]
-    ) -> None:
+    def _log_quality_transitions(self, fields: dict[str, TelemetryFieldState]) -> None:
         for name, field in fields.items():
             with self._condition:
                 previous = self._reported_qualities.get(name)
@@ -1232,16 +1308,15 @@ class PollingPump:
                     else "evaluate_safety_policy"
                 ),
                 action_result="SUCCESS",
-                level=(
-                    "INFO"
-                    if field.quality is DataQuality.GOOD
-                    else "WARNING"
-                ),
+                level=("INFO" if field.quality is DataQuality.GOOD else "WARNING"),
             )
 
     def _field_age(self, field: str) -> float | None:
         with self._condition:
-            cache = self._cache
+            return self._field_age_locked(field)
+
+    def _field_age_locked(self, field: str) -> float | None:
+        cache = self._cache
         if cache is None:
             return None
         updated_at = {
@@ -1276,11 +1351,7 @@ class PollingPump:
         last_success = (
             "NONE"
             if age_seconds is None
-            else (
-                as_hungarian_time(
-                    datetime.now(UTC) - timedelta(seconds=age_seconds)
-                ).isoformat()
-            )
+            else (as_hungarian_time(datetime.now(UTC) - timedelta(seconds=age_seconds)).isoformat())
         )
         safety_rule = (
             f"{self._name.upper()}_{field.upper()}_"
@@ -1295,25 +1366,15 @@ class PollingPump:
                 "previous_quality": (
                     previous_quality.value if previous_quality is not None else "UNKNOWN"
                 ),
-                "new_quality": (
-                    new_quality.value if new_quality is not None else "UNKNOWN"
-                ),
-                "age_ms": (
-                    "NONE"
-                    if age_seconds is None
-                    else round(age_seconds * 1000.0, 3)
-                ),
+                "new_quality": (new_quality.value if new_quality is not None else "UNKNOWN"),
+                "age_ms": ("NONE" if age_seconds is None else round(age_seconds * 1000.0, 3)),
                 "stale_limit_ms": round(self._stale_limit(field) * 1000.0, 3),
                 "last_success_timestamp": last_success,
                 "last_command": self._last_command,
-                "last_command_elapsed_ms": round(
-                    self._last_command_elapsed_ms, 3
-                ),
+                "last_command_elapsed_ms": round(self._last_command_elapsed_ms, 3),
                 "safety_rule": safety_rule,
                 "selected_fault_strategy": (
-                    "FULL_SAFE_STOP"
-                    if field in {"pressure", "status"}
-                    else "DEGRADED_TELEMETRY"
+                    "FULL_SAFE_STOP" if field in {"pressure", "status"} else "DEGRADED_TELEMETRY"
                 ),
                 "action": action,
                 "action_result": action_result,
@@ -1332,33 +1393,23 @@ class PollingPump:
                 "device": f"{self._name}_pump",
                 "field": "connection",
                 "previous_quality": (
-                    "disconnected"
-                    if event_id == "TELEMETRY_CONNECTION_RESTORED"
-                    else "good"
+                    "disconnected" if event_id == "TELEMETRY_CONNECTION_RESTORED" else "good"
                 ),
                 "new_quality": (
-                    "good"
-                    if event_id == "TELEMETRY_CONNECTION_RESTORED"
-                    else "disconnected"
+                    "good" if event_id == "TELEMETRY_CONNECTION_RESTORED" else "disconnected"
                 ),
                 "last_command": self._last_command,
-                "last_command_elapsed_ms": round(
-                    self._last_command_elapsed_ms, 3
-                ),
+                "last_command_elapsed_ms": round(self._last_command_elapsed_ms, 3),
                 "safety_rule": (
                     "NONE"
                     if event_id == "TELEMETRY_CONNECTION_RESTORED"
                     else f"{self._name.upper()}_CONNECTION_LOST"
                 ),
                 "selected_fault_strategy": (
-                    "NONE"
-                    if event_id == "TELEMETRY_CONNECTION_RESTORED"
-                    else "FULL_SAFE_STOP"
+                    "NONE" if event_id == "TELEMETRY_CONNECTION_RESTORED" else "FULL_SAFE_STOP"
                 ),
                 "action": (
-                    "reconnect"
-                    if event_id == "TELEMETRY_CONNECTION_RESTORED"
-                    else "disconnect"
+                    "reconnect" if event_id == "TELEMETRY_CONNECTION_RESTORED" else "disconnect"
                 ),
                 "action_result": result,
             },
@@ -1376,10 +1427,7 @@ class PollingPump:
                 if field.last_update_monotonic is None
                 else f"{field.last_update_monotonic:.6f}"
             )
-            return (
-                f"{field.quality.value},age={age},"
-                f"last_success_monotonic={updated}"
-            )
+            return f"{field.quality.value},age={age},last_success_monotonic={updated}"
 
         self._log(
             f"state={telemetry.connection_state.value}; "
@@ -1406,9 +1454,14 @@ class PollingPump:
             "PUMP_COMMAND",
             fields={
                 "pump": self._name,
+                "com_port": self._serial_port,
+                "worker_name": (self._thread.name if self._thread is not None else "NONE"),
+                "thread_id": get_ident(),
                 "command_id": command_id,
                 "command": command.kind.value,
                 "priority": int(command.priority),
+                "queued_monotonic": round(snapshot.submitted_monotonic, 6),
+                "queue_size": self._pending_commands,
                 "queue_wait_ms": (
                     "NONE"
                     if snapshot.queue_wait_seconds is None

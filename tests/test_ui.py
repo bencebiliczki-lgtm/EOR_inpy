@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QTableWidget,
     QTabWidget,
     QTextEdit,
     QWidget,
@@ -82,12 +83,22 @@ from eor_control.hardware import (  # noqa: E402
 from eor_control.ni import NidaqmxDataAcquisition  # noqa: E402
 from eor_control.preflight import PreflightReport, PreflightStatus  # noqa: E402
 from eor_control.projects import ProjectRepository  # noqa: E402
+from eor_control.pump_commands import (  # noqa: E402
+    PumpCommand,
+    PumpCommandKind,
+    PumpCommandPriority,
+    PumpCommandResult,
+    PumpCommandStatus,
+)
 from eor_control.pump_control import (  # noqa: E402
     PumpControlTiming,
     PumpPreparationProgress,
     PumpRole,
 )
-from eor_control.pump_telemetry import PumpPollingIntervals  # noqa: E402
+from eor_control.pump_telemetry import (  # noqa: E402
+    PumpPollingIntervals,
+    PumpWorkerSnapshot,
+)
 from eor_control.simulators import (  # noqa: E402
     SimulatedDataAcquisition,
     SimulatedPump,
@@ -116,6 +127,7 @@ from eor_control.ui import (  # noqa: E402
     PreflightDialog,
     ProjectSelectionDialog,
     ProjectSettingsDialog,
+    PumpCommandQueueDialog,
     PumpControlDialog,
     PumpPreparationProgressDialog,
     PumpTelemetrySettingsDialog,
@@ -191,9 +203,7 @@ def application() -> QApplication:
         (-0.0001, "0 bar"),
     ],
 )
-def test_dashboard_pressure_uses_hungarian_adaptive_decimals(
-    value: float, expected: str
-) -> None:
+def test_dashboard_pressure_uses_hungarian_adaptive_decimals(value: float, expected: str) -> None:
     assert format_dashboard_pressure(value) == expected
 
 
@@ -203,13 +213,9 @@ def test_user_settings_and_projects_use_documents_eor_with_legacy_migration(
     application_root = tmp_path / "application"
     documents_root = tmp_path / "Documents"
     user_root = user_data_root_path(documents_root)
-    legacy_settings_path = (
-        application_root / "config" / "AFKI" / "EORControl.ini"
-    )
+    legacy_settings_path = application_root / "config" / "AFKI" / "EORControl.ini"
     legacy_settings_path.parent.mkdir(parents=True)
-    legacy_settings = QSettings(
-        str(legacy_settings_path), QSettings.Format.IniFormat
-    )
+    legacy_settings = QSettings(str(legacy_settings_path), QSettings.Format.IniFormat)
     legacy_settings.setValue("appearance/theme", "dark")
     legacy_settings.sync()
     legacy_project_path = application_root / "data" / "projects.sqlite3"
@@ -228,32 +234,20 @@ def test_user_settings_and_projects_use_documents_eor_with_legacy_migration(
         user_data_root=user_root,
     )
     project_path = user_root / "projects.sqlite3"
-    migrated = migrate_legacy_project_database(
-        legacy_project_path, project_path
-    )
+    migrated = migrate_legacy_project_database(legacy_project_path, project_path)
     project_files_path = user_root / "projects"
-    files_migrated = migrate_legacy_project_files(
-        legacy_project_files, project_files_path
-    )
+    files_migrated = migrate_legacy_project_files(legacy_project_files, project_files_path)
 
     assert user_root == documents_root / "EOR"
     assert Path(settings.fileName()) == user_root / "EORControl.ini"
     assert settings.value("appearance/theme") == "dark"
     assert migrated
     assert files_migrated
-    assert (project_files_path / "raw.csv").read_text(encoding="utf-8") == (
-        "measurement"
-    )
+    assert (project_files_path / "raw.csv").read_text(encoding="utf-8") == ("measurement")
     with ProjectRepository(project_path) as repository:
-        assert [project.name for project in repository.list_projects()] == [
-            "Migrált projekt"
-        ]
-    assert not migrate_legacy_project_database(
-        legacy_project_path, project_path
-    )
-    assert not migrate_legacy_project_files(
-        legacy_project_files, project_files_path
-    )
+        assert [project.name for project in repository.list_projects()] == ["Migrált projekt"]
+    assert not migrate_legacy_project_database(legacy_project_path, project_path)
+    assert not migrate_legacy_project_files(legacy_project_files, project_files_path)
 
 
 def assert_input_fields_are_labelled(root: QWidget) -> None:
@@ -296,6 +290,7 @@ def test_application_dialogs_are_resizable() -> None:
         DeviceSettingsDialog,
         DeviceTestWizard,
         PumpControlDialog,
+        PumpCommandQueueDialog,
         LoggingSettingsDialog,
         ControlCycleSettingsDialog,
         PumpTelemetrySettingsDialog,
@@ -344,10 +339,7 @@ def test_calibration_settings_scroll_without_overlapping_fields() -> None:
     assert dialog._content_scroll.verticalScrollBar().isVisible()
     assert dialog._content_scroll.geometry().bottom() < dialog._buttons.geometry().top()
     assert dialog._buttons.geometry().bottom() <= dialog.contentsRect().bottom()
-    assert (
-        dialog._buttons.button(QDialogButtonBox.StandardButton.Cancel).text()
-        == "Mégse"
-    )
+    assert dialog._buttons.button(QDialogButtonBox.StandardButton.Cancel).text() == "Mégse"
     dialog.close()
 
 
@@ -376,9 +368,7 @@ def test_hardware_authorization_precedes_ni_output_authorization() -> None:
 
 def test_log_retention_service_settings_are_persisted(tmp_path: Path) -> None:
     application()
-    settings = QSettings(
-        str(tmp_path / "logging.ini"), QSettings.Format.IniFormat
-    )
+    settings = QSettings(str(tmp_path / "logging.ini"), QSettings.Format.IniFormat)
     logger = DiagnosticLogger(
         tmp_path / "logs" / "application.html",
         hardware_path=tmp_path / "logs" / "hardware_communication.html",
@@ -511,9 +501,7 @@ def test_dashboard_settings_hub_embeds_real_editors(
     window = build_simulated_dashboard(
         tmp_path / "raw.csv",
         tmp_path / "projects.sqlite3",
-        settings=QSettings(
-            str(tmp_path / "settings.ini"), QSettings.Format.IniFormat
-        ),
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat),
     )
     window._set_developer_mode(True)
     hubs: list[SettingsHubDialog] = []
@@ -558,9 +546,7 @@ def test_nas_settings_uses_folder_picker_and_persists_selection(
     target = tmp_path / "nas"
     target.mkdir()
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
-    synchronizer = BackgroundNasSynchronizer(
-        NasSyncQueue(tmp_path / "nas-queue.sqlite3")
-    )
+    synchronizer = BackgroundNasSynchronizer(NasSyncQueue(tmp_path / "nas-queue.sqlite3"))
     page = NasSettingsPage(synchronizer, settings, tmp_path)
     monkeypatch.setattr(
         QFileDialog,
@@ -580,9 +566,7 @@ def test_nas_settings_uses_folder_picker_and_persists_selection(
     assert settings.value("nas/enabled") is True
     assert settings.value("nas/target_path") == str(target)
 
-    page._test_completed(
-        NasConnectionTestResult(target, True, 1024**3, ("projekt",))
-    )
+    page._test_completed(NasConnectionTestResult(target, True, 1024**3, ("projekt",)))
     assert "Sikeres kapcsolat" in page.status.text()
     page.close()
     synchronizer.close()
@@ -597,9 +581,7 @@ def test_csv_export_uses_native_file_picker_and_remembers_directory(
     destination = tmp_path / "exports" / "result.csv"
     destination.parent.mkdir()
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
-    synchronizer = BackgroundNasSynchronizer(
-        NasSyncQueue(tmp_path / "nas-queue.sqlite3")
-    )
+    synchronizer = BackgroundNasSynchronizer(NasSyncQueue(tmp_path / "nas-queue.sqlite3"))
     dialog = DataManagementDialog(
         source_path=source,
         project_name="Projekt",
@@ -668,9 +650,7 @@ def test_simulation_settings_page_applies_model_and_injects_faults() -> None:
     assert jacket.response_delay.maximum_seconds == pytest.approx(0.25)
 
     next(
-        button
-        for button in page.findChildren(QPushButton)
-        if button.text() == "Hiba injektálása"
+        button for button in page.findChildren(QPushButton) if button.text() == "Hiba injektálása"
     ).click()
     _, quality = jacket.read_cached_status()
     assert quality is DataQuality.STALE
@@ -704,9 +684,7 @@ def test_pump_telemetry_stale_settings_are_validated_and_persisted(
     tmp_path: Path,
 ) -> None:
     application()
-    settings = QSettings(
-        str(tmp_path / "pump-telemetry.ini"), QSettings.Format.IniFormat
-    )
+    settings = QSettings(str(tmp_path / "pump-telemetry.ini"), QSettings.Format.IniFormat)
     dialog = PumpTelemetrySettingsDialog(settings)
     dialog.pressure_poll.setValue(0.5)
     dialog.slow_poll.setValue(2.0)
@@ -723,9 +701,7 @@ def test_pump_telemetry_stale_settings_are_validated_and_persisted(
     assert intervals.slow_telemetry_seconds == pytest.approx(2.0)
     assert intervals.status_poll_seconds == pytest.approx(4.0)
     assert intervals.pressure_stale_seconds == pytest.approx(5.5)
-    assert float(settings.value("hardware/stale_timeout_seconds")) == pytest.approx(
-        5.5
-    )
+    assert float(settings.value("hardware/stale_timeout_seconds")) == pytest.approx(5.5)
     assert intervals.slow_telemetry_stale_seconds == pytest.approx(36.0)
     assert intervals.status_stale_seconds == pytest.approx(12.0)
     assert intervals.startup_timeout_seconds == pytest.approx(8.0)
@@ -735,9 +711,7 @@ def test_pump_telemetry_dialog_distinguishes_saved_and_active_settings(
     tmp_path: Path,
 ) -> None:
     application()
-    settings = QSettings(
-        str(tmp_path / "active-pump-telemetry.ini"), QSettings.Format.IniFormat
-    )
+    settings = QSettings(str(tmp_path / "active-pump-telemetry.ini"), QSettings.Format.IniFormat)
     settings.setValue("developer/pump_pressure_poll_seconds", 0.5)
     settings.setValue("developer/pump_slow_poll_seconds", 1.0)
     active = PumpPollingIntervals(
@@ -751,19 +725,17 @@ def test_pump_telemetry_dialog_distinguishes_saved_and_active_settings(
     dialog = PumpTelemetrySettingsDialog(settings, active_intervals=active)
 
     assert "Mentett" in dialog.saved_settings.text()
-    assert "lassú szünet 1.000 s" in dialog.saved_settings.text()
+    assert "FLOW/VOLA polling 1.000 s" in dialog.saved_settings.text()
     assert "Aktív" in dialog.active_settings.text()
     assert "PRESS 0.700 s" in dialog.active_settings.text()
-    assert "lassú szünet 1.500 s" in dialog.active_settings.text()
+    assert "FLOW/VOLA polling 1.500 s" in dialog.active_settings.text()
     dialog.close()
 
 
 def test_pump_telemetry_uses_serial_budget_and_legacy_stale_setting(
     tmp_path: Path,
 ) -> None:
-    settings = QSettings(
-        str(tmp_path / "legacy-stale.ini"), QSettings.Format.IniFormat
-    )
+    settings = QSettings(str(tmp_path / "legacy-stale.ini"), QSettings.Format.IniFormat)
     settings.setValue("hardware/stale_timeout_seconds", 7.0)
     settings.setValue("hardware/serial_command_timeout_seconds", 2.0)
     settings.setValue("hardware/serial_command_retries", 2)
@@ -771,7 +743,7 @@ def test_pump_telemetry_uses_serial_budget_and_legacy_stale_setting(
     intervals = PumpTelemetrySettingsDialog.intervals(settings)
 
     assert intervals.pressure_stale_seconds == pytest.approx(7.0)
-    assert intervals.slow_telemetry_stale_seconds == pytest.approx(33.0)
+    assert intervals.slow_telemetry_stale_seconds == pytest.approx(52.0)
     assert intervals.status_stale_seconds == pytest.approx(8.0)
     assert intervals.startup_timeout_seconds == pytest.approx(8.0)
     assert not settings.contains("developer/pump_pressure_stale_seconds")
@@ -780,9 +752,7 @@ def test_pump_telemetry_uses_serial_budget_and_legacy_stale_setting(
 def test_pump_startup_timeout_covers_pressure_and_status_retry_budgets(
     tmp_path: Path,
 ) -> None:
-    settings = QSettings(
-        str(tmp_path / "startup-budget.ini"), QSettings.Format.IniFormat
-    )
+    settings = QSettings(str(tmp_path / "startup-budget.ini"), QSettings.Format.IniFormat)
     settings.setValue("hardware/serial_command_timeout_seconds", 2.3)
     settings.setValue("hardware/serial_command_retries", 2)
     settings.setValue("developer/pump_startup_timeout_seconds", 3.0)
@@ -814,9 +784,7 @@ def test_pump_telemetry_menu_rejects_slow_stale_below_one_round(
     tmp_path: Path,
 ) -> None:
     application()
-    settings = QSettings(
-        str(tmp_path / "invalid-slow-stale.ini"), QSettings.Format.IniFormat
-    )
+    settings = QSettings(str(tmp_path / "invalid-slow-stale.ini"), QSettings.Format.IniFormat)
     dialog = PumpTelemetrySettingsDialog(settings)
     dialog.slow_poll.setValue(2.0)
     dialog.slow_stale.setValue(5.0)
@@ -830,9 +798,7 @@ def test_pump_telemetry_menu_rejects_status_stale_below_retry_budget(
     tmp_path: Path,
 ) -> None:
     application()
-    settings = QSettings(
-        str(tmp_path / "invalid-status-stale.ini"), QSettings.Format.IniFormat
-    )
+    settings = QSettings(str(tmp_path / "invalid-status-stale.ini"), QSettings.Format.IniFormat)
     dialog = PumpTelemetrySettingsDialog(settings)
     dialog.status_stale.setValue(5.0)
 
@@ -940,9 +906,11 @@ def test_manual_command_queue_can_be_viewed_reordered_and_deleted() -> None:
     dialog._execute(lambda: None, "run")
 
     assert dialog._command_queue_table.rowCount() == 3
-    assert [
-        dialog._command_queue_table.item(row, 1).text() for row in range(3)
-    ] == ["remote", "configure", "run"]
+    assert [dialog._command_queue_table.item(row, 1).text() for row in range(3)] == [
+        "remote",
+        "configure",
+        "run",
+    ]
 
     dialog._command_queue_table.selectRow(2)
     dialog._move_selected_command(-1)
@@ -1100,9 +1068,7 @@ def test_manual_control_retains_partial_pump_status_when_sensor_is_missing() -> 
 
     class PartialService:
         @staticmethod
-        def read_available_statuses() -> tuple[
-            dict[PumpRole, PumpStatus], dict[PumpRole, str]
-        ]:
+        def read_available_statuses() -> tuple[dict[PumpRole, PumpStatus], dict[PumpRole, str]]:
             return (
                 {PumpRole.JACKET: PumpStatus(120.0, 0.0, 200.0)},
                 {PumpRole.INJECTION: "nincs csatlakoztatva"},
@@ -1110,9 +1076,7 @@ def test_manual_control_retains_partial_pump_status_when_sensor_is_missing() -> 
 
     class MissingSensorLoop:
         @staticmethod
-        def read_pressure_inputs_individually() -> tuple[
-            dict[str, float], dict[str, str]
-        ]:
+        def read_pressure_inputs_individually() -> tuple[dict[str, float], dict[str, str]]:
             return (
                 {"line_pressure": 12.5},
                 {"differential_pressure": "sensor is not connected"},
@@ -1121,9 +1085,7 @@ def test_manual_control_retains_partial_pump_status_when_sensor_is_missing() -> 
         @staticmethod
         def observe_once(*, active_stage: str) -> object:
             full_safety_checks.append(active_stage)
-            raise ConnectionError(
-                f"{active_stage}: differential pressure sensor is not connected"
-            )
+            raise ConnectionError(f"{active_stage}: differential pressure sensor is not connected")
 
     dialog = PumpControlDialog(  # type: ignore[arg-type]
         PartialService(),
@@ -1154,9 +1116,7 @@ def test_developer_menu_does_not_duplicate_direct_device_control(
     tmp_path: Path,
 ) -> None:
     application()
-    window = build_simulated_dashboard(
-        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
-    )
+    window = build_simulated_dashboard(tmp_path / "raw.csv", tmp_path / "projects.sqlite3")
     window._set_developer_mode(True)
     developer_action = next(
         action for action in window.menuBar().actions() if action.text() == "Developer"
@@ -1164,9 +1124,7 @@ def test_developer_menu_does_not_duplicate_direct_device_control(
     developer_menu = developer_action.menu()
 
     assert developer_menu is not None
-    assert "Közvetlen eszközkezelés…" not in (
-        action.text() for action in developer_menu.actions()
-    )
+    assert "Közvetlen eszközkezelés…" not in (action.text() for action in developer_menu.actions())
     window.close()
 
 
@@ -1176,10 +1134,7 @@ def test_guided_device_test_window_close_uses_central_safe_shutdown(
     application()
     safe_actions: list[str] = []
     connections = ConnectionTestResult(
-        tuple(
-            DeviceConnectionResult(device, True, device.value)
-            for device in HardwareTestDevice
-        )
+        tuple(DeviceConnectionResult(device, True, device.value) for device in HardwareTestDevice)
     )
     session = FunctionalDeviceTestSession(
         run_mode=RunMode.HARDWARE,
@@ -1192,13 +1147,9 @@ def test_guided_device_test_window_close_uses_central_safe_shutdown(
         set_safe_output=lambda: safe_actions.append("SAFE OUTPUT"),
         write_voltage=lambda _value: None,
         write_valve_percent=lambda _value: None,
-        report=DeviceTestReport.create(
-            application_version="test", configuration_hash="abc"
-        ),
+        report=DeviceTestReport.create(application_version="test", configuration_hash="abc"),
     )
-    dialog = DeviceTestWizard(
-        session, report_path=tmp_path / "guided-test.json"
-    )
+    dialog = DeviceTestWizard(session, report_path=tmp_path / "guided-test.json")
     for checkbox in dialog._checklist:
         checkbox.setChecked(True)
     dialog._begin()
@@ -1215,10 +1166,7 @@ def test_guided_ao_write_uses_button_confirmation_without_text_entry(
     application()
     voltages: list[float] = []
     connections = ConnectionTestResult(
-        tuple(
-            DeviceConnectionResult(device, True, device.value)
-            for device in HardwareTestDevice
-        )
+        tuple(DeviceConnectionResult(device, True, device.value) for device in HardwareTestDevice)
     )
     session = FunctionalDeviceTestSession(
         run_mode=RunMode.HARDWARE,
@@ -1231,9 +1179,7 @@ def test_guided_ao_write_uses_button_confirmation_without_text_entry(
         set_safe_output=lambda: None,
         write_voltage=voltages.append,
         write_valve_percent=lambda _value: None,
-        report=DeviceTestReport.create(
-            application_version="test", configuration_hash="abc"
-        ),
+        report=DeviceTestReport.create(application_version="test", configuration_hash="abc"),
     )
     dialog = DeviceTestWizard(session, report_path=tmp_path / "guided-test.json")
     for checkbox in dialog._checklist:
@@ -1269,9 +1215,7 @@ def test_successful_guided_valve_test_persists_direction_for_current_mapping(
     tmp_path: Path,
 ) -> None:
     application()
-    settings = QSettings(
-        str(tmp_path / "valve-direction.ini"), QSettings.Format.IniFormat
-    )
+    settings = QSettings(str(tmp_path / "valve-direction.ini"), QSettings.Format.IniFormat)
     window = build_simulated_dashboard(
         tmp_path / "raw.csv",
         tmp_path / "projects.sqlite3",
@@ -1346,9 +1290,7 @@ def test_measurement_pump_startup_dialog_requires_all_values_without_text_confir
     dialog.jacket_buildup_flow.setValue(60.0)
 
     assert dialog.start_button.isEnabled()
-    assert any(
-        "12.000 bar" in label.text() for label in dialog.findChildren(QLabel)
-    )
+    assert any("12.000 bar" in label.text() for label in dialog.findChildren(QLabel))
     assert dialog.plan() == MeasurementPumpPlan(
         120.0,
         60.0,
@@ -1385,22 +1327,148 @@ def test_pump_preparation_progress_dialog_shows_live_state_and_cancels() -> None
     dialog.update_progress(progress)
 
     assert dialog.findChild(QLabel, "preparation_phase").text() == "build_pressures"
-    assert "131.250 / 140.000 bar" in dialog.findChild(
-        QLabel, "preparation_jacket_pressure"
-    ).text()
+    assert "131.250 / 140.000 bar" in dialog.findChild(QLabel, "preparation_jacket_pressure").text()
     assert dialog.findChild(QLabel, "preparation_pending").text() == "injection: RUN"
     dialog.findChild(QPushButton, "cancel_pump_preparation").click()
     assert cancel_event.is_set()
     dialog.close()
 
 
-def test_changed_pressure_margin_is_applied_to_simulation_pump_control(
+def test_dashboard_shows_all_preparation_details_without_automatic_popup(
     tmp_path: Path,
 ) -> None:
     application()
     window = build_simulated_dashboard(
-        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+        tmp_path / "raw.csv",
+        tmp_path / "projects.sqlite3",
     )
+    cancel_event = Event()
+    window._pump_preparation_cancel_event = cancel_event
+    window._cancel_preparation_button.setEnabled(True)
+    progress = PumpPreparationProgress(
+        phase="build_pressures",
+        jacket_pressure_bar=131.25,
+        jacket_target_pressure_bar=140.0,
+        injection_pressure_bar=105.5,
+        injection_target_pressure_bar=115.0,
+        pressure_margin_bar=25.75,
+        minimum_margin_bar=20.0,
+        jacket_state="RUN REMOTE",
+        injection_state="RUN REMOTE",
+        jacket_quality=DataQuality.GOOD,
+        injection_quality=DataQuality.GOOD,
+        jacket_age_seconds=0.125,
+        injection_age_seconds=0.25,
+        pending_command="injection: RUN",
+    )
+
+    window._pump_preparation_progress(progress)
+
+    values = window._preparation_dashboard_values
+    assert values["phase"].text() == "build_pressures"
+    assert values["jacket_pressure"].text() == "131.250 / 140.000 bar"
+    assert values["injection_pressure"].text() == "105.500 / 115.000 bar"
+    assert values["margin"].text() == "25.750 / 20.000 bar"
+    assert values["jacket_state"].text() == "RUN REMOTE"
+    assert values["injection_state"].text() == "RUN REMOTE"
+    assert values["jacket_quality"].text() == "GOOD, kor: 0.125 s"
+    assert values["injection_quality"].text() == "GOOD, kor: 0.250 s"
+    assert values["pending"].text() == "injection: RUN"
+    assert not any(
+        isinstance(widget, PumpPreparationProgressDialog) and widget.isVisible()
+        for widget in QApplication.topLevelWidgets()
+    )
+    window._cancel_preparation_button.click()
+    assert cancel_event.is_set()
+    window.close()
+
+
+def test_device_communication_exposes_preparation_and_exact_worker_queue(
+    tmp_path: Path,
+) -> None:
+    application()
+    logger = DiagnosticLogger(tmp_path / "app.html")
+    opened: list[QWidget] = []
+    command = PumpCommand(
+        PumpCommandKind.RUN,
+        PumpCommandPriority.HIGH,
+        queue_timeout_seconds=5.0,
+        execution_timeout_seconds=4.0,
+        verification_timeout_seconds=3.0,
+        reason="margin recovered",
+    )
+    result = PumpCommandResult(
+        "jacket-000001",
+        command,
+        PumpCommandStatus.QUEUED,
+        submitted_monotonic=1.0,
+    )
+
+    def provider() -> dict[PumpRole, tuple[PumpCommandResult, ...]]:
+        return {
+            PumpRole.JACKET: (result,),
+            PumpRole.INJECTION: (),
+        }
+
+    communication = DeveloperViewDialog(
+        logger,
+        preparation_available=lambda: True,
+        open_preparation=opened.append,
+        command_queue_provider=provider,
+        worker_snapshot_provider=lambda: {
+            PumpRole.JACKET: PumpWorkerSnapshot(
+                name="jacket",
+                serial_port="COM1",
+                worker_name="eor-jacket-pump-poll",
+                worker_ident=123,
+                running=True,
+                queue_size=1,
+                active_command="RUN",
+                pressure_age_seconds=0.2,
+                status_age_seconds=1.5,
+                last_transaction="PRESS",
+                last_transaction_seconds=0.08,
+                polling_deadline_misses=2,
+            ),
+            PumpRole.INJECTION: None,
+        },
+    )
+
+    preparation_button = communication.findChild(
+        QPushButton,
+        "open_pump_preparation_status",
+    )
+    queue_button = communication.findChild(
+        QPushButton,
+        "open_physical_pump_command_queue",
+    )
+    assert preparation_button.isEnabled()
+    assert queue_button.isEnabled()
+    preparation_button.click()
+    assert opened == [communication]
+    worker_table = communication.findChild(QTableWidget, "physical_pump_worker_status")
+    assert worker_table.rowCount() == 2
+    assert worker_table.item(0, 3).text() == "COM1"
+    assert worker_table.item(0, 6).text() == "RUN"
+    assert worker_table.item(0, 9).text().endswith("/ 2")
+
+    queue_dialog = PumpCommandQueueDialog(provider)
+    table = queue_dialog.findChild(QTableWidget, "physical_pump_command_queue")
+    assert table.rowCount() == 1
+    assert table.item(0, 0).text() == "jacket"
+    assert table.item(0, 2).text() == "jacket-000001"
+    assert table.item(0, 4).text() == "RUN"
+    assert table.item(0, 6).text() == str(int(PumpCommandPriority.HIGH))
+    assert table.item(0, 13).text() == "margin recovered"
+    queue_dialog.close()
+    communication.close()
+
+
+def test_changed_pressure_margin_is_applied_to_simulation_pump_control(
+    tmp_path: Path,
+) -> None:
+    application()
+    window = build_simulated_dashboard(tmp_path / "raw.csv", tmp_path / "projects.sqlite3")
     assert window._pump_control is not None
 
     window._minimum_margin.setValue(7.5)
@@ -1422,10 +1490,13 @@ def test_measurement_table_model_uses_excel_columns_and_hungarian_time() -> None
     model.set_page(table, (0,))
 
     assert model.columnCount() == len(header)
-    assert tuple(
-        model.headerData(index, Qt.Orientation.Horizontal)
-        for index in range(model.columnCount())
-    ) == header
+    assert (
+        tuple(
+            model.headerData(index, Qt.Orientation.Horizontal)
+            for index in range(model.columnCount())
+        )
+        == header
+    )
     assert model.data(model.index(0, 0)) == "2026-07-13 12:30:00.000 CEST"
 
 
@@ -1473,20 +1544,12 @@ def test_completed_stage_excel_export_runs_in_background(
         tmp_path / "data" / "measurement.csv",
         tmp_path / "projects.sqlite3",
     )
-    source = (
-        window._data_directory
-        / "projects"
-        / "2026"
-        / "project"
-        / "Projekt_víz_live_raw.csv"
-    )
+    source = window._data_directory / "projects" / "2026" / "project" / "Projekt_víz_live_raw.csv"
     source.parent.mkdir(parents=True)
     source.write_text("raw", encoding="utf-8")
     calls: list[tuple[Path, Path, str]] = []
 
-    def export(
-        source_path: Path, destination: Path, *, stage_name: str
-    ) -> None:
+    def export(source_path: Path, destination: Path, *, stage_name: str) -> None:
         calls.append((source_path, destination, stage_name))
         destination.write_text("excel", encoding="utf-8")
 
@@ -1594,9 +1657,7 @@ def test_device_settings_discovers_dropdown_choices(
                 NiPhysicalChannelInfo("Dev2/ai0", "Dev2", "NI USB-6001", "1234"),
                 NiPhysicalChannelInfo("Dev2/ai1", "Dev2", "NI USB-6001", "1234"),
             ),
-            ni_output_channels=(
-                NiPhysicalChannelInfo("Dev2/ao0", "Dev2", "NI USB-6001", "1234"),
-            ),
+            ni_output_channels=(NiPhysicalChannelInfo("Dev2/ao0", "Dev2", "NI USB-6001", "1234"),),
         ),
     )
 
@@ -1672,12 +1733,8 @@ def test_device_settings_discovers_dropdown_choices(
     dialog._test_passed(
         ConnectionTestResult(
             (
-                DeviceConnectionResult(
-                    HardwareTestDevice.JACKET_PUMP, False, "pump unavailable"
-                ),
-                DeviceConnectionResult(
-                    HardwareTestDevice.INJECTION_PUMP, True, "260D injection"
-                ),
+                DeviceConnectionResult(HardwareTestDevice.JACKET_PUMP, False, "pump unavailable"),
+                DeviceConnectionResult(HardwareTestDevice.INJECTION_PUMP, True, "260D injection"),
                 DeviceConnectionResult(
                     HardwareTestDevice.LINE_PRESSURE, True, "Dev2/ai0: 2.0 V", 2.0
                 ),
@@ -1692,12 +1749,8 @@ def test_device_settings_discovers_dropdown_choices(
     )
     assert not dialog._activate_button.isEnabled()
     assert dialog._direct_control_button.isEnabled()
-    assert "SIKERTELEN" in dialog._connection_result_labels[
-        HardwareTestDevice.JACKET_PUMP
-    ].text()
-    assert "SIKERES" in dialog._connection_result_labels[
-        HardwareTestDevice.INJECTION_PUMP
-    ].text()
+    assert "SIKERTELEN" in dialog._connection_result_labels[HardwareTestDevice.JACKET_PUMP].text()
+    assert "SIKERES" in dialog._connection_result_labels[HardwareTestDevice.INJECTION_PUMP].text()
     assert "Sikeres kapcsolatok: 3/4" in dialog._result_label.text()
     dialog._open_direct_control()
     assert direct_configurations == [dialog._read_configuration()]
@@ -1751,9 +1804,10 @@ def test_device_settings_can_remove_optional_line_pressure_device(
     assert configuration.measurement_ready
     assert not dialog.line_channel.isEnabled()
     assert not dialog._device_test_buttons[HardwareTestDevice.LINE_PRESSURE].isEnabled()
-    assert "NINCS HOZZÁADVA" in dialog._connection_result_labels[
-        HardwareTestDevice.LINE_PRESSURE
-    ].text()
+    assert (
+        "NINCS HOZZÁADVA"
+        in dialog._connection_result_labels[HardwareTestDevice.LINE_PRESSURE].text()
+    )
     dialog.close()
 
 
@@ -1829,12 +1883,8 @@ def test_device_settings_warns_but_accepts_finite_ni_read_outside_calibration(
     dialog._test_passed(
         ConnectionTestResult(
             (
-                DeviceConnectionResult(
-                    HardwareTestDevice.JACKET_PUMP, True, "260D jacket"
-                ),
-                DeviceConnectionResult(
-                    HardwareTestDevice.INJECTION_PUMP, True, "260D injection"
-                ),
+                DeviceConnectionResult(HardwareTestDevice.JACKET_PUMP, True, "260D jacket"),
+                DeviceConnectionResult(HardwareTestDevice.INJECTION_PUMP, True, "260D injection"),
                 DeviceConnectionResult(
                     HardwareTestDevice.LINE_PRESSURE,
                     True,
@@ -1853,12 +1903,11 @@ def test_device_settings_warns_but_accepts_finite_ni_read_outside_calibration(
 
     assert dialog._activate_button.isEnabled()
     assert "Sikeres kapcsolatok: 4/4" in dialog._result_label.text()
-    assert "1–5 V" in dialog._connection_result_labels[
-        HardwareTestDevice.LINE_PRESSURE
-    ].text()
-    assert "diagnosztikai" in dialog._connection_result_labels[
-        HardwareTestDevice.DIFFERENTIAL_PRESSURE
-    ].text()
+    assert "1–5 V" in dialog._connection_result_labels[HardwareTestDevice.LINE_PRESSURE].text()
+    assert (
+        "diagnosztikai"
+        in dialog._connection_result_labels[HardwareTestDevice.DIFFERENTIAL_PRESSURE].text()
+    )
     dialog.close()
 
 
@@ -1879,9 +1928,7 @@ def test_device_settings_keeps_actions_visible_on_small_screen(tmp_path: Path) -
     assert dialog._content_scroll.verticalScrollBar().maximum() > 0
     assert dialog._content_scroll.horizontalScrollBar().maximum() == 0
     assert dialog._content_widget.minimumWidth() == 0
-    assert dialog._content_widget.sizePolicy().horizontalPolicy() == (
-        QSizePolicy.Policy.Ignored
-    )
+    assert dialog._content_widget.sizePolicy().horizontalPolicy() == (QSizePolicy.Policy.Ignored)
     action_buttons = (
         dialog._save_button,
         dialog._test_button,
@@ -1893,9 +1940,9 @@ def test_device_settings_keeps_actions_visible_on_small_screen(tmp_path: Path) -
         assert button.isVisible()
         assert button.geometry().bottom() <= dialog.contentsRect().bottom()
     assert len({button.geometry().center().y() for button in action_buttons}) == 1
-    assert [
+    assert [button.geometry().left() for button in action_buttons] == sorted(
         button.geometry().left() for button in action_buttons
-    ] == sorted(button.geometry().left() for button in action_buttons)
+    )
 
     dialog.close()
 
@@ -1918,9 +1965,7 @@ def test_project_selector_lists_last_stage_and_can_create_project(
             configuration={},
             calibration_snapshot={},
         )
-        settings.setValue(
-            f"project/last_stage_by_project/{older.id}", last_stage.id
-        )
+        settings.setValue(f"project/last_stage_by_project/{older.id}", last_stage.id)
         dialog = ProjectSelectionDialog(
             repository,
             settings=settings,
@@ -1933,17 +1978,14 @@ def test_project_selector_lists_last_stage_and_can_create_project(
         older_row = next(
             row
             for row in range(dialog.project_table.rowCount())
-            if dialog.project_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-            == older.id
+            if dialog.project_table.item(row, 0).data(Qt.ItemDataRole.UserRole) == older.id
         )
         assert dialog.project_table.rowCount() == 2
         assert dialog.project_table.item(older_row, 1).text() == "Olajkiszorítás"
         assert dialog.selected_project_id == older.id
         assert dialog.selected_stage_id == last_stage.id
 
-        monkeypatch.setattr(
-            QInputDialog, "getText", lambda *_args, **_kwargs: ("Új projekt", True)
-        )
+        monkeypatch.setattr(QInputDialog, "getText", lambda *_args, **_kwargs: ("Új projekt", True))
         monkeypatch.setattr(
             QInputDialog,
             "getMultiLineText",
@@ -2053,9 +2095,7 @@ def test_dashboard_requires_project_selector_without_last_project(tmp_path: Path
     window = build_simulated_dashboard(
         tmp_path / "startup.csv",
         project_path,
-        settings=QSettings(
-            str(tmp_path / "startup.ini"), QSettings.Format.IniFormat
-        ),
+        settings=QSettings(str(tmp_path / "startup.ini"), QSettings.Format.IniFormat),
     )
 
     assert window._project_selector_required
@@ -2079,9 +2119,7 @@ def test_stage_selector_last_item_creates_stage_with_notes(
     settings = QSettings(str(tmp_path / "stage.ini"), QSettings.Format.IniFormat)
     settings.setValue("project/last_project_id", project.id)
     settings.setValue("project/last_stage_id", original.id)
-    window = build_simulated_dashboard(
-        tmp_path / "raw.csv", project_path, settings=settings
-    )
+    window = build_simulated_dashboard(tmp_path / "raw.csv", project_path, settings=settings)
     selector = window._stage
 
     assert selector.itemData(selector.count() - 1) == ADD_STAGE_ACTION_DATA
@@ -2137,9 +2175,7 @@ def test_pid_profile_can_be_saved_loaded_overwritten_and_deleted(
     window._kd.setValue(0.01)
     window._output_min.setValue(5.0)
     window._output_max.setValue(75.0)
-    window._direction.setCurrentIndex(
-        window._direction.findData("reverse")
-    )
+    window._direction.setCurrentIndex(window._direction.findData("reverse"))
     window._source.setCurrentIndex(window._source.findData("line_sensor"))
     monkeypatch.setattr(
         QInputDialog,
@@ -2200,9 +2236,7 @@ def test_legacy_direct_pid_default_is_migrated_to_reverse_once(
     tmp_path: Path,
 ) -> None:
     application()
-    settings = QSettings(
-        str(tmp_path / "legacy-pid.ini"), QSettings.Format.IniFormat
-    )
+    settings = QSettings(str(tmp_path / "legacy-pid.ini"), QSettings.Format.IniFormat)
     settings.setValue("pid/direction", "direct")
 
     window = build_simulated_dashboard(
@@ -2277,9 +2311,7 @@ def test_hardware_disconnect_releases_and_reconnects_without_settings_dialog(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     application()
-    window = build_simulated_dashboard(
-        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
-    )
+    window = build_simulated_dashboard(tmp_path / "raw.csv", tmp_path / "projects.sqlite3")
     jacket = SimulatedPump()
     injection = SimulatedPump()
     daq = SimulatedDataAcquisition()
@@ -2318,9 +2350,7 @@ def test_critical_hardware_fault_stays_latched_without_recheck_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     application()
-    window = build_simulated_dashboard(
-        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
-    )
+    window = build_simulated_dashboard(tmp_path / "raw.csv", tmp_path / "projects.sqlite3")
     window._hardware_status_timer.stop()
     application().processEvents()
     jacket = SimulatedPump()
@@ -2355,16 +2385,12 @@ def test_critical_hardware_fault_stays_latched_without_recheck_loop(
     monkeypatch.setattr(
         window,
         "_activate_simulation",
-        lambda *, preserve_preferred_mode, ignore_cleanup_errors: (
-            simulation_calls.append(
-                (preserve_preferred_mode, ignore_cleanup_errors)
-            )
+        lambda *, preserve_preferred_mode, ignore_cleanup_errors: simulation_calls.append(
+            (preserve_preferred_mode, ignore_cleanup_errors)
         ),
     )
     monkeypatch.setattr(window, "_show_error", errors.append)
-    monkeypatch.setattr(
-        window, "_open_device_settings", lambda: opened.append(True)
-    )
+    monkeypatch.setattr(window, "_open_device_settings", lambda: opened.append(True))
     monkeypatch.setattr(
         window,
         "_refresh_active_hardware_status",
@@ -2399,14 +2425,9 @@ def test_critical_hardware_fault_stays_latched_without_recheck_loop(
 
 def test_alarm_close_restores_simulation_ready_state(tmp_path: Path) -> None:
     application()
-    window = build_simulated_dashboard(
-        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
-    )
+    window = build_simulated_dashboard(tmp_path / "raw.csv", tmp_path / "projects.sqlite3")
 
-    assert all(
-        button.text() != "Hiba nyugtázása"
-        for button in window.findChildren(QPushButton)
-    )
+    assert all(button.text() != "Hiba nyugtázása" for button in window.findChildren(QPushButton))
     window._emergency_stop()
 
     assert window._devices.status.state is ApplicationState.FAULT
@@ -2424,9 +2445,7 @@ def test_alarm_close_refuses_unsafe_fresh_measurement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     application()
-    window = build_simulated_dashboard(
-        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
-    )
+    window = build_simulated_dashboard(tmp_path / "raw.csv", tmp_path / "projects.sqlite3")
     injection = window._devices._injection_pump
     assert isinstance(injection, SimulatedPump)
     injection.pressure_bar = 500.0
@@ -2454,15 +2473,11 @@ def test_background_alert_flashes_taskbar_once_per_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     application()
-    window = build_simulated_dashboard(
-        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
-    )
+    window = build_simulated_dashboard(tmp_path / "raw.csv", tmp_path / "projects.sqlite3")
     taskbar_alerts: list[bool] = []
     window._last_notification_key = None
     monkeypatch.setattr(window, "isMinimized", lambda: True)
-    monkeypatch.setattr(
-        window, "_request_taskbar_attention", lambda: taskbar_alerts.append(True)
-    )
+    monkeypatch.setattr(window, "_request_taskbar_attention", lambda: taskbar_alerts.append(True))
 
     window._notify_user(
         "Biztonsági riasztás",
@@ -2485,9 +2500,7 @@ def test_system_tray_menu_offers_safe_application_shutdown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     application()
-    window = build_simulated_dashboard(
-        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
-    )
+    window = build_simulated_dashboard(tmp_path / "raw.csv", tmp_path / "projects.sqlite3")
 
     assert window._tray_icon.contextMenu() is window._tray_menu
     assert [
@@ -2508,9 +2521,7 @@ def test_system_tray_menu_offers_safe_application_shutdown(
 
 def test_window_shutdown_requests_safe_state_from_ready_devices(tmp_path: Path) -> None:
     application()
-    window = build_simulated_dashboard(
-        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
-    )
+    window = build_simulated_dashboard(tmp_path / "raw.csv", tmp_path / "projects.sqlite3")
     jacket = window._devices._jacket_pump
     injection = window._devices._injection_pump
     daq = window._devices._daq
@@ -2539,14 +2550,10 @@ def test_measurement_start_preflight_accepts_finite_voltage_outside_nominal_span
             calibration_snapshot={},
         )
         stage = repository.add_stage(project.id, "Preflight stage")
-    settings = QSettings(
-        str(tmp_path / "preflight.ini"), QSettings.Format.IniFormat
-    )
+    settings = QSettings(str(tmp_path / "preflight.ini"), QSettings.Format.IniFormat)
     settings.setValue("project/last_project_id", project.id)
     settings.setValue("project/last_stage_id", stage.id)
-    window = build_simulated_dashboard(
-        tmp_path / "raw.csv", project_path, settings=settings
-    )
+    window = build_simulated_dashboard(tmp_path / "raw.csv", project_path, settings=settings)
     window._devices._daq.inputs["line_pressure"] = -1.188189
     errors: list[str] = []
     monkeypatch.setattr(window, "_show_error", errors.append)
@@ -2554,9 +2561,7 @@ def test_measurement_start_preflight_accepts_finite_voltage_outside_nominal_span
     monkeypatch.setattr(
         window._pump_control,
         "apply_measurement_flow",
-        lambda _requested: pytest.fail(
-            "measurement start must not issue a pump flow command"
-        ),
+        lambda _requested: pytest.fail("measurement start must not issue a pump flow command"),
     )
     monkeypatch.setattr(
         window._pump_control,
@@ -2592,14 +2597,10 @@ def test_simulation_offers_preparation_and_direct_measurement_start(
             calibration_snapshot={},
         )
         stage = repository.add_stage(project.id, "Preparation stage")
-    settings = QSettings(
-        str(tmp_path / "simulation-preparation.ini"), QSettings.Format.IniFormat
-    )
+    settings = QSettings(str(tmp_path / "simulation-preparation.ini"), QSettings.Format.IniFormat)
     settings.setValue("project/last_project_id", project.id)
     settings.setValue("project/last_stage_id", stage.id)
-    window = build_simulated_dashboard(
-        tmp_path / "raw.csv", project_path, settings=settings
-    )
+    window = build_simulated_dashboard(tmp_path / "raw.csv", project_path, settings=settings)
     preflight_requests: list[bool] = []
     monkeypatch.setattr(
         window,
@@ -2630,14 +2631,10 @@ def test_simulation_preparation_unlocks_measurement_start_only_after_completion(
             calibration_snapshot={},
         )
         stage = repository.add_stage(project.id, "Prepared stage")
-    settings = QSettings(
-        str(tmp_path / "prepared-simulation.ini"), QSettings.Format.IniFormat
-    )
+    settings = QSettings(str(tmp_path / "prepared-simulation.ini"), QSettings.Format.IniFormat)
     settings.setValue("project/last_project_id", project.id)
     settings.setValue("project/last_stage_id", stage.id)
-    window = build_simulated_dashboard(
-        tmp_path / "raw.csv", project_path, settings=settings
-    )
+    window = build_simulated_dashboard(tmp_path / "raw.csv", project_path, settings=settings)
     assert window._pump_control is not None
     monkeypatch.setattr(
         MeasurementPumpStartupDialog,
@@ -2646,9 +2643,7 @@ def test_simulation_preparation_unlocks_measurement_start_only_after_completion(
     )
     preparation_calls: list[tuple[MeasurementPumpPlan, PumpControlTiming]] = []
 
-    def capture_preparation(
-        plan: MeasurementPumpPlan, **kwargs: object
-    ) -> None:
+    def capture_preparation(plan: MeasurementPumpPlan, **kwargs: object) -> None:
         timing = kwargs["timing"]
         assert isinstance(timing, PumpControlTiming)
         preparation_calls.append((plan, timing))
@@ -2662,18 +2657,12 @@ def test_simulation_preparation_unlocks_measurement_start_only_after_completion(
     window._begin_measurement_after_preflight()
     for _ in range(100):
         app.processEvents()
-        if (
-            window._devices.status.measurement
-            is MeasurementState.WAITING_CONFIRMATION
-        ):
+        if window._devices.status.measurement is MeasurementState.WAITING_CONFIRMATION:
             break
         sleep(0.01)
 
     assert window._devices.status.state is ApplicationState.RUNNING
-    assert (
-        window._devices.status.measurement
-        is MeasurementState.WAITING_CONFIRMATION
-    )
+    assert window._devices.status.measurement is MeasurementState.WAITING_CONFIRMATION
     assert window._start_button.isEnabled()
     assert not window._prepare_button.isEnabled()
     assert len(preparation_calls) == 1
@@ -2827,9 +2816,7 @@ def test_valve_card_always_shows_current_safe_or_commanded_state(
         quality=DataQuality.GOOD,
     )
     record = MeasurementRecord(snapshot, 0.0, "Teszt szakasz")
-    command = ValveCommand(
-        True, 37.5, ControlMode.MANUAL, PressureSource.INJECTION_PUMP
-    )
+    command = ValveCommand(True, 37.5, ControlMode.MANUAL, PressureSource.INJECTION_PUMP)
     window._devices.start()
     window._handle_cycle(ControlCycleResult(record, command))
 
@@ -2926,22 +2913,14 @@ def test_dashboard_layout_editor_hides_restores_and_persists_elements(
         settings=settings,
     )
     appearance = window._create_appearance_settings_page()
-    left_toggle = appearance.findChild(
-        QCheckBox, "appearance_left_sidebar_visible"
-    )
-    right_toggle = appearance.findChild(
-        QCheckBox, "appearance_right_sidebar_visible"
-    )
+    left_toggle = appearance.findChild(QCheckBox, "appearance_left_sidebar_visible")
+    right_toggle = appearance.findChild(QCheckBox, "appearance_right_sidebar_visible")
     assert left_toggle is not None
     assert right_toggle is not None
     assert left_toggle.isChecked()
     assert right_toggle.isChecked()
-    apply_appearance = appearance.findChild(
-        QPushButton, "apply_appearance_settings"
-    )
-    editor_button = appearance.findChild(
-        QPushButton, "open_dashboard_layout_editor"
-    )
+    apply_appearance = appearance.findChild(QPushButton, "apply_appearance_settings")
+    editor_button = appearance.findChild(QPushButton, "open_dashboard_layout_editor")
     assert apply_appearance is not None
     assert editor_button is not None
     left_toggle.setChecked(False)
@@ -2955,10 +2934,7 @@ def test_dashboard_layout_editor_hides_restores_and_persists_elements(
 
     assert not window._layout_editor_bar.isHidden()
     assert window._dashboard_boxes
-    assert all(
-        not box.editor_close_button.isHidden()
-        for box in window._dashboard_boxes.values()
-    )
+    assert all(not box.editor_close_button.isHidden() for box in window._dashboard_boxes.values())
     line_box = window._dashboard_boxes["line_pressure"]
     line_box.editor_close_button.click()
     assert line_box.isHidden()
@@ -3046,9 +3022,7 @@ def test_mode_and_pid_changes_are_queued_during_running_measurement(
     assert len(queued) == 1
     assert queued[0].proportional_gain == window._kp.value()
     assert settings.value("pid/profile_validated", type=bool) is True
-    assert "következő vezérlési ciklus" in (
-        window._pid_application_status.toPlainText()
-    )
+    assert "következő vezérlési ciklus" in (window._pid_application_status.toPlainText())
     window._runtime.stop()
     window._devices.stop()
     window.close()
@@ -3058,9 +3032,7 @@ def test_preflight_does_not_require_safe_voltage_or_pid_validation_flags(
     tmp_path: Path,
 ) -> None:
     application()
-    settings = QSettings(
-        str(tmp_path / "obsolete-validation.ini"), QSettings.Format.IniFormat
-    )
+    settings = QSettings(str(tmp_path / "obsolete-validation.ini"), QSettings.Format.IniFormat)
     settings.setValue("hardware/safe_output_validated", False)
     settings.setValue("pid/profile_validated", False)
     window = build_simulated_dashboard(
@@ -3082,9 +3054,7 @@ def test_preflight_does_not_require_safe_voltage_or_pid_validation_flags(
         quality=DataQuality.GOOD,
     )
 
-    report = window._build_preflight_report(
-        MeasurementRecord(snapshot, 0.0, "Teszt szakasz")
-    )
+    report = window._build_preflight_report(MeasurementRecord(snapshot, 0.0, "Teszt szakasz"))
     physical_validation = report.for_key("physical_validation")
 
     assert report.for_key("pid_validation") is None
@@ -3170,9 +3140,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     user_settings = QSettings(str(settings_path), QSettings.Format.IniFormat)
     user_settings.setValue("project/last_project_id", project.id)
     user_settings.setValue("project/last_stage_id", stage.id)
-    window = build_simulated_dashboard(
-        tmp_path / "raw.csv", project_path, settings=user_settings
-    )
+    window = build_simulated_dashboard(tmp_path / "raw.csv", project_path, settings=user_settings)
     project_selector = window.findChild(QComboBox, "project_selector")
     stage_selector = window.findChild(QComboBox, "stage_selector")
 
@@ -3236,10 +3204,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert window._developer_view_action.isVisible()
     assert window._simulation_mode_action.isVisible()
     assert window._simulation_mode_action.isChecked()
-    assert not any(
-        button.text() == "Pumpavezérlés…"
-        for button in window.findChildren(QPushButton)
-    )
+    assert not any(button.text() == "Pumpavezérlés…" for button in window.findChildren(QPushButton))
     settings_action = next(
         action for action in window.menuBar().actions() if action.text() == "Beállítások"
     )
@@ -3261,16 +3226,10 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     status_scroll = splitter.widget(0)
     assert isinstance(status_scroll, QScrollArea)
     assert status_scroll.widgetResizable()
-    assert status_scroll.sizeAdjustPolicy() == (
-        QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
-    )
+    assert status_scroll.sizeAdjustPolicy() == (QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
     assert status_scroll.minimumWidth() == 170
-    assert status_scroll.verticalScrollBarPolicy() == (
-        Qt.ScrollBarPolicy.ScrollBarAsNeeded
-    )
-    assert status_scroll.horizontalScrollBarPolicy() == (
-        Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-    )
+    assert status_scroll.verticalScrollBarPolicy() == (Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    assert status_scroll.horizontalScrollBarPolicy() == (Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     assert status_scroll.widget() is not None
     assert status_scroll.widget().minimumWidth() == 0
     assert window._injection_flow_label.wordWrap()
@@ -3299,21 +3258,13 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     control_scroll = splitter.widget(2)
     assert isinstance(control_scroll, QScrollArea)
     assert control_scroll.widgetResizable()
-    assert control_scroll.sizeAdjustPolicy() == (
-        QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
-    )
+    assert control_scroll.sizeAdjustPolicy() == (QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
     assert control_scroll.minimumWidth() == 260
-    assert control_scroll.horizontalScrollBarPolicy() == (
-        Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-    )
-    assert control_scroll.verticalScrollBarPolicy() == (
-        Qt.ScrollBarPolicy.ScrollBarAsNeeded
-    )
+    assert control_scroll.horizontalScrollBarPolicy() == (Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    assert control_scroll.verticalScrollBarPolicy() == (Qt.ScrollBarPolicy.ScrollBarAsNeeded)
     assert control_scroll.widget() is not None
     assert control_scroll.widget().minimumWidth() == 0
-    assert control_scroll.widget().sizePolicy().horizontalPolicy() == (
-        QSizePolicy.Policy.Ignored
-    )
+    assert control_scroll.widget().sizePolicy().horizontalPolicy() == (QSizePolicy.Policy.Ignored)
     for wrapping_label in (
         window._recording_details_label,
         window._nas_runtime_label,
@@ -3322,9 +3273,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     ):
         assert wrapping_label.wordWrap()
         assert wrapping_label.minimumWidth() == 0
-        assert wrapping_label.sizePolicy().horizontalPolicy() == (
-            QSizePolicy.Policy.Ignored
-        )
+        assert wrapping_label.sizePolicy().horizontalPolicy() == (QSizePolicy.Policy.Ignored)
     valve_settings = window.findChild(QGroupBox, "valve_control_settings")
     assert valve_settings is not None
     control_form = valve_settings.layout()
@@ -3393,9 +3342,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert "ml" in window._injection_remaining_label.text()
     assert "ml/h" in window._injection_flow_label.text()
     assert "Indítás óta nettó besajtolt:" in window._injected_volume_label.text()
-    assert "Indítás óta nettó köpenytérfogat:" in (
-        window._jacket_net_volume_label.text()
-    )
+    assert "Indítás óta nettó köpenytérfogat:" in (window._jacket_net_volume_label.text())
     x_values, _ = window._jacket_curve.getData()
     assert x_values is not None
     assert all(value >= 0.0 for value in x_values)
@@ -3479,9 +3426,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     overview.refresh()
     assert overview.value_labels["project"].text() == "UI project"
     assert overview.value_labels["stage"].text() == "Water stage"
-    assert overview.value_labels["line_calibration"].text() == (
-        "1–5 V → 0.000–400.000 bar"
-    )
+    assert overview.value_labels["line_calibration"].text() == ("1–5 V → 0.000–400.000 bar")
     assert overview.value_labels["minimum_margin"].text() == "10.000 bar"
     overview.close()
     window._manual_output.setValue(33.0)
@@ -3518,10 +3463,9 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
                 NiPhysicalChannelInfo("Dev7/ai3", "Dev7", "NI USB-6001"),
                 NiPhysicalChannelInfo("Dev7/ai4", "Dev7", "NI USB-6001"),
             ),
-            ni_output_channels=(
-                NiPhysicalChannelInfo("Dev7/ao1", "Dev7", "NI USB-6001"),
-            ),
+            ni_output_channels=(NiPhysicalChannelInfo("Dev7/ao1", "Dev7", "NI USB-6001"),),
         )
+
     device_dialog = DeviceSettingsDialog(
         UnusedTester(),  # type: ignore[arg-type]
         settings=restored._user_settings,
@@ -3529,12 +3473,8 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
         discoverer=dev7_discovery,
         parent=restored,
     )
-    device_dialog.jacket_port.setCurrentIndex(
-        device_dialog.jacket_port.findData("COM3")
-    )
-    device_dialog.injection_port.setCurrentIndex(
-        device_dialog.injection_port.findData("COM4")
-    )
+    device_dialog.jacket_port.setCurrentIndex(device_dialog.jacket_port.findData("COM3"))
+    device_dialog.injection_port.setCurrentIndex(device_dialog.injection_port.findData("COM4"))
     device_dialog.ni_device.setCurrentIndex(device_dialog.ni_device.findData("Dev7"))
     device_dialog.line_channel.setText("Dev7/ai3")
     device_dialog.delta_channel.setText("Dev7/ai4")
@@ -3568,12 +3508,8 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     device_dialog._test_passed(
         ConnectionTestResult(
             (
-                DeviceConnectionResult(
-                    HardwareTestDevice.JACKET_PUMP, True, "260D jacket"
-                ),
-                DeviceConnectionResult(
-                    HardwareTestDevice.INJECTION_PUMP, True, "260D injection"
-                ),
+                DeviceConnectionResult(HardwareTestDevice.JACKET_PUMP, True, "260D jacket"),
+                DeviceConnectionResult(HardwareTestDevice.INJECTION_PUMP, True, "260D injection"),
                 DeviceConnectionResult(
                     HardwareTestDevice.LINE_PRESSURE, True, "Dev7/ai3: 2.0 V", 2.0
                 ),
@@ -3610,9 +3546,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert developer.objectName() == "device_communication_dialog"
     assert developer._table.objectName() == "device_communication_table"
     assert developer._table.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
-    assert developer._table.selectionBehavior() == (
-        QAbstractItemView.SelectionBehavior.SelectRows
-    )
+    assert developer._table.selectionBehavior() == (QAbstractItemView.SelectionBehavior.SelectRows)
     assert developer._table.sizeAdjustPolicy() == (
         QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
     )
@@ -3636,9 +3570,7 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert developer._table.item(1, 4).text() == "RX"
     assert developer._table.item(1, 5).text() == "EOR vezérlőalkalmazás"
     assert developer._table.item(1, 7).text() == "READY"
-    assert "Köpenypumpa → EOR vezérlőalkalmazás" in (
-        developer._table.item(1, 7).toolTip()
-    )
+    assert "Köpenypumpa → EOR vezérlőalkalmazás" in (developer._table.item(1, 7).toolTip())
     developer.close()
     restored.close()
 
@@ -3647,9 +3579,7 @@ def test_dashboard_marks_warning_and_critical_alarms_on_graph(
     tmp_path: Path,
 ) -> None:
     application()
-    window = build_simulated_dashboard(
-        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
-    )
+    window = build_simulated_dashboard(tmp_path / "raw.csv", tmp_path / "projects.sqlite3")
     snapshot = MeasurementSnapshot(
         recorded_at=datetime(2026, 7, 23, 10, 30, tzinfo=UTC),
         monotonic_seconds=15.0,
@@ -3661,9 +3591,7 @@ def test_dashboard_marks_warning_and_critical_alarms_on_graph(
         quality=DataQuality.STALE,
     )
     record = MeasurementRecord(snapshot, 1.0, "Teszt szakasz")
-    command = ValveCommand(
-        True, 20.0, ControlMode.MANUAL, PressureSource.INJECTION_PUMP
-    )
+    command = ValveCommand(True, 20.0, ControlMode.MANUAL, PressureSource.INJECTION_PUMP)
 
     window._handle_cycle(ControlCycleResult(record, command))
 
@@ -3683,9 +3611,7 @@ def test_dashboard_marks_warning_and_critical_alarms_on_graph(
         safety_reasons=("injection pressure exceeds jacket pressure",),
     )
     window._handle_cycle(ControlCycleResult(inverted_pressure_record, command))
-    assert "INJECTION_PRESSURE_ABOVE_JACKET" in str(
-        window._alarm_points[-1]["data"]
-    )
+    assert "INJECTION_PRESSURE_ABOVE_JACKET" in str(window._alarm_points[-1]["data"])
     window._reset_measurement_dashboard()
     assert window._alarm_points == []
     window.close()

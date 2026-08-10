@@ -14,6 +14,7 @@ from eor_control.pump_commands import (
     PumpCommandResult,
     PumpCommandStatus,
 )
+from eor_control.pump_telemetry import PumpWorkerSnapshot
 
 
 class PumpRole(StrEnum):
@@ -152,8 +153,7 @@ class PumpControlService:
         minimum_jacket_margin_bar: float = 20.0,
         diagnostics: DiagnosticLogger | None = None,
         safety_check: Callable[[], tuple[str, ...]] | None = None,
-        manual_safety_check: Callable[[PumpRole, PumpStatus], tuple[str, ...]]
-        | None = None,
+        manual_safety_check: Callable[[PumpRole, PumpStatus], tuple[str, ...]] | None = None,
         enforce_injection_margin: bool = True,
     ) -> None:
         if not isfinite(minimum_jacket_margin_bar) or minimum_jacket_margin_bar <= 0.0:
@@ -191,6 +191,26 @@ class PumpControlService:
 
     def state(self, role: PumpRole) -> PumpPreparationState:
         return self._states[role]
+
+    def command_queue_snapshot(
+        self,
+    ) -> dict[PumpRole, tuple[PumpCommandResult, ...]]:
+        """Expose the physical worker queues without issuing serial traffic."""
+
+        snapshots: dict[PumpRole, tuple[PumpCommandResult, ...]] = {}
+        for role, pump in self._pumps.items():
+            reader = getattr(pump, "command_queue_snapshot", None)
+            snapshots[role] = tuple(reader()) if callable(reader) else ()
+        return snapshots
+
+    def worker_snapshots(self) -> dict[PumpRole, PumpWorkerSnapshot | None]:
+        """Expose cache-only worker diagnostics independently for each pump."""
+
+        snapshots: dict[PumpRole, PumpWorkerSnapshot | None] = {}
+        for role, pump in self._pumps.items():
+            reader = getattr(pump, "worker_snapshot", None)
+            snapshots[role] = reader() if callable(reader) else None
+        return snapshots
 
     def connected(self, role: PumpRole) -> bool:
         return self._connected[role]
@@ -307,12 +327,8 @@ class PumpControlService:
         result_reader = getattr(pump, "command_result", None)
         if callable(submit) or callable(result_reader):
             if not callable(submit) or not callable(result_reader):
-                raise RuntimeError(
-                    f"{role.value} pump has an incomplete asynchronous interface"
-                )
-            raise RuntimeError(
-                f"{role.value} asynchronous pump has no cache-only status reader"
-            )
+                raise RuntimeError(f"{role.value} pump has an incomplete asynchronous interface")
+            raise RuntimeError(f"{role.value} asynchronous pump has no cache-only status reader")
         if callable(getattr(pump, "read_pressure_bar", None)) and callable(
             getattr(pump, "read_operating_status", None)
         ):
@@ -396,9 +412,7 @@ class PumpControlService:
         def operation() -> None:
             state = self._states[role]
             if not state.remote or state.running:
-                raise RuntimeError(
-                    "pump must be stopped in REMOTE mode before configuration"
-                )
+                raise RuntimeError("pump must be stopped in REMOTE mode before configuration")
             if mode is PumpOperatingMode.CONSTANT_FLOW:
                 pump.set_constant_flow(target)
             else:
@@ -436,16 +450,13 @@ class PumpControlService:
         if self._safety_check is not None:
             reasons = self._safety_check()
             if reasons:
-                raise PermissionError(
-                    "safety interlock active: " + "; ".join(reasons)
-                )
+                raise PermissionError("safety interlock active: " + "; ".join(reasons))
         if self._manual_safety_check is not None:
             status = self._supervision_status(role)
             reasons = self._manual_safety_check(role, status)
             if reasons:
-                raise PermissionError(
-                    "manual safety interlock active: " + "; ".join(reasons)
-                )
+                raise PermissionError("manual safety interlock active: " + "; ".join(reasons))
+
         def operation() -> None:
             state = self._states[role]
             if not state.remote or not state.configured or state.running:
@@ -551,10 +562,7 @@ class PumpControlService:
             if cancel_check is not None and cancel_check():
                 raise InterruptedError("measurement pump preparation was cancelled")
             self._require_startup_safe(startup_safety_check)
-            samples = {
-                role: self._supervision_sample(role)
-                for role in PumpRole
-            }
+            samples = {role: self._supervision_sample(role) for role in PumpRole}
             self._require_control_deadline(
                 cycle_started,
                 timing.control_interval_seconds,
@@ -564,8 +572,7 @@ class PumpControlService:
             injection_status, injection_quality = samples[PumpRole.INJECTION]
             if jacket_quality is not DataQuality.GOOD:
                 raise RuntimeError(
-                    "jacket pump telemetry quality is "
-                    f"{jacket_quality.value} during preparation"
+                    f"jacket pump telemetry quality is {jacket_quality.value} during preparation"
                 )
             if injection_quality is not DataQuality.GOOD:
                 raise RuntimeError(
@@ -598,8 +605,7 @@ class PumpControlService:
                     and pending.command.kind is PumpCommandKind.RUN
                     and (
                         pending.role is PumpRole.JACKET
-                        and self._states[PumpRole.JACKET].mode
-                        is PumpOperatingMode.CONSTANT_FLOW
+                        and self._states[PumpRole.JACKET].mode is PumpOperatingMode.CONSTANT_FLOW
                         and jacket_pressure >= plan.jacket_target_pressure_bar
                         or pending.role is PumpRole.INJECTION
                         and injection_pressure >= plan.injection_start_pressure_bar
@@ -648,8 +654,7 @@ class PumpControlService:
                         )
                     raise TimeoutError(
                         result.error
-                        or f"{pending.role.value} command timed out: "
-                        f"{pending.command.kind.value}"
+                        or f"{pending.role.value} command timed out: {pending.command.kind.value}"
                     )
                 else:
                     if pending.command.kind is PumpCommandKind.ENTER_REMOTE:
@@ -839,9 +844,7 @@ class PumpControlService:
             elif phase is _PreparationPhase.WAIT_MARGIN_RECOVERY:
                 if injection_pressure >= plan.injection_start_pressure_bar:
                     phase = _PreparationPhase.BUILD_PRESSURES
-                elif margin >= (
-                    self._minimum_margin + margin_recovery_hysteresis_bar
-                ):
+                elif margin >= (self._minimum_margin + margin_recovery_hysteresis_bar):
                     phase = _PreparationPhase.INJECTION_RUN
             elif phase is _PreparationPhase.INJECTION_TARGET_STOP:
                 pending = self._start_preparation_command(
@@ -859,12 +862,8 @@ class PumpControlService:
             }:
                 jacket_state = self._states[PumpRole.JACKET]
                 injection_state = self._states[PumpRole.INJECTION]
-                jacket_at_target = (
-                    jacket_pressure >= plan.jacket_target_pressure_bar
-                )
-                injection_at_target = (
-                    injection_pressure >= plan.injection_start_pressure_bar
-                )
+                jacket_at_target = jacket_pressure >= plan.jacket_target_pressure_bar
+                injection_at_target = injection_pressure >= plan.injection_start_pressure_bar
                 jacket_holding = (
                     jacket_state.mode is PumpOperatingMode.CONSTANT_PRESSURE
                     and jacket_state.running
@@ -892,9 +891,7 @@ class PumpControlService:
                     return
 
             if command_executed:
-                next_control = self._wait_after_preparation_command(
-                    timing.control_interval_seconds
-                )
+                next_control = self._wait_after_preparation_command(timing.control_interval_seconds)
             else:
                 next_control = self._wait_for_control_deadline(
                     next_control,
@@ -977,9 +974,7 @@ class PumpControlService:
             self.stop(role)
         return None
 
-    def _preparation_command_result(
-        self, pending: _PendingPreparationCommand
-    ) -> PumpCommandResult:
+    def _preparation_command_result(self, pending: _PendingPreparationCommand) -> PumpCommandResult:
         reader = getattr(self._pumps[pending.role], "command_result", None)
         if not callable(reader):
             raise RuntimeError("asynchronous pump command result reader disappeared")
@@ -1036,9 +1031,7 @@ class PumpControlService:
             jacket_age_seconds=pressure_age(PumpRole.JACKET),
             injection_age_seconds=pressure_age(PumpRole.INJECTION),
             pending_command=(
-                None
-                if pending is None
-                else f"{pending.role.value}: {pending.command.kind.value}"
+                None if pending is None else f"{pending.role.value}: {pending.command.kind.value}"
             ),
         )
 
@@ -1057,22 +1050,16 @@ class PumpControlService:
             PumpCommandKind.SET_CONSTANT_PRESSURE,
         }:
             if not state.remote or state.running:
-                raise RuntimeError(
-                    "pump must be stopped in REMOTE mode before configuration"
-                )
+                raise RuntimeError("pump must be stopped in REMOTE mode before configuration")
             if value is None or not isfinite(value) or value < 0.0:
                 raise ValueError("pump command target must be nonnegative and finite")
         elif kind is PumpCommandKind.RUN:
             if not state.remote or not state.configured or state.running:
-                raise RuntimeError(
-                    "pump must be configured and stopped in REMOTE mode"
-                )
+                raise RuntimeError("pump must be configured and stopped in REMOTE mode")
             if role is PumpRole.INJECTION:
                 self._require_injection_start_margin()
 
-    def _apply_preparation_command_success(
-        self, pending: _PendingPreparationCommand
-    ) -> None:
+    def _apply_preparation_command_success(self, pending: _PendingPreparationCommand) -> None:
         role = pending.role
         state = self._states[role]
         kind = pending.command.kind
@@ -1136,16 +1123,10 @@ class PumpControlService:
             or timing.watchdog_tolerance_seconds < 0.0
         ):
             raise ValueError("control watchdog tolerance must be nonnegative and finite")
-        if (
-            not isfinite(plan.margin_stability_seconds)
-            or plan.margin_stability_seconds < 0.0
-        ):
+        if not isfinite(plan.margin_stability_seconds) or plan.margin_stability_seconds < 0.0:
             raise ValueError("margin stability time must be nonnegative and finite")
         limits = (plan.jacket_pressure_limit_bar, plan.injection_pressure_limit_bar)
-        if not all(
-            limit is None or isfinite(limit) and limit > 0.0
-            for limit in limits
-        ):
+        if not all(limit is None or isfinite(limit) and limit > 0.0 for limit in limits):
             raise ValueError("pump pressure limits must be positive and finite")
         if (
             plan.jacket_pressure_limit_bar is not None
@@ -1190,9 +1171,7 @@ class PumpControlService:
             return
         reasons = startup_safety_check()
         if reasons:
-            raise PermissionError(
-                "pump startup safety interlock active: " + "; ".join(reasons)
-            )
+            raise PermissionError("pump startup safety interlock active: " + "; ".join(reasons))
 
     @staticmethod
     def _wait_for_control_deadline(
@@ -1224,16 +1203,12 @@ class PumpControlService:
         elapsed = monotonic() - cycle_started
         if elapsed > interval_seconds + watchdog_tolerance_seconds:
             raise TimeoutError(
-                "control cycle deadline missed during pump preparation: "
-                f"{elapsed:.3f} seconds"
+                f"control cycle deadline missed during pump preparation: {elapsed:.3f} seconds"
             )
 
     def _require_injection_start_margin(self) -> float:
         statuses = self._supervision_statuses()
-        margin = (
-            statuses[PumpRole.JACKET].pressure_bar
-            - statuses[PumpRole.INJECTION].pressure_bar
-        )
+        margin = statuses[PumpRole.JACKET].pressure_bar - statuses[PumpRole.INJECTION].pressure_bar
         if margin < self._minimum_margin:
             raise PermissionError(
                 f"jacket pressure margin is {margin:.3f} bar; "
@@ -1388,10 +1363,7 @@ class PumpControlService:
                         level="WARNING",
                     )
                 except Exception as recovery_error:
-                    errors.append(
-                        f"{role.value}: {error}; REMOTE/STOP recovery: "
-                        f"{recovery_error}"
-                    )
+                    errors.append(f"{role.value}: {error}; REMOTE/STOP recovery: {recovery_error}")
         return tuple(errors)
 
     def _stop_all_queued(self) -> tuple[str, ...]:
@@ -1470,13 +1442,10 @@ class PumpControlService:
                         )
                     except Exception as recovery_error:
                         errors.append(
-                            f"{role.value}: {result.error}; REMOTE/STOP recovery: "
-                            f"{recovery_error}"
+                            f"{role.value}: {result.error}; REMOTE/STOP recovery: {recovery_error}"
                         )
                 else:
-                    errors.append(
-                        f"{role.value}: {result.error or result.status.value}"
-                    )
+                    errors.append(f"{role.value}: {result.error or result.status.value}")
             if unfinished:
                 sleep(0.01)
         for role in unfinished:
@@ -1548,6 +1517,4 @@ class PumpControlService:
 
     def _log(self, direction: str, message: str, *, level: str = "INFO") -> None:
         if self._diagnostics is not None:
-            self._diagnostics.emit(
-                DiagnosticCategory.SYSTEM, direction, message, level=level
-            )
+            self._diagnostics.emit(DiagnosticCategory.SYSTEM, direction, message, level=level)

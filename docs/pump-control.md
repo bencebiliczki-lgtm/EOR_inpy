@@ -92,7 +92,10 @@ azonosítani.
 
 ## Telemetria és polling
 
-Mindkét pumpához egyetlen `PollingPump` worker tartozik. Az előkészítés, az
+Mindkét pumpához egyetlen, egymástól független `PollingPump` worker, condition,
+prioritásos queue, cache és soros adapter tartozik. A KÖP és a BES külön
+COM-portja ezért időben átfedő tranzakciókat futtathat; ugyanazon porton viszont
+mindig pontosan egy worker végez szekvenciális DASNET-műveletet. Az előkészítés, az
 előkészített várakozás és a mérés ugyanazt az időbélyegzett cache-t olvassa;
 nem indít egymástól független soros lekérdezési ciklusokat.
 
@@ -100,10 +103,10 @@ Alapértékek:
 
 | Adat | Polling | STALE-határ |
 |---|---:|---:|
-| `PRESS` | 0,5 s | 6 s |
-| `FLOW` | lassú körforgás | 33 s |
-| `VOLA`/`VOL` | lassú körforgás | 33 s |
-| `STATUS` | 3 s | 8 s |
+| `PRESS` | 1 s | 6 s |
+| `FLOW` | 10 s-os lassú körforgás | legalább 33 s |
+| `VOLA`/`VOL` | 10 s-os lassú körforgás | legalább 33 s |
+| `STATUS` | 4 s | 8 s |
 | Kezdő telemetria | — | 8 s timeout |
 
 A `PRESS` kapja a legmagasabb telemetria-prioritást, utána az önálló `STATUS`,
@@ -122,12 +125,12 @@ egymást:
 
 | Időzítés | Alapérték | Mit csinál? |
 |---|---:|---|
-| Pumpa soros polling | `PRESS` 0,5 s; `STATUS` 3 s; lassú telemetria 0,5 s | Elsőbbségi `PRESS`/`STATUS`, majd körforgásos `FLOW`/`VOLA` DASNET-kéréseket ad ki |
+| Pumpa soros polling | `PRESS` 1 s; `STATUS` 4 s; `FLOW/VOLA` 10 s | Elsőbbségi vezérlés, majd `PRESS`/`STATUS` és körforgásos `FLOW`/`VOLA` DASNET-kérések |
 | Vezérlési ciklus | 0,2 s | A pumpacache-t és az NI-adatokat biztonságilag kiértékeli; méréskor PID-et futtat |
 | READY/ELŐKÉSZÍTVE dashboard | 1,0 s | A cache és az NI-adatok alapján frissíti a kijelzést; nem ad ki új pumpalekérdezést |
 | Adatrögzítés | 1,0 s | Az esedékes vezérlési ciklus eredményét tartósan elmenti |
 
-Példa: 0,5 s-os pumpapolling és 0,2 s-os vezérlési ciklus mellett a PID
+Példa: 1 s-os pumpapolling és 0,2 s-os vezérlési ciklus mellett a PID
 0,2 másodpercenként lefut, de két egymást követő PID-ciklus ugyanazt a
 legutóbb cache-elt pumpanyomást is láthatja. Ez szándékos: a PID nem indít
 saját blokkoló soros olvasást.
@@ -138,13 +141,12 @@ A mezők nem egyetlen közös periódust használnak. Ideális, azonnali válasz
 egy pumpa lehetséges üteme:
 
 ```text
-t = 0,000 s   FLOW
-t = 0,500 s   PRESS
-t = 1,000 s   VOLA
-t = 1,500 s   PRESS
-t = 2,000 s   FLOW
-t = 2,500 s   PRESS
-t = 3,000 s   STATUS
+t = 1,000 s   PRESS
+t = 2,000 s   PRESS
+t = 3,000 s   PRESS
+t = 4,000 s   STATUS
+t = 5,000 s   PRESS
+t = 10,000 s  FLOW
 ```
 
 A konkrét időpontokat a válaszidő módosítja; a táblázat csak a prioritást
@@ -152,7 +154,7 @@ szemlélteti. A KÖP és a BES saját workerrel és saját időzítéssel rendel
 
 ### Mi módosítja a tényleges lekérdezési időt?
 
-A 0,5 s tervezett indítási periódus, nem garantált DASNET-válaszidő. A
+Az 1 s tervezett indítási periódus, nem garantált DASNET-válaszidő. A
 tényleges frissítést az alábbiak befolyásolják:
 
 - a pumpa válaszideje;
@@ -194,7 +196,7 @@ felzárkózó `PRESS`-csomagot, hanem a befejezéstől újraütemez.
 
 - `developer/pump_pressure_poll_seconds`: csak a `PRESS` soros periódusát;
 - `developer/pump_status_poll_seconds`: a `STATUS` külön, alapértelmezetten
-  3 s-os periódusát;
+  4 s-os periódusát;
 - `developer/pump_slow_poll_seconds`: a telemetria-tranzakciók közötti névleges
   szünetet; a biztonságkritikus `PRESS/STATUS` elsőbbséget kap, a fennmaradó
   kapacitásban a worker `FLOW → VOLA` körforgást használ;
@@ -221,7 +223,7 @@ port nyitva marad, a hiba láthatóvá válik, és reconnect nem engedélyezett.
 worker későbbi befejezése után külön disconnect-cleanup szükséges.
 
 A pumpánkénti worker egyszerre csak egy DASNET-tranzakciót futtat. A sorrend
-`emergency STOP → STOP → esedékes PRESS/STATUS → RUN/CONFIG → FLOW/VOLA`.
+`emergency STOP → vezérlési STOP/REMOTE/MAXPRESS/CONFIG/RUN → PRESS → STATUS → FLOW/VOLA`.
 Az esedékes STATUS-t normál parancsfolyam sem éheztetheti ki. Egy mező
 befejezése után a következő határidő a tényleges befejezési időből indul; nincs
 elmaradást behozó lekérdezéscsomag. Vezérlőparancs alatt a normál polling
@@ -287,11 +289,25 @@ Csak célteljesülés, safety/kommunikációs hiba vagy explicit kezelői megsza
 zárhatja le. A konkrét soros, queue-, execution- és verification-timeoutok
 változatlanul megmaradnak.
 
-Az előkészítési állapotablak folyamatosan megjeleníti a fázist, a két aktuális és
-cél-nyomást, a margin aktuális/minimum értékét, a pumpák RUN/STOP és
+Az előkészítés indításakor nem jelenik meg külön folyamatablak. A dashboard
+**Pumpa-előkészítés állapota** panelje folyamatosan megjeleníti a fázist, a két
+aktuális és cél-nyomást, a margin aktuális/minimum értékét, a pumpák RUN/STOP és
 REMOTE/LOCAL állapotát, a nyomástelemetria minőségét és korát, valamint az
-esetleges függő parancsot. Hátralévő időt nem mutat. A kezelő külön
+esetleges függő parancsot. Hátralévő időt nem mutat. A kezelő ugyanitt külön
 **Előkészítés megszakítása** gombbal kérhet biztonsági leállítást.
+Ugyanez az aktív vagy legutolsó állapotkép Developer módban az
+**Eszközkommunikáció → Előkészítés állapota…** gombbal ismét megnyitható.
+
+Az Eszközkommunikáció ablak mellette külön **Pontos parancs-queue…** gombot ad.
+Ez pumpánként, tényleges végrehajtási sorrendben mutatja a RUNNING és QUEUED
+elemek azonosítóját, állapotát, parancstípusát, értékét, prioritását,
+queue-várakozását, végrehajtási és ellenőrzési idejét, mindhárom timeoutját,
+valamint a recovery okát vagy hibáját. A nézet csak a workerek memóriabeli
+állapotát olvassa, ezért nem terheli a soros kommunikációt.
+Ugyanitt a pumpánkénti élő workertábla mutatja a worker- és szálazonosítót,
+COM-portot, queue-méretet, futó parancsot, PRESS/STATUS életkort, az utolsó
+tranzakció idejét és a polling deadline miss számlálóját; ez is kizárólag
+memóriabeli állapotot olvas.
 
 ## Vezérlési ciklus az előkészítés alatt
 
@@ -330,7 +346,8 @@ REMOTE ellenőrzés csak explicit Remote állapotot fogad el, például
 `STOP REMOTE`; a puszta `STATUS=STOP/RUN`, a `LOCAL` és a problémajelzés nem
 elegendő. Sikertelen váltáskor az előkészítés a pumpaszerepet megnevező hibával
 áll le, és nem folytatja a `MAXPRESS → CONST_FLOW → RUN` sorozatot. Minden
-parancs egyedi azonosítóval naplózza a parancstípust, prioritást,
+parancs egyedi azonosítóval naplózza a pumpaszerepet, COM-portot, worker- és
+szálazonosítót, queue-méretet, queue-ba kerülési monotonic időt, parancstípust, prioritást,
 queue-várakozást, teljes tranzakcióidőt, végrehajtási időt, ellenőrzési időt,
 recovery-okot és eredményt. A timeout megnevezi a fázist,
 például `injection command execution timeout: STOP`; nem jelenhet meg
@@ -352,7 +369,7 @@ Három egymást követő periodikus `LOCAL` STATUS után magas prioritású `REM
 parancsot tesz a worker parancssorába, és célzott STATUS-visszaolvasással
 ellenőrzi a helyreállítást. Egy vagy két átmeneti Local minta ezért nem okoz
 recoveryt. Sikeres helyreállítás után a következő periodikus STATUS egy teljes,
-alapértelmezetten 3 másodperces intervallummal későbbre kerül. A dashboard és az
+alapértelmezetten 4 másodperces intervallummal későbbre kerül. A dashboard és az
 üresjárati telemetria kizárólag olvas: Local állapotban sem küld `REMOTE` vagy
 más vezérlőparancsot.
 
