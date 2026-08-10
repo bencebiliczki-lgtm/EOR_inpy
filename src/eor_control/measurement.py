@@ -234,6 +234,12 @@ class MeasurementService:
         read_cached = getattr(pump, "read_cached_status", None)
         if callable(read_cached):
             return cast(tuple[PumpStatus, DataQuality], read_cached())
+        if callable(getattr(pump, "read_pressure_bar", None)) and callable(
+            getattr(pump, "read_operating_status", None)
+        ):
+            raise RuntimeError(
+                "raw pump cannot be used for measurement control; PollingPump required"
+            )
         return pump.read_status(), DataQuality.GOOD
 
     @staticmethod

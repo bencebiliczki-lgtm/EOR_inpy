@@ -6,7 +6,7 @@ from time import monotonic, sleep
 from typing import Protocol, cast
 
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
-from eor_control.domain import PumpStatus
+from eor_control.domain import DataQuality, PumpStatus
 from eor_control.pump_commands import (
     PumpCommand,
     PumpCommandKind,
@@ -28,21 +28,22 @@ class PumpOperatingMode(StrEnum):
 
 class _PreparationPhase(StrEnum):
     JACKET_REMOTE = "jacket_remote"
+    INJECTION_REMOTE = "injection_remote"
     JACKET_PRESSURE_LIMIT = "jacket_pressure_limit"
+    INJECTION_PRESSURE_LIMIT = "injection_pressure_limit"
     JACKET_FLOW = "jacket_flow"
     JACKET_RUN = "jacket_run"
-    WAIT_JACKET_TARGET = "wait_jacket_target"
-    JACKET_STOP = "jacket_stop"
-    JACKET_CONSTANT_PRESSURE = "jacket_constant_pressure"
-    JACKET_HOLD_RUN = "jacket_hold_run"
-    WAIT_JACKET_STABLE = "wait_jacket_stable"
-    INJECTION_REMOTE = "injection_remote"
-    INJECTION_PRESSURE_LIMIT = "injection_pressure_limit"
+    WAIT_MARGIN = "wait_margin"
     INJECTION_FLOW = "injection_flow"
     INJECTION_RUN = "injection_run"
-    WAIT_INJECTION_TARGET = "wait_injection_target"
-    INJECTION_STOP = "injection_stop"
-    VERIFY_STOPPED = "verify_stopped"
+    BUILD_PRESSURES = "build_pressures"
+    INJECTION_MARGIN_STOP = "injection_margin_stop"
+    WAIT_MARGIN_RECOVERY = "wait_margin_recovery"
+    JACKET_TARGET_STOP = "jacket_target_stop"
+    JACKET_CONSTANT_PRESSURE = "jacket_constant_pressure"
+    JACKET_HOLD_RUN = "jacket_hold_run"
+    INJECTION_TARGET_STOP = "injection_target_stop"
+    VERIFY_TARGETS = "verify_targets"
 
 
 class ControllablePump(Protocol):
@@ -104,7 +105,6 @@ class PumpStartupPlan:
 
 @dataclass(frozen=True, slots=True)
 class PumpControlTiming:
-    pressure_buildup_timeout_seconds: float = 120.0
     control_interval_seconds: float = 0.2
     watchdog_tolerance_seconds: float = 0.05
     execution_timeout_seconds: float = 5.0
@@ -118,6 +118,24 @@ class _PendingPreparationCommand:
     command_id: str
     command: PumpCommand
     next_phase: _PreparationPhase
+
+
+@dataclass(frozen=True, slots=True)
+class PumpPreparationProgress:
+    phase: str
+    jacket_pressure_bar: float
+    jacket_target_pressure_bar: float
+    injection_pressure_bar: float
+    injection_target_pressure_bar: float
+    pressure_margin_bar: float
+    minimum_margin_bar: float
+    jacket_state: str
+    injection_state: str
+    jacket_quality: DataQuality
+    injection_quality: DataQuality
+    jacket_age_seconds: float | None
+    injection_age_seconds: float | None
+    pending_command: str | None
 
 
 class PumpControlService:
@@ -193,7 +211,8 @@ class PumpControlService:
         self._require_authorized()
         if self._states[role].running:
             raise RuntimeError("pump must be stopped before disconnect")
-        self.stop(role)
+        if not self._is_stopped(role):
+            self.stop(role)
         self._pumps[role].disconnect()
         self._connected[role] = False
         self._states[role] = PumpPreparationState()
@@ -232,7 +251,7 @@ class PumpControlService:
             self._set_pump_remote_supervision(role, False)
         errors: list[str] = []
         for role, pump in self._pumps.items():
-            if self._connected[role] and not self._is_stopped_local(role):
+            if self._connected[role] and not self._is_stopped(role):
                 try:
                     pump.request_stop()
                 except Exception as error:
@@ -254,12 +273,12 @@ class PumpControlService:
         self._require_authorized()
         statuses: dict[PumpRole, PumpStatus] = {}
         errors: dict[PumpRole, str] = {}
-        for role, pump in self._pumps.items():
+        for role in self._pumps:
             if not self._connected[role]:
                 errors[role] = "nincs csatlakoztatva"
                 continue
             try:
-                statuses[role] = pump.read_status()
+                statuses[role] = self._supervision_status(role)
             except Exception as error:
                 errors[role] = str(error)
         return statuses, errors
@@ -268,11 +287,22 @@ class PumpControlService:
         self._require_authorized()
         for role in PumpRole:
             self._require_connected(role)
-        return {role: pump.read_status() for role, pump in self._pumps.items()}
+        return {role: self._supervision_status(role) for role in PumpRole}
 
     def _supervision_status(self, role: PumpRole) -> PumpStatus:
         """Use cache-only status for pumps that expose an asynchronous worker."""
+        return self._supervision_sample(role)[0]
+
+    def _supervision_sample(
+        self,
+        role: PumpRole,
+    ) -> tuple[PumpStatus, DataQuality]:
+        """Read cached control telemetry and its safety-critical quality."""
         pump = self._pumps[role]
+        cache_reader = getattr(pump, "read_cached_status", None)
+        if callable(cache_reader):
+            status, quality = cache_reader()
+            return cast(PumpStatus, status), cast(DataQuality, quality)
         submit = getattr(pump, "submit_command", None)
         result_reader = getattr(pump, "command_result", None)
         if callable(submit) or callable(result_reader):
@@ -280,14 +310,16 @@ class PumpControlService:
                 raise RuntimeError(
                     f"{role.value} pump has an incomplete asynchronous interface"
                 )
-            cache_reader = getattr(pump, "read_cached_status", None)
-            if not callable(cache_reader):
-                raise RuntimeError(
-                    f"{role.value} asynchronous pump has no cache-only status reader"
-                )
-            status, _quality = cache_reader()
-            return cast(PumpStatus, status)
-        return pump.read_status()
+            raise RuntimeError(
+                f"{role.value} asynchronous pump has no cache-only status reader"
+            )
+        if callable(getattr(pump, "read_pressure_bar", None)) and callable(
+            getattr(pump, "read_operating_status", None)
+        ):
+            raise RuntimeError(
+                f"{role.value} raw pump cannot be used by control; PollingPump required"
+            )
+        return pump.read_status(), DataQuality.GOOD
 
     def _supervision_statuses(self) -> dict[PumpRole, PumpStatus]:
         self._require_authorized()
@@ -302,21 +334,22 @@ class PumpControlService:
         self._states[role] = PumpPreparationState(remote=True)
         self._log(role.value, "REMOTE")
 
-    def ensure_remote(self, role: PumpRole) -> None:
-        """Enter Remote mode unless cached device state already confirms it."""
-
-        self._require_authorized()
-        self._require_connected(role)
-        if self._is_remote_mode(role):
-            self._mark_remote(role)
-            self._log(role.value, "REMOTE already confirmed; command skipped")
-            return
-        self._enter_remote_preserving_state(role)
-
-    def _enter_remote_preserving_state(self, role: PumpRole) -> None:
-        self._pumps[role].enter_remote()
+    def _enter_remote_preserving_state(
+        self,
+        role: PumpRole,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        recovery = getattr(self._pumps[role], "enter_remote_for_recovery", None)
+        if reason is not None and callable(recovery):
+            recovery(reason)
+        else:
+            self._pumps[role].enter_remote()
         self._mark_remote(role)
-        self._log(role.value, "REMOTE")
+        self._log(
+            role.value,
+            "REMOTE" if reason is None else f"REMOTE recovery; reason={reason}",
+        )
 
     def _mark_remote(self, role: PumpRole) -> None:
         state = self._states[role]
@@ -333,31 +366,45 @@ class PumpControlService:
         role: PumpRole,
         operation: Callable[[], None],
     ) -> None:
-        """Ensure Remote and retry once if the device fell back to Local."""
+        """Apply the single Remote precheck and retry once after a Local error."""
 
-        self.ensure_remote(role)
+        self._require_authorized()
+        self._require_connected(role)
+        if self._is_remote_mode(role):
+            self._mark_remote(role)
+            self._log(role.value, "REMOTE already confirmed; command skipped")
+        else:
+            self._enter_remote_preserving_state(role)
         try:
             operation()
         except Exception as error:
             if "LOCAL" not in str(error).upper():
                 raise
-            self._enter_remote_preserving_state(role)
+            self._enter_remote_preserving_state(
+                role,
+                reason=f"{type(error).__name__}: {error}",
+            )
             operation()
 
     def configure(self, role: PumpRole, mode: PumpOperatingMode, target: float) -> None:
         self._require_authorized()
         self._require_connected(role)
-        self.ensure_remote(role)
-        state = self._states[role]
-        if not state.remote or state.running:
-            raise RuntimeError("pump must be stopped in REMOTE mode before configuration")
         if not isfinite(target) or target < 0.0:
             raise ValueError("pump target must be nonnegative and finite")
         pump = self._pumps[role]
-        if mode is PumpOperatingMode.CONSTANT_FLOW:
-            self._execute_remote_write(role, lambda: pump.set_constant_flow(target))
-        else:
-            self._execute_remote_write(role, lambda: pump.set_constant_pressure(target))
+
+        def operation() -> None:
+            state = self._states[role]
+            if not state.remote or state.running:
+                raise RuntimeError(
+                    "pump must be stopped in REMOTE mode before configuration"
+                )
+            if mode is PumpOperatingMode.CONSTANT_FLOW:
+                pump.set_constant_flow(target)
+            else:
+                pump.set_constant_pressure(target)
+
+        self._execute_remote_write(role, operation)
         self._states[role] = PumpPreparationState(
             remote=True, configured=True, mode=mode, target=target
         )
@@ -393,19 +440,22 @@ class PumpControlService:
                     "safety interlock active: " + "; ".join(reasons)
                 )
         if self._manual_safety_check is not None:
-            status = self._pumps[role].read_status()
+            status = self._supervision_status(role)
             reasons = self._manual_safety_check(role, status)
             if reasons:
                 raise PermissionError(
                     "manual safety interlock active: " + "; ".join(reasons)
                 )
-        self.ensure_remote(role)
+        def operation() -> None:
+            state = self._states[role]
+            if not state.remote or not state.configured or state.running:
+                raise RuntimeError("pump must be configured and stopped in REMOTE mode")
+            if role is PumpRole.INJECTION and enforce_injection_margin:
+                self._require_injection_start_margin()
+            self._pumps[role].run()
+
+        self._execute_remote_write(role, operation)
         state = self._states[role]
-        if not state.remote or not state.configured or state.running:
-            raise RuntimeError("pump must be configured and stopped in REMOTE mode")
-        if role is PumpRole.INJECTION and enforce_injection_margin:
-            self._require_injection_start_margin()
-        self._execute_remote_write(role, self._pumps[role].run)
         self._states[role] = PumpPreparationState(
             remote=True,
             configured=True,
@@ -426,7 +476,6 @@ class PumpControlService:
         injection_pressure_limit_bar: float | None = None,
         confirmation: str,
         startup_safety_check: Callable[[], tuple[str, ...]] | None = None,
-        pressure_buildup_timeout_seconds: float = 120.0,
         control_interval_seconds: float = 0.2,
         control_watchdog_tolerance_seconds: float = 0.05,
         margin_stability_seconds: float = 0.0,
@@ -443,9 +492,6 @@ class PumpControlService:
                 margin_stability_seconds=margin_stability_seconds,
             ),
             timing=PumpControlTiming(
-                pressure_buildup_timeout_seconds=(
-                    pressure_buildup_timeout_seconds
-                ),
                 control_interval_seconds=control_interval_seconds,
                 watchdog_tolerance_seconds=control_watchdog_tolerance_seconds,
             ),
@@ -460,6 +506,8 @@ class PumpControlService:
         timing: PumpControlTiming,
         confirmation: str,
         startup_safety_check: Callable[[], tuple[str, ...]] | None = None,
+        progress_callback: Callable[[PumpPreparationProgress], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> None:
         """Run the single supervised pump-preparation state machine."""
         self._require_authorized()
@@ -475,47 +523,111 @@ class PumpControlService:
                 plan,
                 timing,
                 startup_safety_check,
+                progress_callback,
+                cancel_check,
             )
-        except Exception as error:
-            stop_errors = self.stop_all()
-            if stop_errors:
-                raise RuntimeError(
-                    f"{error}; pump startup rollback errors: {'; '.join(stop_errors)}"
-                ) from error
-            raise
         finally:
             self._set_preparation_polling(False)
+        self.set_remote_supervision_active(True)
 
     def _run_preparation_state_machine(
         self,
         plan: PumpStartupPlan,
         timing: PumpControlTiming,
         startup_safety_check: Callable[[], tuple[str, ...]] | None,
+        progress_callback: Callable[[PumpPreparationProgress], None] | None,
+        cancel_check: Callable[[], bool] | None,
     ) -> None:
         """Advance state from cache while pump workers execute serial commands."""
         phase = _PreparationPhase.JACKET_REMOTE
-        phase_deadline = monotonic() + timing.pressure_buildup_timeout_seconds
         next_control = monotonic()
         stable_since: float | None = None
         pending: _PendingPreparationCommand | None = None
+        resume_after_jacket_hold = _PreparationPhase.WAIT_MARGIN
+        margin_recovery_hysteresis_bar = 1.0
 
         while True:
             cycle_started = monotonic()
+            if cancel_check is not None and cancel_check():
+                raise InterruptedError("measurement pump preparation was cancelled")
             self._require_startup_safe(startup_safety_check)
-            statuses = self._supervision_statuses()
+            samples = {
+                role: self._supervision_sample(role)
+                for role in PumpRole
+            }
             self._require_control_deadline(
                 cycle_started,
                 timing.control_interval_seconds,
                 timing.watchdog_tolerance_seconds,
             )
-            jacket_pressure = statuses[PumpRole.JACKET].pressure_bar
-            injection_pressure = statuses[PumpRole.INJECTION].pressure_bar
+            jacket_status, jacket_quality = samples[PumpRole.JACKET]
+            injection_status, injection_quality = samples[PumpRole.INJECTION]
+            if jacket_quality is not DataQuality.GOOD:
+                raise RuntimeError(
+                    "jacket pump telemetry quality is "
+                    f"{jacket_quality.value} during preparation"
+                )
+            if injection_quality is not DataQuality.GOOD:
+                raise RuntimeError(
+                    "injection pump telemetry quality is "
+                    f"{injection_quality.value} during preparation"
+                )
+            jacket_pressure = jacket_status.pressure_bar
+            injection_pressure = injection_status.pressure_bar
             margin = jacket_pressure - injection_pressure
             now = monotonic()
             command_executed = False
 
+            if progress_callback is not None:
+                progress_callback(
+                    self._preparation_progress(
+                        phase,
+                        plan,
+                        jacket_pressure,
+                        injection_pressure,
+                        jacket_quality,
+                        injection_quality,
+                        pending,
+                    )
+                )
+
             if pending is not None:
                 result = self._preparation_command_result(pending)
+                target_reached_while_run_queued = (
+                    result.status is PumpCommandStatus.QUEUED
+                    and pending.command.kind is PumpCommandKind.RUN
+                    and (
+                        pending.role is PumpRole.JACKET
+                        and self._states[PumpRole.JACKET].mode
+                        is PumpOperatingMode.CONSTANT_FLOW
+                        and jacket_pressure >= plan.jacket_target_pressure_bar
+                        or pending.role is PumpRole.INJECTION
+                        and injection_pressure >= plan.injection_start_pressure_bar
+                    )
+                )
+                if target_reached_while_run_queued:
+                    cancel = getattr(
+                        self._pumps[pending.role],
+                        "cancel_command",
+                        None,
+                    )
+                    if callable(cancel) and cancel(
+                        pending.command_id,
+                        reason="preparation target reached before queued RUN",
+                    ):
+                        phase = (
+                            _PreparationPhase.JACKET_CONSTANT_PRESSURE
+                            if pending.role is PumpRole.JACKET
+                            else _PreparationPhase.VERIFY_TARGETS
+                        )
+                        pending = None
+                        next_control = self._wait_for_control_deadline(
+                            next_control,
+                            timing.control_interval_seconds,
+                            cycle_started,
+                            timing.watchdog_tolerance_seconds,
+                        )
+                        continue
                 if result.status is PumpCommandStatus.QUEUED:
                     if now - result.submitted_monotonic > timing.queue_timeout_seconds:
                         raise TimeoutError(
@@ -528,16 +640,6 @@ class PumpControlService:
                 elif result.status is PumpCommandStatus.SUCCEEDED:
                     self._apply_preparation_command_success(pending)
                     phase = pending.next_phase
-                    if phase in {
-                        _PreparationPhase.WAIT_JACKET_TARGET,
-                        _PreparationPhase.WAIT_JACKET_STABLE,
-                        _PreparationPhase.WAIT_INJECTION_TARGET,
-                    }:
-                        phase_deadline = (
-                            monotonic() + timing.pressure_buildup_timeout_seconds
-                        )
-                    if phase is _PreparationPhase.WAIT_JACKET_STABLE:
-                        stable_since = None
                     pending = None
                 elif result.status is PumpCommandStatus.TIMED_OUT:
                     if pending.command.kind is PumpCommandKind.ENTER_REMOTE:
@@ -567,20 +669,19 @@ class PumpControlService:
                 )
                 continue
 
-            if phase in {
-                _PreparationPhase.INJECTION_REMOTE,
-                _PreparationPhase.INJECTION_PRESSURE_LIMIT,
-                _PreparationPhase.INJECTION_FLOW,
-                _PreparationPhase.INJECTION_RUN,
-            } and margin < self._minimum_margin:
-                raise PermissionError(
-                    f"jacket pressure margin is {margin:.3f} bar; "
-                    f"at least {self._minimum_margin:.3f} bar is required"
-                )
-
             if phase is _PreparationPhase.JACKET_REMOTE:
                 pending = self._start_preparation_command(
                     PumpRole.JACKET,
+                    PumpCommandKind.ENTER_REMOTE,
+                    _PreparationPhase.INJECTION_REMOTE,
+                    timing,
+                )
+                if pending is None:
+                    phase = _PreparationPhase.INJECTION_REMOTE
+                command_executed = True
+            elif phase is _PreparationPhase.INJECTION_REMOTE:
+                pending = self._start_preparation_command(
+                    PumpRole.INJECTION,
                     PumpCommandKind.ENTER_REMOTE,
                     _PreparationPhase.JACKET_PRESSURE_LIMIT,
                     timing,
@@ -593,9 +694,23 @@ class PumpControlService:
                     pending = self._start_preparation_command(
                         PumpRole.JACKET,
                         PumpCommandKind.SET_PRESSURE_LIMIT,
-                        _PreparationPhase.JACKET_FLOW,
+                        _PreparationPhase.INJECTION_PRESSURE_LIMIT,
                         timing,
                         value=plan.jacket_pressure_limit_bar,
+                    )
+                    command_executed = True
+                    if pending is None:
+                        phase = _PreparationPhase.INJECTION_PRESSURE_LIMIT
+                else:
+                    phase = _PreparationPhase.INJECTION_PRESSURE_LIMIT
+            elif phase is _PreparationPhase.INJECTION_PRESSURE_LIMIT:
+                if plan.injection_pressure_limit_bar is not None:
+                    pending = self._start_preparation_command(
+                        PumpRole.INJECTION,
+                        PumpCommandKind.SET_PRESSURE_LIMIT,
+                        _PreparationPhase.JACKET_FLOW,
+                        timing,
+                        value=plan.injection_pressure_limit_bar,
                     )
                     command_executed = True
                     if pending is None:
@@ -603,43 +718,57 @@ class PumpControlService:
                 else:
                     phase = _PreparationPhase.JACKET_FLOW
             elif phase is _PreparationPhase.JACKET_FLOW:
-                pending = self._start_preparation_command(
-                    PumpRole.JACKET,
-                    PumpCommandKind.SET_CONSTANT_FLOW,
-                    _PreparationPhase.JACKET_RUN,
-                    timing,
-                    value=plan.jacket_buildup_flow_ml_per_hour,
-                )
-                if pending is None:
-                    phase = _PreparationPhase.JACKET_RUN
-                command_executed = True
-            elif phase is _PreparationPhase.JACKET_RUN:
-                pending = self._start_preparation_command(
-                    PumpRole.JACKET,
-                    PumpCommandKind.RUN,
-                    _PreparationPhase.WAIT_JACKET_TARGET,
-                    timing,
-                )
-                if pending is None:
-                    phase = _PreparationPhase.WAIT_JACKET_TARGET
-                    phase_deadline = (
-                        monotonic() + timing.pressure_buildup_timeout_seconds
+                if jacket_pressure >= plan.jacket_target_pressure_bar:
+                    resume_after_jacket_hold = _PreparationPhase.WAIT_MARGIN
+                    phase = _PreparationPhase.JACKET_CONSTANT_PRESSURE
+                else:
+                    pending = self._start_preparation_command(
+                        PumpRole.JACKET,
+                        PumpCommandKind.SET_CONSTANT_FLOW,
+                        _PreparationPhase.JACKET_RUN,
+                        timing,
+                        value=plan.jacket_buildup_flow_ml_per_hour,
                     )
-                command_executed = True
-            elif phase is _PreparationPhase.WAIT_JACKET_TARGET:
+                    if pending is None:
+                        phase = _PreparationPhase.JACKET_RUN
+                    command_executed = True
+            elif phase is _PreparationPhase.JACKET_RUN:
+                if jacket_pressure >= plan.jacket_target_pressure_bar:
+                    resume_after_jacket_hold = _PreparationPhase.WAIT_MARGIN
+                    phase = _PreparationPhase.JACKET_CONSTANT_PRESSURE
+                else:
+                    pending = self._start_preparation_command(
+                        PumpRole.JACKET,
+                        PumpCommandKind.RUN,
+                        _PreparationPhase.WAIT_MARGIN,
+                        timing,
+                    )
+                    if pending is None:
+                        phase = _PreparationPhase.WAIT_MARGIN
+                    command_executed = True
+            elif phase is _PreparationPhase.WAIT_MARGIN:
                 if (
                     jacket_pressure >= plan.jacket_target_pressure_bar
-                    and margin >= self._minimum_margin
+                    and self._states[PumpRole.JACKET].mode
+                    is not PumpOperatingMode.CONSTANT_PRESSURE
                 ):
-                    phase = _PreparationPhase.JACKET_STOP
-                elif now >= phase_deadline:
-                    raise TimeoutError(
-                        "jacket startup target was not reached: "
-                        f"pressure {jacket_pressure:.3f}/"
-                        f"{plan.jacket_target_pressure_bar:.3f} bar, margin "
-                        f"{margin:.3f}/{self._minimum_margin:.3f} bar"
+                    resume_after_jacket_hold = _PreparationPhase.WAIT_MARGIN
+                    phase = _PreparationPhase.JACKET_TARGET_STOP
+                else:
+                    margin_ready = margin >= self._minimum_margin
+                    stable_since = (
+                        now
+                        if margin_ready and stable_since is None
+                        else stable_since
+                        if margin_ready
+                        else None
                     )
-            elif phase is _PreparationPhase.JACKET_STOP:
+                    if (
+                        stable_since is not None
+                        and now - stable_since >= plan.margin_stability_seconds
+                    ):
+                        phase = _PreparationPhase.INJECTION_FLOW
+            elif phase is _PreparationPhase.JACKET_TARGET_STOP:
                 pending = self._start_preparation_command(
                     PumpRole.JACKET,
                     PumpCommandKind.STOP,
@@ -664,111 +793,103 @@ class PumpControlService:
                 pending = self._start_preparation_command(
                     PumpRole.JACKET,
                     PumpCommandKind.RUN,
-                    _PreparationPhase.WAIT_JACKET_STABLE,
+                    resume_after_jacket_hold,
                     timing,
                 )
                 if pending is None:
-                    phase = _PreparationPhase.WAIT_JACKET_STABLE
-                    phase_deadline = (
-                        monotonic() + timing.pressure_buildup_timeout_seconds
-                    )
-                    stable_since = None
+                    phase = resume_after_jacket_hold
                 command_executed = True
-            elif phase is _PreparationPhase.WAIT_JACKET_STABLE:
-                jacket_stable = (
-                    jacket_pressure >= plan.jacket_target_pressure_bar
-                    and margin >= self._minimum_margin
-                )
-                stable_since = (
-                    now
-                    if jacket_stable and stable_since is None
-                    else stable_since
-                    if jacket_stable
-                    else None
-                )
-                if (
-                    stable_since is not None
-                    and now - stable_since >= plan.margin_stability_seconds
-                ):
-                    phase = _PreparationPhase.INJECTION_REMOTE
-                elif now >= phase_deadline:
-                    raise TimeoutError(
-                        "jacket holding pressure was not stable: "
-                        f"pressure {jacket_pressure:.3f}/"
-                        f"{plan.jacket_target_pressure_bar:.3f} bar, margin "
-                        f"{margin:.3f}/{self._minimum_margin:.3f} bar"
-                    )
-            elif phase is _PreparationPhase.INJECTION_REMOTE:
-                pending = self._start_preparation_command(
-                    PumpRole.INJECTION,
-                    PumpCommandKind.ENTER_REMOTE,
-                    _PreparationPhase.INJECTION_PRESSURE_LIMIT,
-                    timing,
-                )
-                if pending is None:
-                    phase = _PreparationPhase.INJECTION_PRESSURE_LIMIT
-                command_executed = True
-            elif phase is _PreparationPhase.INJECTION_PRESSURE_LIMIT:
-                if plan.injection_pressure_limit_bar is not None:
+            elif phase is _PreparationPhase.INJECTION_FLOW:
+                if injection_pressure >= plan.injection_start_pressure_bar:
+                    phase = _PreparationPhase.BUILD_PRESSURES
+                else:
                     pending = self._start_preparation_command(
                         PumpRole.INJECTION,
-                        PumpCommandKind.SET_PRESSURE_LIMIT,
-                        _PreparationPhase.INJECTION_FLOW,
+                        PumpCommandKind.SET_CONSTANT_FLOW,
+                        _PreparationPhase.INJECTION_RUN,
                         timing,
-                        value=plan.injection_pressure_limit_bar,
+                        value=plan.injection_startup_flow_ml_per_hour,
                     )
-                    command_executed = True
                     if pending is None:
-                        phase = _PreparationPhase.INJECTION_FLOW
-                else:
-                    phase = _PreparationPhase.INJECTION_FLOW
-            elif phase is _PreparationPhase.INJECTION_FLOW:
-                pending = self._start_preparation_command(
-                    PumpRole.INJECTION,
-                    PumpCommandKind.SET_CONSTANT_FLOW,
-                    _PreparationPhase.INJECTION_RUN,
-                    timing,
-                    value=plan.injection_startup_flow_ml_per_hour,
-                )
-                if pending is None:
-                    phase = _PreparationPhase.INJECTION_RUN
-                command_executed = True
+                        phase = _PreparationPhase.INJECTION_RUN
+                    command_executed = True
             elif phase is _PreparationPhase.INJECTION_RUN:
-                pending = self._start_preparation_command(
-                    PumpRole.INJECTION,
-                    PumpCommandKind.RUN,
-                    _PreparationPhase.WAIT_INJECTION_TARGET,
-                    timing,
-                )
-                if pending is None:
-                    phase = _PreparationPhase.WAIT_INJECTION_TARGET
-                    phase_deadline = (
-                        monotonic() + timing.pressure_buildup_timeout_seconds
-                    )
-                command_executed = True
-            elif phase is _PreparationPhase.WAIT_INJECTION_TARGET:
                 if injection_pressure >= plan.injection_start_pressure_bar:
-                    phase = _PreparationPhase.INJECTION_STOP
-                elif now >= phase_deadline:
-                    raise TimeoutError(
-                        "injection startup target was not reached: "
-                        f"pressure {injection_pressure:.3f}/"
-                        f"{plan.injection_start_pressure_bar:.3f} bar"
+                    phase = _PreparationPhase.BUILD_PRESSURES
+                else:
+                    pending = self._start_preparation_command(
+                        PumpRole.INJECTION,
+                        PumpCommandKind.RUN,
+                        _PreparationPhase.BUILD_PRESSURES,
+                        timing,
                     )
-            elif phase is _PreparationPhase.INJECTION_STOP:
+                    if pending is None:
+                        phase = _PreparationPhase.BUILD_PRESSURES
+                    command_executed = True
+            elif phase is _PreparationPhase.INJECTION_MARGIN_STOP:
                 pending = self._start_preparation_command(
                     PumpRole.INJECTION,
                     PumpCommandKind.STOP,
-                    _PreparationPhase.VERIFY_STOPPED,
+                    _PreparationPhase.WAIT_MARGIN_RECOVERY,
                     timing,
                 )
                 if pending is None:
-                    phase = _PreparationPhase.VERIFY_STOPPED
+                    phase = _PreparationPhase.WAIT_MARGIN_RECOVERY
                 command_executed = True
-            else:
-                # VERIFY_STOPPED is reached only in a fresh, safety-checked
-                # cycle after the STOP acknowledgement.
-                return
+            elif phase is _PreparationPhase.WAIT_MARGIN_RECOVERY:
+                if injection_pressure >= plan.injection_start_pressure_bar:
+                    phase = _PreparationPhase.BUILD_PRESSURES
+                elif margin >= (
+                    self._minimum_margin + margin_recovery_hysteresis_bar
+                ):
+                    phase = _PreparationPhase.INJECTION_RUN
+            elif phase is _PreparationPhase.INJECTION_TARGET_STOP:
+                pending = self._start_preparation_command(
+                    PumpRole.INJECTION,
+                    PumpCommandKind.STOP,
+                    _PreparationPhase.VERIFY_TARGETS,
+                    timing,
+                )
+                if pending is None:
+                    phase = _PreparationPhase.VERIFY_TARGETS
+                command_executed = True
+            elif phase in {
+                _PreparationPhase.BUILD_PRESSURES,
+                _PreparationPhase.VERIFY_TARGETS,
+            }:
+                jacket_state = self._states[PumpRole.JACKET]
+                injection_state = self._states[PumpRole.INJECTION]
+                jacket_at_target = (
+                    jacket_pressure >= plan.jacket_target_pressure_bar
+                )
+                injection_at_target = (
+                    injection_pressure >= plan.injection_start_pressure_bar
+                )
+                jacket_holding = (
+                    jacket_state.mode is PumpOperatingMode.CONSTANT_PRESSURE
+                    and jacket_state.running
+                )
+                if margin < self._minimum_margin and injection_state.running:
+                    phase = _PreparationPhase.INJECTION_MARGIN_STOP
+                elif injection_at_target and injection_state.running:
+                    phase = _PreparationPhase.INJECTION_TARGET_STOP
+                elif jacket_at_target and not jacket_holding:
+                    resume_after_jacket_hold = _PreparationPhase.BUILD_PRESSURES
+                    phase = _PreparationPhase.JACKET_TARGET_STOP
+                elif (
+                    not injection_at_target
+                    and not injection_state.running
+                    and margin >= self._minimum_margin
+                ):
+                    phase = _PreparationPhase.INJECTION_RUN
+                elif (
+                    jacket_at_target
+                    and injection_at_target
+                    and margin >= self._minimum_margin
+                    and jacket_holding
+                    and not injection_state.running
+                ):
+                    return
 
             if command_executed:
                 next_control = self._wait_after_preparation_command(
@@ -832,7 +953,7 @@ class PumpControlService:
             return _PendingPreparationCommand(role, command_id, command, next_phase)
 
         if kind is PumpCommandKind.ENTER_REMOTE:
-            self.ensure_remote(role)
+            self._execute_remote_write(role, lambda: None)
         elif kind is PumpCommandKind.SET_PRESSURE_LIMIT:
             assert value is not None
             self.set_pressure_limit(role, value)
@@ -869,6 +990,57 @@ class PumpControlService:
             setter = getattr(pump, "set_preparation_active", None)
             if callable(setter):
                 setter(active)
+
+    def _preparation_progress(
+        self,
+        phase: _PreparationPhase,
+        plan: PumpStartupPlan,
+        jacket_pressure: float,
+        injection_pressure: float,
+        jacket_quality: DataQuality,
+        injection_quality: DataQuality,
+        pending: _PendingPreparationCommand | None,
+    ) -> PumpPreparationProgress:
+        def state_text(role: PumpRole) -> str:
+            pump = self._pumps[role]
+            telemetry_reader = getattr(pump, "read_telemetry", None)
+            if callable(telemetry_reader):
+                text = getattr(telemetry_reader(), "operating_status_text", None)
+                if text:
+                    return str(text)
+            state = self._states[role]
+            mode = "REMOTE" if state.remote else "LOCAL/UNKNOWN"
+            motion = "RUN" if state.running else "STOP"
+            return f"{motion} {mode}"
+
+        def pressure_age(role: PumpRole) -> float | None:
+            telemetry_reader = getattr(self._pumps[role], "read_telemetry", None)
+            if not callable(telemetry_reader):
+                return None
+            telemetry = telemetry_reader()
+            age = getattr(getattr(telemetry, "pressure", None), "age_seconds", None)
+            return float(age) if age is not None else None
+
+        return PumpPreparationProgress(
+            phase=phase.value,
+            jacket_pressure_bar=jacket_pressure,
+            jacket_target_pressure_bar=plan.jacket_target_pressure_bar,
+            injection_pressure_bar=injection_pressure,
+            injection_target_pressure_bar=plan.injection_start_pressure_bar,
+            pressure_margin_bar=jacket_pressure - injection_pressure,
+            minimum_margin_bar=self._minimum_margin,
+            jacket_state=state_text(PumpRole.JACKET),
+            injection_state=state_text(PumpRole.INJECTION),
+            jacket_quality=jacket_quality,
+            injection_quality=injection_quality,
+            jacket_age_seconds=pressure_age(PumpRole.JACKET),
+            injection_age_seconds=pressure_age(PumpRole.INJECTION),
+            pending_command=(
+                None
+                if pending is None
+                else f"{pending.role.value}: {pending.command.kind.value}"
+            ),
+        )
 
     def _validate_preparation_command(
         self,
@@ -952,7 +1124,6 @@ class PumpControlService:
             plan.jacket_buildup_flow_ml_per_hour,
             plan.injection_start_pressure_bar,
             plan.injection_startup_flow_ml_per_hour,
-            timing.pressure_buildup_timeout_seconds,
             timing.control_interval_seconds,
             timing.execution_timeout_seconds,
             timing.queue_timeout_seconds,
@@ -990,17 +1161,20 @@ class PumpControlService:
     def set_pressure_limit(self, role: PumpRole, pressure_bar: float) -> None:
         self._require_authorized()
         self._require_connected(role)
-        self.ensure_remote(role)
-        state = self._states[role]
-        if not state.remote or state.running:
-            raise RuntimeError(
-                "pump must be stopped in REMOTE mode before setting pressure limit"
-            )
         if not isfinite(pressure_bar) or pressure_bar <= 0.0:
             raise ValueError("pump pressure limit must be positive and finite")
+
+        def operation() -> None:
+            state = self._states[role]
+            if not state.remote or state.running:
+                raise RuntimeError(
+                    "pump must be stopped in REMOTE mode before setting pressure limit"
+                )
+            self._pumps[role].set_pressure_limit(pressure_bar)
+
         self._execute_remote_write(
             role,
-            lambda: self._pumps[role].set_pressure_limit(pressure_bar),
+            operation,
         )
         self._log(
             role.value,
@@ -1088,8 +1262,6 @@ class PumpControlService:
             or verification_tolerance_ml_per_hour < 0.0
         ):
             raise ValueError("flow verification tolerance must be finite and nonnegative")
-        self.ensure_remote(PumpRole.INJECTION)
-
         self.stop(PumpRole.INJECTION)
         pump = self._pumps[PumpRole.INJECTION]
         self._execute_remote_write(
@@ -1130,9 +1302,16 @@ class PumpControlService:
     def stop(self, role: PumpRole) -> None:
         self._require_authorized()
         self._require_connected(role)
-        if self._is_stopped_local(role):
-            self._states[role] = PumpPreparationState()
-            self._log(role.value, "STOP skipped: pump is already STOP LOCAL")
+        if self._is_stopped(role):
+            state = self._states[role]
+            self._states[role] = PumpPreparationState(
+                remote=state.remote,
+                configured=state.configured,
+                running=False,
+                mode=state.mode,
+                target=state.target,
+            )
+            self._log(role.value, "STOP skipped: pump is already stopped")
             return
         self._execute_remote_write(role, self._pumps[role].request_stop)
         state = self._states[role]
@@ -1308,6 +1487,12 @@ class PumpControlService:
         checker = getattr(self._pumps[role], "is_stopped_local", None)
         return bool(checker()) if callable(checker) else False
 
+    def _is_stopped(self, role: PumpRole) -> bool:
+        checker = getattr(self._pumps[role], "is_stopped", None)
+        if callable(checker):
+            return bool(checker())
+        return not self._states[role].running
+
     def _is_remote_mode(self, role: PumpRole) -> bool:
         checker = getattr(self._pumps[role], "is_remote_mode", None)
         if callable(checker):
@@ -1317,10 +1502,13 @@ class PumpControlService:
     def clear(self, role: PumpRole) -> None:
         self._require_authorized()
         self._require_connected(role)
-        self.ensure_remote(role)
-        if self._states[role].running:
-            raise RuntimeError("pump must be stopped before CLEAR")
-        self._execute_remote_write(role, self._pumps[role].clear)
+
+        def operation() -> None:
+            if self._states[role].running:
+                raise RuntimeError("pump must be stopped before CLEAR")
+            self._pumps[role].clear()
+
+        self._execute_remote_write(role, operation)
         self._states[role] = PumpPreparationState(remote=True)
         self._log(role.value, "CLEAR", level="WARNING")
 

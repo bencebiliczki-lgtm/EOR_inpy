@@ -157,12 +157,11 @@ class IscoPump:
     def set_constant_flow(self, flow_ml_per_hour: float) -> None:
         self._require_connected()
         value = self._format_nonnegative(flow_ml_per_hour, "flow")
-        self._client.command(f"{self._channel_command('UNITS')}=ML/HR")
-        # Unitless FLOW/SETFLOW responses must be interpreted according to the
-        # unit that was successfully programmed into the pump.  Keeping the
-        # original ML/MIN fallback here caused a second, erroneous x60
-        # conversion (20 ml/h was reported as 1200 ml/h).
-        self._flow_unit = "ML/HR"
+        if self._flow_unit != "ML/HR":
+            self._client.command(f"{self._channel_command('UNITS')}=ML/HR")
+            # Unitless FLOW/SETFLOW responses must be interpreted according to
+            # the unit that was successfully programmed into the pump.
+            self._flow_unit = "ML/HR"
         self._client.command(self._channel_command("CONST FLOW", suffix_a=False))
         self._client.command(
             f"{self._channel_command('FLOW', suffix_a=False)}={value}"

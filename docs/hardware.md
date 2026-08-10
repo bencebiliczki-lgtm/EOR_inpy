@@ -30,11 +30,10 @@ A `isco.py` adapter `RSVP` és `IDENTIFY` segítségével ellenőrzi a kapcsolat
 
 A kapcsolat létrehozása önmagában nem küld `REMOTE` vagy motorindító parancsot.
 A kezelő által megerősített hardvermód-aktiválás a sikeres csatlakozás után
-ellenőrzi minden engedélyezett pumpa cache-elt STATUS válaszát. Explicit Remote
-állapotnál nem küld újabb parancsot; Local vagy nem egyértelmű állapotnál `REMOTE`
-parancsot küld, majd célzott STATUS-visszaolvasást követel. Csak az igazolt Remote
-állapot után jelzi sikeresnek az aktiválást. A `REMOTE` parancs nem indítja el a
-pumpamotorokat.
+csak megfigyeli az engedélyezett pumpák létrejött kapcsolatát és telemetriáját;
+nem vált üzemmódot. A Remote ellenőrzés az első távoli író művelet egységes
+kapujában történik. Szükség esetén ott indul a `REMOTE` parancs és a célzott
+STATUS-visszaolvasás. A `REMOTE` parancs nem indítja el a pumpamotorokat.
 A tényleges használathoz konfigurálni kell a COM-portot, a 0–9 egységazonosítót,
 az A–D pumpacsatornát, a baud rate-et és az aktuális pumpamértékegységeket.
 Az ismert célgépen a `COM1`, `COM2` és `COM4` lehet fizikai pumpaport. A `COM3`

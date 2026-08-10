@@ -48,6 +48,7 @@ class PumpCommand:
     verify_status: bool = False
     queue_timeout_seconds: float = 5.0
     verification_timeout_seconds: float = 5.0
+    reason: str | None = None
 
     def __post_init__(self) -> None:
         if (

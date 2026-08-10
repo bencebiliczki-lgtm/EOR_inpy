@@ -36,7 +36,7 @@ runtime indul el.
 |---|---|
 | `DashboardWindow` | Kezelői gombok, előellenőrzés, előkészítési terv, állapotkijelzés |
 | `DeviceControlService` | Alkalmazás- és mérési állapotgép, hardverengedély, globális safe-state |
-| `PumpControlService` | A KÖP/BES parancssorrendje, RUN-kapuk, előkészítés, STOP/rollback |
+| `PumpControlService` | A KÖP/BES parancssorrendje, RUN-kapuk és előkészítés |
 | `PollingPump` | Egyetlen időzített telemetria-cache pumpánként, soros hozzáférés kizárása |
 | `IscoPump` | DASNET-parancsok, csatornák, egységek és válaszok feldolgozása |
 | `SafetyMonitor` | Nyomás-, adatminőségi, kapcsolat-, túllövési és deadline-reteszek |
@@ -47,7 +47,8 @@ az alkalmazási és pumpavezérlési szolgáltatáson keresztül fut.
 Az UI és a pumpaszolgáltatás ugyanazt a `PumpStartupPlan` adatmodellt
 használja. A szolgáltatás egyetlen `prepare_measurement_pumps` belépési pontja
 végzi a validálást, a friss olvasási kaput, a KÖP-felfutást, a BES-indítást,
-a célértékek stabilizálását és a hibánál kötelező rollbacket. A korábbi
+a célértékek stabilizálását; hibánál a `DeviceControlService` egyetlen központi
+safe-state útvonala végzi a leállítást. A korábbi
 sokparaméteres `start_measurement_pumps` csak kompatibilitási adapter.
 
 ## Állapotgép
@@ -102,7 +103,7 @@ Alapértékek:
 | `PRESS` | 0,5 s | 6 s |
 | `FLOW` | lassú körforgás | 33 s |
 | `VOLA`/`VOL` | lassú körforgás | 33 s |
-| `STATUS` | elsőbbségi biztonsági polling | 8 s |
+| `STATUS` | 3 s | 8 s |
 | Kezdő telemetria | — | 8 s timeout |
 
 A `PRESS` kapja a legmagasabb telemetria-prioritást, utána az önálló `STATUS`,
@@ -121,7 +122,7 @@ egymást:
 
 | Időzítés | Alapérték | Mit csinál? |
 |---|---:|---|
-| Pumpa soros polling | 0,5 s ütemezési szünet | Elsőbbségi `PRESS`/`STATUS`, majd körforgásos `FLOW`/`VOLA` DASNET-kéréseket ad ki |
+| Pumpa soros polling | `PRESS` 0,5 s; `STATUS` 3 s; lassú telemetria 0,5 s | Elsőbbségi `PRESS`/`STATUS`, majd körforgásos `FLOW`/`VOLA` DASNET-kéréseket ad ki |
 | Vezérlési ciklus | 0,2 s | A pumpacache-t és az NI-adatokat biztonságilag kiértékeli; méréskor PID-et futtat |
 | READY/ELŐKÉSZÍTVE dashboard | 1,0 s | A cache és az NI-adatok alapján frissíti a kijelzést; nem ad ki új pumpalekérdezést |
 | Adatrögzítés | 1,0 s | Az esedékes vezérlési ciklus eredményét tartósan elmenti |
@@ -131,17 +132,17 @@ Példa: 0,5 s-os pumpapolling és 0,2 s-os vezérlési ciklus mellett a PID
 legutóbb cache-elt pumpanyomást is láthatja. Ez szándékos: a PID nem indít
 saját blokkoló soros olvasást.
 
-### Egy 0,5 s-os pollingperiódus példája
+### Külön PRESS- és STATUS-periódus példája
 
-A mezők nem önálló, párhuzamos 0,5 s-os periódusok. Ideális, azonnali válasz
-esetén egy pumpa lehetséges üteme:
+A mezők nem egyetlen közös periódust használnak. Ideális, azonnali válasz esetén
+egy pumpa lehetséges üteme:
 
 ```text
 t = 0,000 s   FLOW
 t = 0,500 s   PRESS
-t = 1,000 s   STATUS
+t = 1,000 s   VOLA
 t = 1,500 s   PRESS
-t = 2,000 s   VOLA
+t = 2,000 s   FLOW
 t = 2,500 s   PRESS
 t = 3,000 s   STATUS
 ```
@@ -192,6 +193,8 @@ felzárkózó `PRESS`-csomagot, hanem a befejezéstől újraütemez.
 ### Melyik beállítás mit változtat?
 
 - `developer/pump_pressure_poll_seconds`: csak a `PRESS` soros periódusát;
+- `developer/pump_status_poll_seconds`: a `STATUS` külön, alapértelmezetten
+  3 s-os periódusát;
 - `developer/pump_slow_poll_seconds`: a telemetria-tranzakciók közötti névleges
   szünetet; a biztonságkritikus `PRESS/STATUS` elsőbbséget kap, a fennmaradó
   kapacitásban a worker `FLOW → VOLA` körforgást használ;
@@ -229,66 +232,66 @@ szünetel, majd a worker újraértékeli a biztonsági telemetria esedékesség�
 Az előkészítés előtt mindkét pumpa teljes cache-elt állapotának
 rendelkezésre kell állnia. Ezután a sorrend:
 
-### 1. KÖP nyomásfelépítés
+### 1. Közös előkészítés és KÖP-indítás
 
 ```text
-REMOTE
-MAXPRESS = KÖP hardveres nyomáshatár
-UNITS = ML/HR
+KÖP REMOTE
+BES REMOTE
+KÖP MAXPRESS
+BES MAXPRESS
 CONST FLOW
 FLOW = KÖP előkészítési flow
-RUN
+KÖP RUN
 ```
 
-A BES pumpa ekkor még nem kap konfigurációs vagy `RUN` parancsot. A rendszer
-megvárja a KÖP saját célnyomását és azt, hogy a `KÖP nyomás − BES nyomás`
-legalább a konfigurált minimum, alapértelmezetten 20 bar legyen. Ezután külön
-állapotátmenetekben fut a `KÖP STOP → CONST PRESS → PRESS → RUN` sorrend. A
-KÖP nyomástartásának a megadott stabilitási ideig fenn kell maradnia; csak
-ezután kezdődhet a BES konfigurálása.
+A rendszer minden parancs sikeres eredményét megvárja. A BES ekkor még nem kap
+flow- vagy `RUN` parancsot. Amint a `KÖP nyomás − BES nyomás` eléri a
+konfigurált minimumot, alapértelmezetten 20 bart, megkezdődhet a BES indítása;
+ehhez a köpenynek nem kell előbb elérnie a saját végső célját.
 
 ### 2. BES nyomásfelépítés
 
 ```text
 REMOTE
 MAXPRESS = BES hardveres nyomáshatár
-UNITS = ML/HR
 CONST FLOW
 FLOW = BES előkészítési flow
 RUN
 ```
 
-A konfigurált különbség a BES `RUN` előtti indítási kapu. A BES indulása után
-a rendszer nem próbálja folyamatosan fenntartani ezt a követési különbséget;
-a KÖP a kezelő által megadott fix célnyomást tartja.
-
-A kaput a rendszer három ponton biztosítja:
-
-1. a KÖP felfutása addig nem fejeződik be, amíg nincs meg a saját célja és a
-   konfigurált vagy annál nagyobb különbség;
-2. a BES konfigurálása csak a stabil KÖP nyomástartás után kezdődhet;
-3. közvetlenül a BES `RUN` előtt ismét ellenőrzi azt.
-
-Ha a különbség a BES konfigurálása alatt visszaesik a konfigurált minimum alá, a BES nem
-indul el, az előkészítés hibával megszakad, és mindkét pumpa STOP-ot kap.
+A BES `RUN` után mindkét pumpa párhuzamosan halad a saját célja felé. A
+nyomáskülönbség minden cache-alapú felügyeleti ciklusban aktív interlock. Ha a
+minimum alá esik, a BES STOP-ot kap, miközben a köpeny tovább épít vagy tart.
+A BES csak a minimum + 1 bar hiszterézis elérése után indul újra.
 
 Az állapotgép parancsonként külön aszinkron állapotot használ:
 
 ```text
-KÖP cél elérve
-→ KÖP STOP queue → STOPPING, közben safety ciklusok
-→ igazolt STOP → CONST PRESS/PRESS queue
-→ igazolt konfiguráció → KÖP RUN queue
-→ STATUS által igazolt RUN → stabil nyomástartás
-→ BES REMOTE/konfiguráció, eredményenként külön állapot
-→ STATUS által igazolt BES RUN → célérték figyelése
-→ BES STOP queue → STATUS által igazolt STOP → záró safety ciklus
+mindkét REMOTE → mindkét MAXPRESS → KÖP FLOW/RUN
+→ megfelelő margin → BES FLOW/RUN
+→ párhuzamos célkövetés
+→ KÖP cél: STOP/CONST PRESS/RUN
+→ BES cél: STOP
+→ mindkét friss cél + biztonságos margin → siker
 ```
 
-Amikor a BES első alkalommal eléri vagy meghaladja a kezdőnyomást, azonnal
-`STOP` parancsot kap. A stabilitási idő alatt is STOP állapotban marad, tehát az
-előkészítési flow nem növeli tovább a nyomást. Sikeres befejezéskor a rendszer
-`WAITING_CONFIRMATION`, a felületen **ELŐKÉSZÍTVE** állapotba kerül.
+Amikor a BES eléri vagy meghaladja a kezdőnyomást, STOP parancsot kap. Ha a
+köpeny céljának elérése előtt visszaesik, biztonságos margin mellett újraindulhat.
+Sikeres befejezéshez mindkét aktuális nyomásnak el kell érnie saját célját,
+mindkét nyomásminőségnek `GOOD`-nak és a marginnak biztonságosnak kell lennie.
+Ekkor a rendszer `WAITING_CONFIRMATION`, a felületen **ELŐKÉSZÍTVE** állapotba
+kerül.
+
+A célnyomások várakozásának nincs hard, soft vagy figyelmeztetési timeoutja.
+Csak célteljesülés, safety/kommunikációs hiba vagy explicit kezelői megszakítás
+zárhatja le. A konkrét soros, queue-, execution- és verification-timeoutok
+változatlanul megmaradnak.
+
+Az előkészítési állapotablak folyamatosan megjeleníti a fázist, a két aktuális és
+cél-nyomást, a margin aktuális/minimum értékét, a pumpák RUN/STOP és
+REMOTE/LOCAL állapotát, a nyomástelemetria minőségét és korát, valamint az
+esetleges függő parancsot. Hátralévő időt nem mutat. A kezelő külön
+**Előkészítés megszakítása** gombbal kérhet biztonsági leállítást.
 
 ## Vezérlési ciklus az előkészítés alatt
 
@@ -327,10 +330,13 @@ REMOTE ellenőrzés csak explicit Remote állapotot fogad el, például
 `STOP REMOTE`; a puszta `STATUS=STOP/RUN`, a `LOCAL` és a problémajelzés nem
 elegendő. Sikertelen váltáskor az előkészítés a pumpaszerepet megnevező hibával
 áll le, és nem folytatja a `MAXPRESS → CONST_FLOW → RUN` sorozatot. Minden
-parancs egyedi azonosítóval naplózza a queue-várakozást, teljes tranzakcióidőt,
-végrehajtási időt, ellenőrzési időt és eredményt. A timeout megnevezi a fázist,
+parancs egyedi azonosítóval naplózza a parancstípust, prioritást,
+queue-várakozást, teljes tranzakcióidőt, végrehajtási időt, ellenőrzési időt,
+recovery-okot és eredményt. A timeout megnevezi a fázist,
 például `injection command execution timeout: STOP`; nem jelenhet meg
 control-cycle deadline-ként.
+A célzott STATUS-visszaellenőrzés után a következő periodikus STATUS határideje
+egy teljes `status_poll_seconds` időközzel későbbre kerül.
 
 A `STOP LOCAL` és `RUN LOCAL` érvényes STATUS parsereredmény, ezért adatminősége
 `GOOD`. A Local mód nem szenzorhiba, hanem érvényes, távolról nem vezérelhető
@@ -341,12 +347,14 @@ cache szerint már `STOP LOCAL` pumpa
 nem kap újabb STOP-ot; a többi pumpa és a szelep biztonsági művelete ettől még
 függetlenül lefut.
 
-Aktív mérési vezérlés alatt a periodikus STATUS polling egyben Remote-mód
-felügyeletet is végez. Ha `LOCAL` állapotot talál, magas prioritású `REMOTE`
+A Remote-felügyelet csak a teljes pumpa-előkészítés sikeres lezárása után indul.
+Három egymást követő periodikus `LOCAL` STATUS után magas prioritású `REMOTE`
 parancsot tesz a worker parancssorába, és célzott STATUS-visszaolvasással
-ellenőrzi a helyreállítást. Ez a felügyelet csak az aktív vezérlési időszakban
-engedélyezett. A dashboard és az üresjárati telemetria kizárólag olvas: Local
-állapotban sem küld `REMOTE` vagy más vezérlőparancsot.
+ellenőrzi a helyreállítást. Egy vagy két átmeneti Local minta ezért nem okoz
+recoveryt. Sikeres helyreállítás után a következő periodikus STATUS egy teljes,
+alapértelmezetten 3 másodperces intervallummal későbbre kerül. A dashboard és az
+üresjárati telemetria kizárólag olvas: Local állapotban sem küld `REMOTE` vagy
+más vezérlőparancsot.
 
 A vezérlési ciklus és a pumpa polling nem ugyanaz:
 
@@ -365,7 +373,6 @@ A külön, explicit futás közbeni BES-flow módosítás sorrendje:
 
 ```text
 BES STOP
-→ UNITS = ML/HR
 → CONST FLOW
 → FLOW = mérési flow
 → SETFLOW visszaolvasás
@@ -379,8 +386,9 @@ parancsot, és a rendszer kritikus hibaként kezeli az eltérést.
 ## Mértékegységek és pontosság
 
 Az alkalmazás teljes pumpavezérlési útvonala **ml/h** egységben dolgozik.
-Flow-beállítás előtt az adapter explicit `ML/HR` egységet programoz a pumpába,
-majd változtatás nélkül ugyanazt a számértéket küldi ki. Például:
+Az adapter csak akkor küld `UNITS=ML/HR` parancsot, ha a nyilvántartott aktuális
+egység még nem `ML/HR`; azonos egységnél a redundáns tranzakció kimarad. Ezután
+változtatás nélkül ugyanazt a számértéket küldi ki. Például:
 
 ```text
 kezelői cél: 20 ml/h
@@ -417,7 +425,8 @@ határával.
 ## Hibakezelés és leállítás
 
 Előkészítési timeout, telemetriahiba, nyomáshatár, deadline-túllépés vagy
-más biztonsági ok esetén a szolgáltatás rollbacket hajt végre:
+más biztonsági ok esetén egyetlen safe-state tulajdonos, a
+`DeviceControlService` hajtja végre a leállítást:
 
 1. KÖP STOP megkísérlése;
 2. BES STOP megkísérlése;
@@ -427,8 +436,9 @@ más biztonsági ok esetén a szolgáltatás rollbacket hajt végre:
 
 A két STOP egymástól függetlenül megkísérlésre kerül, tehát az egyik
 pumpa kommunikációs hibája nem akadályozhatja meg a másik STOP-ját. A STOP
-parancs szoftveresen reteszelt, hogy hibás vagy LOCAL válasz esetén ne alakuljon
-ki végtelen STOP/parancsválasz hurok. A hiba csak biztonságos friss ellenőrzés
+parancs szoftveresen reteszelt. Az egymással versenyző hibaútvonalak ugyanazt a
+STOP-parancsazonosítót kapják vissza, ezért nem küldenek ismételt fizikai STOP-ot.
+A hiba csak biztonságos friss ellenőrzés
 és kezelői nyugtázás után oldható fel.
 
 Normál **Mérés leállítása** esetén a runtime leáll, az aktuális adatszakasz
@@ -449,6 +459,7 @@ fenntartott hardverkapcsolat `READY` állapotban megmarad.
 | `pump_startup/margin_stability_seconds` | Stabilitási idő |
 | `developer/pump_pressure_poll_seconds` | Nyomáspolling |
 | `developer/pump_slow_poll_seconds` | Telemetria-tranzakciók névleges szünete |
+| `developer/pump_status_poll_seconds` | Külön STATUS-polling, alapérték 3 s |
 | `developer/pump_pressure_stale_seconds` | Nyomás STALE-határ |
 | `developer/pump_slow_stale_seconds` | FLOW/VOLA STALE-határa |
 | `developer/pump_status_stale_seconds` | STATUS STALE-határa |

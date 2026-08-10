@@ -281,9 +281,10 @@ tüskeszűrő is átengedi, de a nyers biztonsági ág már az első burstben ak
 
 A fizikai ISCO pumpák blokkoló DASNET-forgalma nem a vezérlési szálon fut. A
 `PollingPump` pumpánként külön worker szálon frissít időbélyegzett cache-t: a
-`PRESS` alapértelmezetten 0,5 másodpercenként, a `FLOW`, `VOLA` és `STATUS`
-szintén 0,5 másodperces, egymáshoz képest eltolt periódussal kerül
-lekérdezésre. A konfigurált ütemen kívüli extra `PRESS` tranzakció nincs. A gyors mérés–biztonság–PID
+`PRESS` alapértelmezetten 0,5 másodpercenként, a `STATUS` külön, ritkább
+3 másodperces periódussal, a `FLOW` és `VOLA` pedig a fennmaradó kapacitásban
+körforgással kerül lekérdezésre. A konfigurált ütemen kívüli extra `PRESS`
+tranzakció nincs. A gyors mérés–biztonság–PID
 ciklus kizárólag ezt a cache-t olvassa. Az első teljes adatkészletre csak a
 kapcsolatfelépítés vár; a `RSVP` és `IDENTIFY` kizárólag a pumpa `connect()`
 életciklusában fut. Kommunikációs hiba után a worker nem próbál automatikus
@@ -291,7 +292,7 @@ kapcsolatfelépítés vár; a `RSVP` és `IDENTIFY` kizárólag a pumpa `connect
 valamint a konfigurált soros timeout/próbálkozási keret és két pollingperiódus
 összege; az alapérték ezért 6 másodperc. Egy DASNET-próbálkozáson belül a
 töredékes válasz olvasása összesen csak egy soros timeoutablakot használhat.
-A lassú telemetria határa 3 másodperc. A cache kommunikációs
+A lassú telemetria határa 33 másodperc. A cache kommunikációs
 hibánál `DISCONNECTED`, a határidőn túl frissítetlen adatnál `STALE` minőséget
 kap, és mindkettő a meglévő biztonsági reteszt aktiválja.
 A REMOTE, konfigurációs és RUN műveletek elsőbbséget kapnak a soros vonalon,
@@ -503,24 +504,26 @@ tovább. Az explicit indítási parancsnál a DASNET adapter előbb `ML/HR` egys
 A visszaolvasás a pumpa által ténylegesen visszaadott `ML/MIN` vagy `ML/HR`
 egységet felismeri, és a megjelenítéshez egységesen `ml/h` értéket állít elő.
 
-A háttérszálon futó köpenysorrend `REMOTE → CONST FLOW → RUN`; a megadott
-cél-nyomás elérésekor `STOP → CONST PRESS → RUN` váltás következik. Így a pumpa a
-felfutás után a kezelő által megadott nyomást tartja.
-A köpenynyomás felépülése alatt a minimális különbség átmenetileg nem hibafeltétel,
-mert ekkor a besajtolópumpa még tiltott; minden más biztonsági ellenőrzés aktív.
-A program előbb megvárja a köpenypumpa saját célértékét és a szükséges
-köpenynyomás-többletet. Ezután `STOP → CONST PRESS → RUN` sorrenddel a kezelő
-fix nyomáscéljára vált, és kivárja a stabil nyomástartást. A besajtolópumpa csak
-ezután konfigurálható és indítható. A besajtoló `RUN` után a különbség már nem
-reteszelési feltétel: a második előkészítési szakasz a BES kezdőnyomását várja.
-A mérési
-runtime sem próbál 20 bar-os követési különbséget fenntartani. A két cél
-elérésekor a BES pumpa azonnal leáll, és a stabilitási ablak alatt is STOP
-állapotban marad. Az előkészítés ezután `WAITING_CONFIRMATION` állapotban
-vár; a PID- és adatrögzítési runtime csak a külön **Mérés indítása**
-gomb megnyomásakor indul. Bármelyik felfutás 120
-másodperces timeoutja, megszakítása vagy más biztonsági oka mindkét pumpát
-leállítja, és a runtime nem indul.
+Az állapotgép előbb mindkét pumpán végrehajtja és megvárja a `REMOTE`, majd a
+`MAXPRESS` műveletet. Ezután a köpenypumpa `CONST FLOW → RUN` sorrendben építi a
+nyomást. Amint a stabil minimális köpeny–BES különbség teljesül, a BES is
+`CONST FLOW → RUN` állapotba kerül, akkor is, ha a köpeny még nem érte el saját
+végső célját. Ettől kezdve a két pumpa párhuzamosan halad.
+
+A köpeny a saját célján `STOP → CONST PRESS → RUN` sorrenddel nyomástartásra
+vált, a BES a saját célján STOP állapotba kerül. Ha a különbség a BES futása
+közben a minimum alá esik, a BES azonnal leáll; a köpeny tovább épít vagy tart.
+A BES csak a minimum fölötti 1 bar-os újraindítási hiszterézis elérése után kap
+újabb RUN parancsot. Az előkészítés kizárólag akkor zárul le, ha mindkét aktuális
+nyomás eléri a saját célját, a különbség biztonságos, a nyomásadatok `GOOD`
+minőségűek, a köpeny nyomástartásban van és a BES áll.
+
+A célnyomás elérésének nincs időkorlátja. A várakozást csak célfeltétel,
+biztonsági vagy kommunikációs hiba, illetve explicit kezelői megszakítás zárhatja
+le. A queue-, parancsvégrehajtási, visszaellenőrzési és soros timeoutok továbbra
+is változatlanul érvényesek. Siker után az állapotgép `WAITING_CONFIRMATION`
+állapotban vár; a PID- és adatrögzítési runtime csak a külön **Mérés indítása**
+gomb megnyomásakor indul.
 
 Az automatikus előkészítés nem kötelező indítási út. Ha a kezelő manuálisan
 állította be a pumpákat, READY állapotban közvetlenül megnyomhatja a **Mérés
@@ -530,11 +533,9 @@ előreléptetve ugyanazt a szelep-PID- és adatrögzítési runtime-ot indítja.
 `PumpControlService.prepare_measurement_pumps` ezen az ágon nem fut le, és a
 pumpák nem kapnak `STOP`, `FLOW`, `PRESS` vagy `RUN` parancsot.
 
-A BES automatikus előkészítése háromszoros indítási kaput használ: a stabil
-KÖP-cél és nyomástartás eléréséig semmilyen BES-konfiguráció nem indul, majd a
-BES konfigurálása alatt és közvetlenül a BES `RUN` előtt is újraolvassa a
-cache-elt KÖP–BES különbséget. Ez az automatikus kapu nem kapcsolható ki a manuális
-pumpavezérlés eltérő szabályával.
+A BES automatikus előkészítése a cache-elt KÖP–BES különbséget az első RUN előtt
+és utána minden felügyeleti ciklusban ellenőrzi. Ez az automatikus kapu nem
+kapcsolható ki a manuális pumpavezérlés eltérő szabályával.
 
 Az előkészítés explicit, aszinkron állapotgép. A `STOP`, konfiguráció és `RUN`
 `PumpCommand` objektumként kerül a megfelelő pumpa prioritásos queue-jába; a
@@ -554,10 +555,13 @@ Az időköz a tranzakció befejezésétől számítódik,
 vezérlőparancs alatt normál telemetria-tranzakció nem indul.
 A vezérlési watchdog csak a cache-/NI-kiértékelést méri. A queue-várakozás,
 parancsvégrehajtás és célzott STATUS-visszaellenőrzés három külön időkeretet kap;
-a queue alapértéke átmenetileg 5 másodperc. Az állapotátmenetnek és a teljes
-nyomásfelépítésnek szintén külön időkorlátja van. A rollback mindkét STOP-ot előbb queue-ba helyezi, majd
-egymástól
-függetlenül megkísérli. A cache szerint már `STOP LOCAL` pumpán a STOP-ot kihagyja,
+a célzott ellenőrzés a következő periodikus STATUS-t egy teljes STATUS-intervallummal
+kitolja;
+a queue alapértéke átmenetileg 5 másodperc. Az állapotátmeneti parancsoknak külön
+időkorlátjuk van, a célnyomás elérésének azonban nincs. A safe-state egyetlen tulajdonosa
+a `DeviceControlService`; a STOP-retesz miatt az egymással versenyző hibaútvonalak
+ugyanazt a STOP-parancsot használják. A cache szerint már álló `STOP LOCAL` vagy
+`STOP REMOTE` pumpán a STOP-ot kihagyja,
 mert a pumpa áll; ha csak a STOP válaszából derül ki a Local mód és a cache nem
 igazolja az álló állapotot, az egyszeri `REMOTE → STOP` helyreállítás megmarad.
 
@@ -566,12 +570,16 @@ A besajtolópumpa `RUN` előtt a szolgáltatás friss státuszt olvas mindkét p
 mindkét STOP-ot egymástól függetlenül megkísérli. `CLEAR` és `LOCAL` futó
 pumpánál tiltott. A dashboard globális STOP-ja szinkronizálja, a vészállapot pedig
 visszavonja a pumpavezérlési jogosultságot.
+Vezérlési és mérési útvonalon fizikai pumpastátusz kizárólag a `PollingPump`
+időbélyegzett cache-éből olvasható. A nyers `IscoPump.read_status()` négy soros
+tranzakciója csak eszköztesztben vagy kézi diagnosztikában használható.
 
 A manuális pumpa- és szelepvezérlés csak Developer módban, egy közös ablakból
 érhető el. Részleges hardver tesztmódban az ablak `IDLE` állapotból is megnyitható.
 A pumpa **Csatlakozás** művelete csak kapcsolódik és azonosít, módot nem vált.
-Minden ezt követő távoli vezérlőművelet közvetlenül a saját parancsa előtt
-ellenőrzi a Remote módot, és Local állapotnál automatikusan `REMOTE` módba vált.
+Minden ezt követő távoli vezérlőművelet ugyanazon `_execute_remote_write()` kapun
+halad át. Ez az egyetlen általános írás előtti Remote-ellenőrzés; Local állapotnál
+automatikusan `REMOTE` módba vált.
 Ha a pumpa az ellenőrzés és a parancs között Local módba esik, a művelet egyszer
 helyreállítja a Remote módot és újrapróbálja a parancsot. A pumpastátuszok és az
 engedélyezett NI-bemenetek külön
@@ -588,12 +596,10 @@ normál parancsok átrendezhetők vagy törölhetők; a futó parancs, valamint 
 prioritásos biztonsági `STOP` és safe-state művelet nem szerkeszthető és nem
 törölhető.
 
-A normál, kezelő által megerősített hardvermód-aktiválás a csatlakozás után
-ellenőrzi az összes engedélyezett pumpa cache-elt STATUS állapotát. A már explicit
-Remote pumpán nem küld újabb `REMOTE` parancsot; Local vagy nem egyértelmű
-állapotnál elküldi, és célzott STATUS-visszaolvasással ellenőrzi. Az aktiválás csak
-igazolt Remote állapotokkal válik aktívvá; hiba esetén a már megnyitott
-hardverkapcsolatok lezárási útvonala fut le.
+A normál, kezelő által megerősített hardvermód-aktiválás a csatlakozás után csak
+megfigyeli az engedélyezett pumpakapcsolatokat és a cache-elt telemetriát. Nem
+küld `REMOTE` parancsot: a módváltás az előkészítés explicit Remote fázisában,
+illetve más távoli írásnál az egységes `_execute_remote_write()` kapuban történik.
 
 A `LOCAL` pumpastátusz érvényes telemetria, nem `INVALID` adatminőség. Emiatt
 `IDLE`, `READY` és `PREPARING` állapotban önmagában nem vált ki
@@ -601,10 +607,13 @@ A `LOCAL` pumpastátusz érvényes telemetria, nem `INVALID` adatminőség. Emia
 kihagyja a redundáns parancsot; egyébként REMOTE parancsot küld, majd célzott
 STATUS-visszaolvasással explicit Remote állapotot követel. Csak ezután léphet
 tovább a konfigurálási és RUN fázisokra.
-A mérési runtime indulásakor a pumpaworkerek Remote-felügyelete aktiválódik. A
-periodikus STATUS olvasás `LOCAL` állapotnál magas prioritású, visszaellenőrzött
-`REMOTE` parancsot ütemez; leállítás vagy safe-state előtt a felügyelet kikapcsol,
-így nem állíthatja vissza a pumpát a biztonsági STOP után. A dashboard pollingja
+A pumpaworkerek Remote-felügyelete csak a teljes előkészítési sorrend sikeres
+lezárása után aktiválódik. Három egymást követő periodikus `LOCAL` STATUS után
+magas prioritású, visszaellenőrzött `REMOTE` parancsot ütemez; egy vagy két
+átmeneti minta nem vált ki módváltást. A sikeres recovery célzott STATUS-a után
+a következő periodikus STATUS egy teljes, alapértelmezetten 3 másodperces
+intervallummal későbbre kerül. Leállítás vagy safe-state előtt a felügyelet
+kikapcsol, így nem állíthatja vissza a pumpát a biztonsági STOP után. A dashboard pollingja
 ugyanezt a telemetriacache-t olvassa, de önmagában soha nem kezdeményez módváltást.
 A manuális ablak időzített kapcsolatfrissítése nem hív közös `observe_once`
 mérési ciklust: a pumpák és az NI-bemenetek külön olvasása csak kapcsolat- és

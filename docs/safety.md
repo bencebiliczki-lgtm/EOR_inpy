@@ -13,11 +13,13 @@ nyomáskülönbség ellenőrzése van függőben; a besajtolópumpa ekkor még n
 Nyomás-adatminőségi hiba, kapcsolatvesztés, nem véges adat vagy bármely nyomáshatár
 túllépése azonnal megszakítja az indítást. A cél-nyomásnál a köpenypumpa STOP után
 állandó nyomástartásra vált. A szükséges nyomástöbblet nélkül a besajtolópumpa nem
-kaphat `RUN` parancsot. Sikeres `RUN` után a nyomástöbblet már nem safety
-interlock: a köpenypumpa a megadott fix nyomáscélt tartja, miközben a különbség
-csak tájékoztató adat. A saját pumpanyomás-határok, adatminőség-, kapcsolat-,
+kaphat `RUN` parancsot. Sikeres `RUN` után a nyomástöbblet folyamatos safety
+interlock: elvesztése azonnal leállítja a BES-t, amely csak a hiszterézissel
+megnövelt visszaállási küszöbnél indulhat újra. A saját pumpanyomás-határok, adatminőség-, kapcsolat-,
 vonali- és differenciálnyomás-védelmek változatlanul aktívak. A mérési
-adatrögzítés csak mindkét kezdőnyomás elérése után indulhat.
+adatrögzítés csak mindkét friss, `GOOD` minőségű kezdőnyomás és a biztonságos
+nyomáskülönbség egyidejű teljesülése után indulhat. A célnyomás elérésének nincs
+időkorlátja; a kommunikációs és konkrét parancs-timeoutok megmaradnak.
 
 A `FLOW` és `VOLA` lassú kijelzési mezők külön frissességet kapnak. Ezek önálló
 elavulása nem írhatja felül a friss pumpanyomás biztonsági minőségét; a rendszer

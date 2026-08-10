@@ -109,6 +109,25 @@ def test_hourly_flow_command_prevents_x60_on_unitless_readback() -> None:
     assert pump.read_configured_flow_ml_per_hour() == pytest.approx(20.0)
 
 
+def test_flow_unit_is_programmed_only_once_when_conversion_is_required() -> None:
+    client = ScriptedClient(
+        {
+            "RSVP": ["READY"],
+            "IDENTIFY": ["MODEL 260D PUMP"],
+            "UNITSA=ML/HR": [""],
+            "CONST FLOW": ["", ""],
+            "FLOW=20": ["", ""],
+        }
+    )
+    pump = IscoPump(client, IscoSerialConfig("COM1", 6, flow_unit="ML/MIN"))
+    pump.connect()
+
+    pump.set_constant_flow(20.0)
+    pump.set_constant_flow(20.0)
+
+    assert client.commands.count("UNITSA=ML/HR") == 1
+
+
 def test_application_flow_unit_defaults_to_ml_per_hour() -> None:
     assert IscoSerialConfig("COM1", 6).flow_unit == "ML/HR"
 
@@ -168,9 +187,8 @@ def test_documented_control_command_sequences() -> None:
     pump.request_stop()
     pump.return_local()
 
-    assert client.commands[-7:] == [
+    assert client.commands[-6:] == [
         "REMOTE",
-        "UNITSA=ML/HR",
         "CONST FLOW",
         "FLOW=1000",
         "RUN",
@@ -191,8 +209,7 @@ def test_control_command_preserves_three_decimal_setpoint_at_large_magnitude() -
 
     pump.set_constant_flow(123456.789)
 
-    assert client.commands[-3:] == [
-        "UNITSA=ML/HR",
+    assert client.commands[-2:] == [
         "CONST FLOW",
         "FLOW=123456.789",
     ]
@@ -241,8 +258,7 @@ def test_non_a_channel_control_commands_receive_channel_suffix() -> None:
     pump.run()
     pump.request_stop()
 
-    assert client.commands[-5:] == [
-        "UNITSB=ML/HR",
+    assert client.commands[-4:] == [
         "CONST FLOWB",
         "FLOWB=1000",
         "RUNB",

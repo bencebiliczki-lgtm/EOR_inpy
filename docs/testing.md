@@ -221,7 +221,7 @@ Külön deadline-regresszió lassú `STOP`, `PRESS` és `RUN` tesztdublákkal ig
 az aszinkron worker alatt tovább futó safety ciklust és azt, hogy a lassú
 parancs nem okoz control-cycle deadline hibát, miközben a lassú biztonsági
 kiértékelés továbbra is watchdoghibát okoz. Parancssorrend-teszt
-igazolja a KÖP átállítási lépései közötti friss safety ciklust. A rollback-teszt
+igazolja a KÖP átállítási lépései közötti friss safety ciklust. A safe-state teszt
 `PROBLEM=LOCAL MODE` válasznál ellenőrzi az egyszeri `REMOTE → STOP` helyreállítást,
 ha az álló Local állapot nem igazolható cache-ből. Igazolt `STOP LOCAL` esetén
 külön regresszió ellenőrzi a felesleges STOP kihagyását és azt, hogy a másik pumpa
@@ -232,8 +232,9 @@ a STATUS igazolja a STOP/RUN eredményt, és a parancstimeout nem control-cycle
 deadline néven jelenik meg. Külön teszt igazolja, hogy a sorban állás közben
 kitimeoutolt parancs törlődik és a blokkoló tranzakció után sem fut le.
 Külön ütemezési regresszió igazolja a biztonságkritikus `PRESS`/`STATUS`
-prioritást, a `FLOW → VOLA` körforgást, a tényleges tranzakcióidő utáni
-újraütemezést és a felzárkózó burst hiányát. A UI-teszt különböző
+prioritást, a külön 0,5 s-os PRESS és 3 s-os STATUS periódust, a célzott
+parancsellenőrzés utáni STATUS-halasztást, a `FLOW → VOLA` körforgást, a tényleges
+tranzakcióidő utáni újraütemezést és a felzárkózó burst hiányát. A UI-teszt különböző
 értékekkel ellenőrzi a mentett és az aktív pollingbeállítás megjelenítését.
 Prioritási regresszió blokkolt telemetriakeret után igazolja a
 `STOP → CONFIG → PRESS` sorrendet, továbbá azt, hogy a sorban álló normál
@@ -256,9 +257,10 @@ A részleges kapcsolati tesztek igazolják, hogy az egyik pumpa vagy NI-bemenet 
 mellett a többi eszköz sikeres státusza megmarad. A közvetlen pumpakapcsolódás
 nem vált módot; az első vezérlőművelet ellenőrzi és szükség esetén helyreállítja
 a Remote módot. Külön regresszió fedi a futás közbeni Remote-vesztést és az
-ellenőrzés utáni `LOCAL MODE` válasz egyszeri helyreállítását. Bezáráskor minden
-pumpán külön STOP és portlezárás történik akkor is, ha az eszköz nem jutott el az
-azonosított állapotig. A Qt-teszt emellett igazolja, hogy a normál kezelői
+ellenőrzés utáni `LOCAL MODE` válasz egyszeri helyreállítását. A STOP-deduplikációs
+teszt igazolja, hogy egymással versenyző safe-state utak egyetlen fizikai STOP-ot
+adnak ki. Bezáráskor a cache szerint már álló pumpa új STOP nélkül válik le. A
+Qt-teszt emellett igazolja, hogy a normál kezelői
 Csatlakozás/Leválasztás gombok rejtettek, a mérés szüneteltethető és folytatható,
 a Leállítás pedig `READY` kapcsolat mellett alaphelyzetbe állítja az élő grafikont
 és táblázatot. Külön regresszió ellenőrzi, hogy kritikus hardverhiba felszabadítja
@@ -280,6 +282,9 @@ tovább fut, a nyomás minősége `GOOD` marad, míg a kapcsolat `DEGRADED` áll
 A STALE szervizoldal UI-tesztje ellenőrzi a polling-, külön PRESS/FLOW-VOLA/STATUS
 STALE- és startup timeoutértékek tartós mentését, visszatöltését, valamint a
 soros retry-keretnél rövidebb STALE-határ mentésének tiltását.
+Külön adapterteszt igazolja, hogy `UNITS=ML/HR` csak tényleges egységváltáskor
+megy ki egyszer, és vezérlési regresszió tiltja a cache nélküli nyers
+négylekérdezéses `read_status()` pumpa használatát.
 Hiányos telemetria mellett a működő szenzor értéke látható,
 miközben a kapcsolatfrissítés nem indít közös biztonsági mérési ciklust, a
 biztonságkritikus RUN külön ellenőrzése pedig változatlan marad.
@@ -325,6 +330,10 @@ watchdog-tűrés tartós mentését, valamint a számított végrehajtási hatá
 Az előkészítési regresszió igazolja, hogy ugyanezek az értékek jutnak a
 pumpafelügyeleti ciklusba, az ütemezés nem halmoz driftet, a watchdog-túllépés
 pedig mindkét pumpát leállítja.
+Külön állapotgép-tesztek igazolják, hogy a BES a minimum margin előtt nem indul,
+utána a köpeny végső célja előtt is elindulhat, marginvesztéskor leáll és
+hiszterézissel újraindul. Szimuláltan 120 másodpercnél hosszabb célvárakozás sem
+okozhat célidő-túllépési hibát; `STALE` vagy `INVALID` adat külön telemetry-hiba.
 
 ## Hardveres smoke test
 

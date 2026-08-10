@@ -168,6 +168,7 @@ def test_default_pressure_stale_window_covers_observed_serial_jitter() -> None:
 
     assert intervals.pressure_seconds == pytest.approx(0.5)
     assert intervals.slow_telemetry_seconds == pytest.approx(0.5)
+    assert intervals.status_poll_seconds == pytest.approx(3.0)
     assert intervals.pressure_stale_seconds == pytest.approx(6.0)
     assert intervals.pressure_stale_seconds >= 3.0 * intervals.pressure_seconds
     assert intervals.slow_telemetry_stale_seconds == pytest.approx(33.0)
@@ -300,10 +301,10 @@ def test_slow_telemetry_is_round_robin_not_three_independent_periods() -> None:
     while len(raw.slow_events) < 4 and monotonic() < deadline:
         sleep(0.01)
 
-    # The first STATUS belongs to connection initialization. Runtime STATUS is
-    # a separate safety poll; FLOW and VOLA remain a two-field round robin.
+    # The first STATUS belongs to connection initialization. Runtime STATUS has
+    # its own slower cadence; FLOW and VOLA remain a two-field round robin.
     runtime_events = raw.slow_events[1:4]
-    assert [name for name, _ in runtime_events] == ["FLOW", "STATUS", "VOLA"]
+    assert [name for name, _ in runtime_events] == ["FLOW", "VOLA", "FLOW"]
     assert runtime_events[2][1] - runtime_events[0][1] >= (
         intervals.slow_telemetry_seconds
     )
@@ -324,6 +325,25 @@ def test_failed_stop_is_latched_until_acknowledgement() -> None:
     with pytest.raises(ConnectionError, match="LOCAL MODE"):
         pump.request_stop()
     assert raw.calls["stop"] == 2
+    pump.disconnect()
+
+
+def test_concurrent_safe_state_stop_submissions_share_one_command() -> None:
+    raw = SlowPollablePump(delay_seconds=0.01)
+    pump = PollingPump(raw, name="test", intervals=slow_intervals())
+    pump.connect()
+
+    first = pump.submit_stop(emergency=True)
+    second = pump.submit_stop(emergency=True)
+    deadline = monotonic() + 1.0
+    result = pump.command_result(first)
+    while not result.status.terminal and monotonic() < deadline:
+        sleep(0.005)
+        result = pump.command_result(first)
+
+    assert first == second
+    assert result.status is PumpCommandStatus.SUCCEEDED
+    assert raw.calls["stop"] == 1
     pump.disconnect()
 
 
@@ -585,6 +605,7 @@ def test_periodic_status_restores_remote_only_when_control_supervision_is_active
     intervals = PumpPollingIntervals(
         pressure_seconds=0.01,
         slow_telemetry_seconds=0.01,
+        status_poll_seconds=0.01,
         pressure_stale_seconds=1.0,
         slow_telemetry_stale_seconds=1.0,
         status_stale_seconds=1.0,
@@ -603,12 +624,110 @@ def test_periodic_status_restores_remote_only_when_control_supervision_is_active
     assert raw.calls["remote"] == 0
 
     pump.set_remote_supervision_active(True)
+    reads_when_enabled = raw.calls["status"]
     deadline = monotonic() + 1.0
     while raw.calls["remote"] == 0 and monotonic() < deadline:
         sleep(0.005)
 
     assert raw.calls["remote"] == 1
+    assert raw.calls["status"] >= reads_when_enabled + 3
     assert raw.operating_status == "STOP REMOTE"
+    pump.disconnect()
+
+
+def test_two_transient_local_samples_do_not_trigger_remote_recovery() -> None:
+    raw = SlowPollablePump(delay_seconds=0.0, operating_status="STOP REMOTE")
+    intervals = PumpPollingIntervals(
+        pressure_seconds=0.01,
+        slow_telemetry_seconds=0.01,
+        status_poll_seconds=0.05,
+        pressure_stale_seconds=1.0,
+        slow_telemetry_stale_seconds=1.0,
+        status_stale_seconds=1.0,
+        startup_timeout_seconds=1.0,
+    )
+    pump = PollingPump(raw, name="test", intervals=intervals)
+    pump.connect()
+    pump.set_remote_supervision_active(True)
+    baseline = raw.calls["status"]
+    raw.operating_status = "RUN LOCAL"
+    deadline = monotonic() + 1.0
+    while raw.calls["status"] < baseline + 2 and monotonic() < deadline:
+        sleep(0.005)
+    raw.operating_status = "RUN REMOTE"
+    sleep(0.08)
+
+    assert raw.calls["remote"] == 0
+    pump.disconnect()
+
+
+def test_recovery_command_log_contains_queue_timing_priority_and_reason(
+    tmp_path: Path,
+) -> None:
+    raw = SlowPollablePump(delay_seconds=0.0, operating_status="RUN LOCAL")
+    logger = MemoryDiagnosticLogger(tmp_path / "remote-recovery.html")
+    logger.configure(enabled=True, categories=DiagnosticCategory)
+    intervals = PumpPollingIntervals(
+        pressure_seconds=0.01,
+        slow_telemetry_seconds=0.01,
+        status_poll_seconds=0.01,
+        pressure_stale_seconds=1.0,
+        slow_telemetry_stale_seconds=1.0,
+        status_stale_seconds=1.0,
+        startup_timeout_seconds=1.0,
+    )
+    pump = PollingPump(
+        raw,
+        name="injection",
+        intervals=intervals,
+        diagnostics=logger,
+        diagnostic_category=DiagnosticCategory.INJECTION_PUMP,
+    )
+    pump.connect()
+    pump.set_remote_supervision_active(True)
+    deadline = monotonic() + 1.0
+    command_event = None
+    while command_event is None and monotonic() < deadline:
+        command_event = next(
+            (
+                event
+                for event in logger.events_after(0)
+                if event.event_id == "PUMP_COMMAND"
+                and dict(event.fields).get("result") == "SUCCEEDED"
+            ),
+            None,
+        )
+        sleep(0.005)
+
+    assert command_event is not None
+    fields = dict(command_event.fields)
+    assert fields["command"] == "REMOTE"
+    assert fields["priority"] == str(int(PumpCommandPriority.HIGH))
+    assert fields["queue_wait_ms"] != "NONE"
+    assert fields["execution_ms"] != "NONE"
+    assert "3 consecutive LOCAL" in fields["recovery_reason"]
+    pump.disconnect()
+
+
+def test_targeted_command_verification_postpones_periodic_status_poll() -> None:
+    raw = SlowPollablePump(delay_seconds=0.0)
+    intervals = PumpPollingIntervals(
+        pressure_seconds=0.02,
+        slow_telemetry_seconds=0.02,
+        status_poll_seconds=0.2,
+        pressure_stale_seconds=1.0,
+        slow_telemetry_stale_seconds=1.0,
+        status_stale_seconds=1.0,
+        startup_timeout_seconds=1.0,
+    )
+    pump = PollingPump(raw, name="test", intervals=intervals)
+    pump.connect()
+    pump.enter_remote()
+    reads_after_verification = raw.calls["status"]
+
+    sleep(0.1)
+
+    assert raw.calls["status"] == reads_after_verification
     pump.disconnect()
 
 
@@ -676,6 +795,7 @@ def test_preparation_suspends_flow_and_volume_polling_until_released() -> None:
     intervals = PumpPollingIntervals(
         pressure_seconds=0.02,
         slow_telemetry_seconds=0.02,
+        status_poll_seconds=0.02,
         pressure_stale_seconds=1.0,
         slow_telemetry_stale_seconds=1.0,
         startup_timeout_seconds=1.0,

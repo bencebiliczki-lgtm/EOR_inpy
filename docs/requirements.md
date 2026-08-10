@@ -274,6 +274,11 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   jelölje; hover esetén jelenjen meg a magyar idő, szakasz és hibarészlet.
 - Automatikus nyomásfelépítéskor a besajtolópumpa indítása előtt a konfigurált
   köpeny–besajtolási nyomáskülönbség stabil meglétének ellenőrzése.
+- A BES indulása után a minimum nyomáskülönbség folyamatos felügyelete; elvesztése
+  állítsa le a BES-t, helyreállása pedig hiszterézissel engedje az újraindítást.
+- A két célnyomás elérésének ne legyen időalapú határideje. A kommunikációs és
+  konkrét parancs-timeoutok, a telemetry minőségvédelem és az operátori
+  megszakítás változatlanul maradjon aktív.
 - A szelep automata és kézi módban működhet.
 - Automata módban a szabályozási forrás választható legyen: besajtoló pumpa nyomása vagy vonali nyomásmérő.
 - A fizikai szelepskála jelentése `0% = teljesen zárt`, `100% = teljesen nyitott`.

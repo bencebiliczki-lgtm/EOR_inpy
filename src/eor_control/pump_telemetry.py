@@ -58,6 +58,7 @@ class PollablePump(Protocol):
 class PumpPollingIntervals:
     pressure_seconds: float = 0.5
     slow_telemetry_seconds: float = 0.5
+    status_poll_seconds: float = 3.0
     pressure_stale_seconds: float = 6.0
     slow_telemetry_stale_seconds: float = 33.0
     status_stale_seconds: float = 8.0
@@ -67,6 +68,7 @@ class PumpPollingIntervals:
         values = (
             self.pressure_seconds,
             self.slow_telemetry_seconds,
+            self.status_poll_seconds,
             self.pressure_stale_seconds,
             self.slow_telemetry_stale_seconds,
             self.status_stale_seconds,
@@ -78,7 +80,7 @@ class PumpPollingIntervals:
             raise ValueError("pump pressure stale limit must cover three polling intervals")
         if self.slow_telemetry_stale_seconds < self.slow_telemetry_seconds:
             raise ValueError("slow pump telemetry stale limit must cover one polling interval")
-        if self.status_stale_seconds < self.slow_telemetry_seconds:
+        if self.status_stale_seconds < self.status_poll_seconds:
             raise ValueError("pump status stale limit must cover one polling interval")
 
 
@@ -151,6 +153,7 @@ class PollingPump:
         self._worker_error: Exception | None = None
         self._connected = False
         self._stop_latched = False
+        self._stop_command_id: str | None = None
         self._pending_commands = 0
         self._command_sequence = 0
         self._command_queue: list[tuple[int, int, str]] = []
@@ -163,6 +166,7 @@ class PollingPump:
         self._preparation_active = False
         self._remote_supervision_active = False
         self._remote_recovery_command_id: str | None = None
+        self._local_status_streak = 0
 
     @property
     def polling_intervals(self) -> PumpPollingIntervals:
@@ -325,6 +329,16 @@ class PollingPump:
         status_tokens = set(status_text.upper().replace("=", " ").split())
         return {"STOP", "LOCAL"}.issubset(status_tokens)
 
+    def is_stopped(self) -> bool:
+        """Return cached STOP state in either Local or Remote mode."""
+
+        with self._condition:
+            status_text = self._operating_status_text
+        if status_text is None:
+            return False
+        status_tokens = set(status_text.upper().replace("=", " ").split())
+        return "STOP" in status_tokens
+
     def is_remote_mode(self) -> bool:
         """Return whether cached STATUS explicitly confirms Remote mode."""
 
@@ -342,6 +356,18 @@ class PollingPump:
 
     def enter_remote(self) -> None:
         self._execute_command(PumpCommandKind.ENTER_REMOTE, verify_status=True)
+        with self._condition:
+            self._stop_latched = False
+
+    def enter_remote_for_recovery(self, reason: str) -> None:
+        command = PumpCommand(
+            PumpCommandKind.ENTER_REMOTE,
+            PumpCommandPriority.HIGH,
+            verify_status=True,
+            queue_timeout_seconds=self.COMMAND_QUEUE_WAIT_SECONDS,
+            reason=reason,
+        )
+        self._await_command_result(self.submit_command(command))
         with self._condition:
             self._stop_latched = False
 
@@ -376,15 +402,7 @@ class PollingPump:
         with self._condition:
             if self._stop_latched:
                 return
-            # Latch before I/O: a LOCAL MODE response or a timeout must not create
-            # an endless STOP/reply loop in subsequent fault handling paths.
-            self._stop_latched = True
-        self._execute_command(
-            PumpCommandKind.STOP,
-            priority=PumpCommandPriority.HIGH,
-            verify_status=True,
-            require_connected=False,
-        )
+        self._await_command_result(self.submit_stop(emergency=True))
 
     def acknowledge_stop_latch(self) -> None:
         with self._condition:
@@ -468,6 +486,7 @@ class PollingPump:
 
         with self._condition:
             self._remote_supervision_active = active
+            self._local_status_streak = 0
             if not active and self._remote_recovery_command_id is not None:
                 command_id = self._remote_recovery_command_id
                 result = self._command_results.get(command_id)
@@ -587,18 +606,29 @@ class PollingPump:
             return True
 
     def submit_stop(self, *, emergency: bool = False) -> str:
-        return self.submit_command(
-            PumpCommand(
-                PumpCommandKind.STOP,
-                (
-                    PumpCommandPriority.EMERGENCY
-                    if emergency
-                    else PumpCommandPriority.HIGH
+        with self._condition:
+            if self._stop_command_id is not None:
+                previous = self._command_results.get(self._stop_command_id)
+                if previous is not None and (
+                    self._stop_latched or not previous.status.terminal
+                ) and previous.status is not PumpCommandStatus.CANCELLED:
+                    return self._stop_command_id
+            # Latch before queueing so concurrent safe-state paths share one STOP.
+            self._stop_latched = True
+            command_id = self.submit_command(
+                PumpCommand(
+                    PumpCommandKind.STOP,
+                    (
+                        PumpCommandPriority.EMERGENCY
+                        if emergency
+                        else PumpCommandPriority.HIGH
+                    ),
+                    verify_status=True,
                 ),
-                verify_status=True,
-            ),
-            require_connected=False,
-        )
+                require_connected=False,
+            )
+            self._stop_command_id = command_id
+            return command_id
 
     def _execute_command(
         self,
@@ -617,6 +647,9 @@ class PollingPump:
             queue_timeout_seconds=self.COMMAND_QUEUE_WAIT_SECONDS,
         )
         command_id = self.submit_command(command, require_connected=require_connected)
+        return self._await_command_result(command_id)
+
+    def _await_command_result(self, command_id: str) -> PumpCommandResult:
         while True:
             result = self.command_result(command_id)
             if result.status.terminal:
@@ -654,7 +687,7 @@ class PollingPump:
 
             schedule_origin = monotonic()
             next_pressure = schedule_origin + self._intervals.pressure_seconds
-            next_status = schedule_origin + self._intervals.slow_telemetry_seconds
+            next_status = schedule_origin + self._intervals.status_poll_seconds
             next_slow = schedule_origin
             slow_fields = ("flow", "volume")
             slow_field_index = 0
@@ -666,10 +699,14 @@ class PollingPump:
                     self._run_queued_command(*queued)
                     command_completed = monotonic()
                     next_pressure = command_completed
-                    if queued[1].verify_status:
+                    command_result = self.command_result(queued[0])
+                    if (
+                        queued[1].verify_status
+                        and command_result.status is PumpCommandStatus.SUCCEEDED
+                    ):
                         next_status = (
                             command_completed
-                            + self._intervals.slow_telemetry_seconds
+                            + self._intervals.status_poll_seconds
                         )
                     next_slow = (
                         command_completed + self._intervals.slow_telemetry_seconds
@@ -705,6 +742,8 @@ class PollingPump:
                 interval = (
                     self._intervals.pressure_seconds
                     if field == "pressure"
+                    else self._intervals.status_poll_seconds
+                    if field == "status"
                     else self._intervals.slow_telemetry_seconds
                 )
                 if lateness > interval:
@@ -754,7 +793,7 @@ class PollingPump:
                     elif field == "status":
                         next_status = self._next_polling_deadline(
                             completed,
-                            self._intervals.slow_telemetry_seconds,
+                            self._intervals.status_poll_seconds,
                         )
                     else:
                         slow_field_index = (slow_field_index + 1) % len(slow_fields)
@@ -938,6 +977,11 @@ class PollingPump:
                 in {PumpCommandKind.ENTER_REMOTE, PumpCommandKind.RUN}
             ):
                 self._stop_latched = False
+            elif (
+                final.status is PumpCommandStatus.SUCCEEDED
+                and command.kind is PumpCommandKind.STOP
+            ):
+                self._stop_latched = True
             self._condition.notify_all()
         self._log_command_event(
             command_id,
@@ -951,23 +995,39 @@ class PollingPump:
         normalized = status_text.upper()
         tokens = set(normalized.replace("=", " ").split())
         with self._condition:
-            if not self._remote_supervision_active or "LOCAL" not in tokens:
+            if not self._remote_supervision_active:
+                self._local_status_streak = 0
+                return
+            if "LOCAL" not in tokens:
+                self._local_status_streak = 0
+                return
+            self._local_status_streak += 1
+            if self._local_status_streak < 3:
                 return
             previous_id = self._remote_recovery_command_id
             if previous_id is not None:
                 previous = self._command_results.get(previous_id)
                 if previous is not None and not previous.status.terminal:
                     return
-        command_id = self.submit_command(
-            PumpCommand(
-                PumpCommandKind.ENTER_REMOTE,
-                PumpCommandPriority.HIGH,
-                verify_status=True,
-                queue_timeout_seconds=self.COMMAND_QUEUE_WAIT_SECONDS,
+                if previous is not None:
+                    # Automatic recovery results have no external consumer.
+                    self._command_results.pop(previous_id, None)
+            # Keep check, enqueue and tracked id atomic against supervision
+            # shutdown so no late REMOTE can be queued after safe-state begins.
+            command_id = self.submit_command(
+                PumpCommand(
+                    PumpCommandKind.ENTER_REMOTE,
+                    PumpCommandPriority.HIGH,
+                    verify_status=True,
+                    queue_timeout_seconds=self.COMMAND_QUEUE_WAIT_SECONDS,
+                    reason=(
+                        "automatic recovery after 3 consecutive LOCAL "
+                        "periodic STATUS samples"
+                    ),
+                )
             )
-        )
-        with self._condition:
             self._remote_recovery_command_id = command_id
+            self._local_status_streak = 0
 
     def _perform_command(self, command: PumpCommand) -> float | None:
         value = command.value
@@ -1367,6 +1427,7 @@ class PollingPump:
                 "verification_ms": round(verification_ms, 3),
                 "result": result,
                 "error": error or "NONE",
+                "recovery_reason": command.reason or "NONE",
             },
             direction="COMMAND",
             level=("ERROR" if error is not None else "WARNING"),

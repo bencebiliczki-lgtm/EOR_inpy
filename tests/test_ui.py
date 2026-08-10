@@ -2,6 +2,7 @@ import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from time import sleep
 from types import SimpleNamespace
 
@@ -81,7 +82,11 @@ from eor_control.hardware import (  # noqa: E402
 from eor_control.ni import NidaqmxDataAcquisition  # noqa: E402
 from eor_control.preflight import PreflightReport, PreflightStatus  # noqa: E402
 from eor_control.projects import ProjectRepository  # noqa: E402
-from eor_control.pump_control import PumpControlTiming, PumpRole  # noqa: E402
+from eor_control.pump_control import (  # noqa: E402
+    PumpControlTiming,
+    PumpPreparationProgress,
+    PumpRole,
+)
 from eor_control.pump_telemetry import PumpPollingIntervals  # noqa: E402
 from eor_control.simulators import (  # noqa: E402
     SimulatedDataAcquisition,
@@ -112,13 +117,14 @@ from eor_control.ui import (  # noqa: E402
     ProjectSelectionDialog,
     ProjectSettingsDialog,
     PumpControlDialog,
+    PumpPreparationProgressDialog,
     PumpTelemetrySettingsDialog,
     ResizableDialog,
     SettingsHubDialog,
     SimulationSettingsPage,
     StageSettingsDialog,
     _authorize_physical_hardware,
-    _enter_hardware_pumps_remote,
+    _observe_hardware_pump_connections,
     application_icon,
     application_icon_path,
     build_simulated_dashboard,
@@ -132,7 +138,7 @@ from eor_control.ui import (  # noqa: E402
 )
 
 
-def test_hardware_activation_ensures_each_enabled_pump_is_remote() -> None:
+def test_hardware_activation_only_records_connected_pumps() -> None:
     class RecordingPumpControl:
         def __init__(self) -> None:
             self.operations: list[object] = []
@@ -140,12 +146,9 @@ def test_hardware_activation_ensures_each_enabled_pump_is_remote() -> None:
         def observe_connected(self, *roles: PumpRole) -> None:
             self.operations.append(("CONNECTED", roles))
 
-        def ensure_remote(self, role: PumpRole) -> None:
-            self.operations.append(("REMOTE", role))
-
     control = RecordingPumpControl()
 
-    _enter_hardware_pumps_remote(
+    _observe_hardware_pump_connections(
         control,  # type: ignore[arg-type]
         jacket_enabled=True,
         injection_enabled=True,
@@ -153,34 +156,25 @@ def test_hardware_activation_ensures_each_enabled_pump_is_remote() -> None:
 
     assert control.operations == [
         ("CONNECTED", (PumpRole.JACKET, PumpRole.INJECTION)),
-        ("REMOTE", PumpRole.JACKET),
-        ("REMOTE", PumpRole.INJECTION),
     ]
 
 
-def test_hardware_activation_does_not_mark_success_after_remote_failure() -> None:
-    class FailingPumpControl:
-        def __init__(self) -> None:
-            self.remote_attempts: list[PumpRole] = []
+def test_hardware_activation_records_only_enabled_pumps() -> None:
+    class RecordingPumpControl:
+        connected: tuple[PumpRole, ...] = ()
 
         def observe_connected(self, *roles: PumpRole) -> None:
-            assert roles == (PumpRole.JACKET, PumpRole.INJECTION)
+            self.connected = roles
 
-        def ensure_remote(self, role: PumpRole) -> None:
-            self.remote_attempts.append(role)
-            if role is PumpRole.INJECTION:
-                raise RuntimeError("pump did not confirm REMOTE")
+    control = RecordingPumpControl()
 
-    control = FailingPumpControl()
+    _observe_hardware_pump_connections(
+        control,  # type: ignore[arg-type]
+        jacket_enabled=True,
+        injection_enabled=False,
+    )
 
-    with pytest.raises(RuntimeError, match="did not confirm REMOTE"):
-        _enter_hardware_pumps_remote(
-            control,  # type: ignore[arg-type]
-            jacket_enabled=True,
-            injection_enabled=True,
-        )
-
-    assert control.remote_attempts == [PumpRole.JACKET, PumpRole.INJECTION]
+    assert control.connected == (PumpRole.JACKET,)
 
 
 def application() -> QApplication:
@@ -716,6 +710,7 @@ def test_pump_telemetry_stale_settings_are_validated_and_persisted(
     dialog = PumpTelemetrySettingsDialog(settings)
     dialog.pressure_poll.setValue(0.5)
     dialog.slow_poll.setValue(2.0)
+    dialog.status_poll.setValue(4.0)
     dialog.pressure_stale.setValue(5.5)
     dialog.slow_stale.setValue(36.0)
     dialog.status_stale.setValue(12.0)
@@ -726,6 +721,7 @@ def test_pump_telemetry_stale_settings_are_validated_and_persisted(
 
     assert intervals.pressure_seconds == pytest.approx(0.5)
     assert intervals.slow_telemetry_seconds == pytest.approx(2.0)
+    assert intervals.status_poll_seconds == pytest.approx(4.0)
     assert intervals.pressure_stale_seconds == pytest.approx(5.5)
     assert float(settings.value("hardware/stale_timeout_seconds")) == pytest.approx(
         5.5
@@ -1363,6 +1359,39 @@ def test_measurement_pump_startup_dialog_requires_all_values_without_text_confir
     )
     dialog.injection_start_pressure.setValue(101.0)
     assert dialog.start_button.isEnabled()
+
+
+def test_pump_preparation_progress_dialog_shows_live_state_and_cancels() -> None:
+    application()
+    cancel_event = Event()
+    dialog = PumpPreparationProgressDialog(cancel_event)
+    progress = PumpPreparationProgress(
+        phase="build_pressures",
+        jacket_pressure_bar=131.25,
+        jacket_target_pressure_bar=140.0,
+        injection_pressure_bar=105.5,
+        injection_target_pressure_bar=115.0,
+        pressure_margin_bar=25.75,
+        minimum_margin_bar=20.0,
+        jacket_state="RUN REMOTE",
+        injection_state="RUN REMOTE",
+        jacket_quality=DataQuality.GOOD,
+        injection_quality=DataQuality.GOOD,
+        jacket_age_seconds=0.125,
+        injection_age_seconds=0.25,
+        pending_command="injection: RUN",
+    )
+
+    dialog.update_progress(progress)
+
+    assert dialog.findChild(QLabel, "preparation_phase").text() == "build_pressures"
+    assert "131.250 / 140.000 bar" in dialog.findChild(
+        QLabel, "preparation_jacket_pressure"
+    ).text()
+    assert dialog.findChild(QLabel, "preparation_pending").text() == "injection: RUN"
+    dialog.findChild(QPushButton, "cancel_pump_preparation").click()
+    assert cancel_event.is_set()
+    dialog.close()
 
 
 def test_changed_pressure_margin_is_applied_to_simulation_pump_control(
@@ -2307,6 +2336,9 @@ def test_critical_hardware_fault_stays_latched_without_recheck_loop(
 
     class PumpControl:
         safe_stopped = False
+
+        def set_remote_supervision_active(self, _active: bool) -> None:
+            return
 
         def observe_safe_stop(self) -> None:
             self.safe_stopped = True

@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from math import isfinite
 from pathlib import Path
 from queue import Empty, Queue
-from threading import Thread
+from threading import Event, Thread
 from typing import cast
 from uuid import uuid4
 
@@ -161,6 +161,7 @@ from eor_control.pump_control import (
     PumpControlService,
     PumpControlTiming,
     PumpOperatingMode,
+    PumpPreparationProgress,
     PumpRole,
     PumpStartupPlan,
 )
@@ -198,13 +199,13 @@ def _authorize_physical_hardware(
         daq.authorize_output(NidaqmxDataAcquisition.HARDWARE_CONFIRMATION)
 
 
-def _enter_hardware_pumps_remote(
+def _observe_hardware_pump_connections(
     pump_control: PumpControlService,
     *,
     jacket_enabled: bool,
     injection_enabled: bool,
 ) -> None:
-    """Record connected pumps and require confirmed REMOTE mode for activation."""
+    """Record connected pumps without issuing a control command."""
 
     enabled_roles = tuple(
         role
@@ -215,8 +216,6 @@ def _enter_hardware_pumps_remote(
         if enabled
     )
     pump_control.observe_connected(*enabled_roles)
-    for role in enabled_roles:
-        pump_control.ensure_remote(role)
 
 
 LIGHT_STYLESHEET = """
@@ -1395,6 +1394,7 @@ class RuntimeBridge(QObject):
     preflight_completed = Signal(object)
     preflight_failed = Signal(str)
     pump_startup_progress = Signal(object)
+    pump_preparation_progress = Signal(object)
     pump_startup_completed = Signal()
     pump_startup_failed = Signal(str)
     flow_change_completed = Signal(float)
@@ -3945,6 +3945,7 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
     SETTINGS = {
         "pressure_seconds": "developer/pump_pressure_poll_seconds",
         "slow_telemetry_seconds": "developer/pump_slow_poll_seconds",
+        "status_poll_seconds": "developer/pump_status_poll_seconds",
         "pressure_stale_seconds": "developer/pump_pressure_stale_seconds",
         "slow_telemetry_stale_seconds": "developer/pump_slow_stale_seconds",
         "status_stale_seconds": "developer/pump_status_stale_seconds",
@@ -3998,6 +3999,9 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         self.slow_poll = self._seconds_field(0.3, 60.0, 0.1)
         self.slow_poll.setObjectName("pump_slow_poll_seconds")
         self.slow_poll.setValue(defaults.slow_telemetry_seconds)
+        self.status_poll = self._seconds_field(1.0, 60.0, 0.5)
+        self.status_poll.setObjectName("pump_status_poll_seconds")
+        self.status_poll.setValue(defaults.status_poll_seconds)
         self.pressure_stale = self._seconds_field(0.2, 60.0, 0.1)
         self.pressure_stale.setObjectName("pump_pressure_stale_seconds")
         self.pressure_stale.setValue(defaults.pressure_stale_seconds)
@@ -4020,6 +4024,10 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
                 self.slow_poll,
             ),
             self.slow_poll,
+        )
+        form.addRow(
+            input_field_label("STATUS polling időköze", self.status_poll),
+            self.status_poll,
         )
         form.addRow(
             input_field_label("Nyomás STALE-határa", self.pressure_stale),
@@ -4056,6 +4064,7 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         for field in (
             self.pressure_poll,
             self.slow_poll,
+            self.status_poll,
             self.pressure_stale,
             self.slow_stale,
             self.status_stale,
@@ -4081,7 +4090,8 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         intervals: PumpPollingIntervals,
     ) -> str:
         return (
-            f"{label}: PRESS {intervals.pressure_seconds:.3f} s; lassú szünet "
+            f"{label}: PRESS {intervals.pressure_seconds:.3f} s; STATUS "
+            f"{intervals.status_poll_seconds:.3f} s; lassú szünet "
             f"{intervals.slow_telemetry_seconds:.3f} s; sorrend: PRESS elsőbbség, "
             "STATUS, majd FLOW/VOLA körforgás; STALE PRESS/FLOW-VOLA/STATUS "
             f"{intervals.pressure_stale_seconds:.3f} / "
@@ -4124,6 +4134,7 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         return PumpPollingIntervals(
             pressure_seconds=pressure_poll,
             slow_telemetry_seconds=self.slow_poll.value(),
+            status_poll_seconds=self.status_poll.value(),
             pressure_stale_seconds=self.pressure_stale.value(),
             slow_telemetry_stale_seconds=self.slow_stale.value(),
             status_stale_seconds=self.status_stale.value(),
@@ -4168,6 +4179,9 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         slow_telemetry_seconds = value(
             "slow_telemetry_seconds", defaults.slow_telemetry_seconds
         )
+        status_poll_seconds = value(
+            "status_poll_seconds", defaults.status_poll_seconds
+        )
         configured_pressure_stale = value(
             "pressure_stale_seconds", pressure_stale_fallback
         )
@@ -4193,6 +4207,7 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
             return PumpPollingIntervals(
                 pressure_seconds=pressure_seconds,
                 slow_telemetry_seconds=slow_telemetry_seconds,
+                status_poll_seconds=status_poll_seconds,
                 pressure_stale_seconds=max(
                     configured_pressure_stale, minimum_pressure_stale
                 ),
@@ -4206,6 +4221,7 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
                 status_stale_seconds=max(
                     value("status_stale_seconds", defaults.status_stale_seconds),
                     minimum_status_stale,
+                    status_poll_seconds,
                 ),
                 startup_timeout_seconds=max(
                     value(
@@ -4219,6 +4235,7 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
             return PumpPollingIntervals(
                 pressure_seconds=defaults.pressure_seconds,
                 slow_telemetry_seconds=defaults.slow_telemetry_seconds,
+                status_poll_seconds=defaults.status_poll_seconds,
                 pressure_stale_seconds=max(
                     defaults.pressure_stale_seconds,
                     cls.minimum_pressure_stale_seconds(
@@ -4339,6 +4356,7 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         values = {
             "pressure_seconds": intervals.pressure_seconds,
             "slow_telemetry_seconds": intervals.slow_telemetry_seconds,
+            "status_poll_seconds": intervals.status_poll_seconds,
             "pressure_stale_seconds": intervals.pressure_stale_seconds,
             "slow_telemetry_stale_seconds": (
                 intervals.slow_telemetry_stale_seconds
@@ -5708,10 +5726,11 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             "köpenynyomás-többlet a megadott ideig stabil, "
             "a besajtolópumpa is elindul, és a két pumpa együtt halad a "
             "kezdőértékek felé. A köpeny a célján STOP után nyomástartásra vált. "
-            "Ettől kezdve a beállított különbséget a program nem tartja fenn: "
-            "a köpenypumpa a megadott fix nyomáscélt tartja. "
+            "Ha a különbség a minimum alá esik, a BES leáll, majd megfelelő "
+            "nyomáselőnynél automatikusan újraindul. "
             "A két saját pumpahatárt a program RUN előtt a pumpákba írja. A "
-            "mérési ciklus csak mindkét kezdőnyomás elérése után indul."
+            "mérési ciklus csak mindkét kezdőnyomás elérése után indul. A "
+            "célnyomás elérésének nincs időkorlátja."
         )
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
@@ -5873,6 +5892,88 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             <= plan.injection_pressure_limit_bar
             and margin_ok
         )
+
+
+class PumpPreparationProgressDialog(ResizableDialog):
+    """Show cache-only preparation state and allow explicit cancellation."""
+
+    def __init__(self, cancel_event: Event, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._cancel_event = cancel_event
+        self.setWindowTitle("Pumpanyomás felépítése")
+        self.resize(700, 440)
+        layout = QVBoxLayout(self)
+        message = QLabel(
+            "Nyomásfelépítés folyamatban. A pumpák a megadott célnyomás "
+            "eléréséig működnek."
+        )
+        message.setWordWrap(True)
+        message.setStyleSheet("font-weight:700")
+        layout.addWidget(message)
+        form = QFormLayout()
+        self._values: dict[str, QLabel] = {}
+        for key, title in (
+            ("phase", "Aktuális fázis"),
+            ("jacket_pressure", "Köpeny nyomása / célja"),
+            ("injection_pressure", "BES nyomása / célja"),
+            ("margin", "Nyomáskülönbség / minimum"),
+            ("jacket_state", "Köpenypumpa állapota"),
+            ("injection_state", "BES pumpa állapota"),
+            ("jacket_quality", "Köpeny telemetry"),
+            ("injection_quality", "BES telemetry"),
+            ("pending", "Függőben lévő parancs"),
+        ):
+            value = QLabel("—")
+            value.setObjectName(f"preparation_{key}")
+            value.setWordWrap(True)
+            form.addRow(title, value)
+            self._values[key] = value
+        layout.addLayout(form)
+        layout.addStretch()
+        self._cancel_button = QPushButton("Előkészítés megszakítása")
+        self._cancel_button.setObjectName("cancel_pump_preparation")
+        self._cancel_button.clicked.connect(self._cancel)
+        layout.addWidget(self._cancel_button)
+
+    @staticmethod
+    def _quality_text(quality: DataQuality, age: float | None) -> str:
+        age_text = "ismeretlen kor" if age is None else f"{age:.3f} s"
+        return f"{quality.value.upper()}, kor: {age_text}"
+
+    def update_progress(self, progress: PumpPreparationProgress) -> None:
+        self._values["phase"].setText(progress.phase)
+        self._values["jacket_pressure"].setText(
+            f"{progress.jacket_pressure_bar:.3f} / "
+            f"{progress.jacket_target_pressure_bar:.3f} bar"
+        )
+        self._values["injection_pressure"].setText(
+            f"{progress.injection_pressure_bar:.3f} / "
+            f"{progress.injection_target_pressure_bar:.3f} bar"
+        )
+        self._values["margin"].setText(
+            f"{progress.pressure_margin_bar:.3f} / "
+            f"{progress.minimum_margin_bar:.3f} bar"
+        )
+        self._values["jacket_state"].setText(progress.jacket_state)
+        self._values["injection_state"].setText(progress.injection_state)
+        self._values["jacket_quality"].setText(
+            self._quality_text(progress.jacket_quality, progress.jacket_age_seconds)
+        )
+        self._values["injection_quality"].setText(
+            self._quality_text(
+                progress.injection_quality,
+                progress.injection_age_seconds,
+            )
+        )
+        self._values["pending"].setText(progress.pending_command or "Nincs")
+
+    def _cancel(self) -> None:
+        self._cancel_event.set()
+        self._cancel_button.setEnabled(False)
+        self._cancel_button.setText("Megszakítás folyamatban…")
+
+    def reject(self) -> None:
+        self._cancel()
 
 
 class PreflightDialog(ResizableDialog):
@@ -6200,6 +6301,8 @@ class DashboardWindow(QMainWindow):
         self._startup_mode_restore_started = False
         self._pump_control: PumpControlService | None = None
         self._pending_measurement_pump_plan: MeasurementPumpPlan | None = None
+        self._pump_preparation_dialog: PumpPreparationProgressDialog | None = None
+        self._pump_preparation_cancel_event: Event | None = None
         self._applied_measurement_flow_ml_per_hour: float | None = None
         self._active_hardware_configuration: HardwareConfiguration | None = None
         self._active_pump_telemetry_intervals = next(
@@ -6278,6 +6381,9 @@ class DashboardWindow(QMainWindow):
         )
         self._runtime_bridge.pump_startup_progress.connect(
             self._measurement_pump_startup_progress
+        )
+        self._runtime_bridge.pump_preparation_progress.connect(
+            self._pump_preparation_progress
         )
         self._runtime_bridge.pump_startup_completed.connect(
             self._measurement_pump_startup_completed
@@ -7735,6 +7841,7 @@ class DashboardWindow(QMainWindow):
                 "CONFIG",
                 "pump telemetry settings updated; effective on next hardware "
                 f"activation: pressure_poll={intervals.pressure_seconds:.3f}s; "
+                f"status_poll={intervals.status_poll_seconds:.3f}s; "
                 f"slow_gap={intervals.slow_telemetry_seconds:.3f}s; "
                 f"pressure_stale={intervals.pressure_stale_seconds:.3f}s; "
                 "slow_stale="
@@ -9222,7 +9329,7 @@ class DashboardWindow(QMainWindow):
         pump_control.authorize(PumpControlService.AUTHORIZATION)
         try:
             new_devices.connect()
-            _enter_hardware_pumps_remote(
+            _observe_hardware_pump_connections(
                 pump_control,
                 jacket_enabled=configuration.jacket_pump_enabled,
                 injection_enabled=configuration.injection_pump_enabled,
@@ -10365,6 +10472,13 @@ class DashboardWindow(QMainWindow):
             if pump_control is None:
                 raise RuntimeError("a pumpavezérlés nem érhető el")
             self._preflight_active = True
+            cancel_event = Event()
+            self._pump_preparation_cancel_event = cancel_event
+            self._pump_preparation_dialog = PumpPreparationProgressDialog(
+                cancel_event,
+                self,
+            )
+            self._pump_preparation_dialog.show()
             active_stage = runtime_settings.active_stage
             control_interval_seconds = self._runtime.control_interval_seconds
             control_watchdog_tolerance_seconds = (
@@ -10392,6 +10506,10 @@ class DashboardWindow(QMainWindow):
                         ),
                         confirmation=confirmation,
                         startup_safety_check=startup_safety_check,
+                        progress_callback=(
+                            self._runtime_bridge.pump_preparation_progress.emit
+                        ),
+                        cancel_check=cancel_event.is_set,
                     )
                 except Exception as error:
                     self._runtime_bridge.pump_startup_failed.emit(str(error))
@@ -10423,15 +10541,7 @@ class DashboardWindow(QMainWindow):
         self._line_pressures.clear()
         self._alarm_points.clear()
         self._alarm_scatter.setData([])
-        pump_control = self._pump_control
-        if pump_control is not None:
-            pump_control.set_remote_supervision_active(True)
-        try:
-            self._runtime.start(settings)
-        except Exception:
-            if pump_control is not None:
-                pump_control.set_remote_supervision_active(False)
-            raise
+        self._runtime.start(settings)
         # RUNNING is the terminal state of startup: the acquisition/control
         # worker must be active before the public measurement state advances.
         self._devices.set_measurement_state(MeasurementState.RUNNING)
@@ -10449,7 +10559,22 @@ class DashboardWindow(QMainWindow):
         self._last_hardware_status_record = result
         self._apply_idle_hardware_record(result)
 
+    def _pump_preparation_progress(self, result: object) -> None:
+        if not isinstance(result, PumpPreparationProgress):
+            return
+        dialog = self._pump_preparation_dialog
+        if dialog is not None:
+            dialog.update_progress(result)
+
+    def _close_pump_preparation_dialog(self) -> None:
+        dialog = self._pump_preparation_dialog
+        self._pump_preparation_dialog = None
+        self._pump_preparation_cancel_event = None
+        if dialog is not None:
+            dialog.accept()
+
     def _measurement_pump_startup_completed(self) -> None:
+        self._close_pump_preparation_dialog()
         if (
             not self._preflight_active
             or self._devices.status.state is not ApplicationState.RUNNING
@@ -10571,6 +10696,7 @@ class DashboardWindow(QMainWindow):
         )
 
     def _measurement_pump_startup_failed(self, message: str) -> None:
+        self._close_pump_preparation_dialog()
         if not self._preflight_active:
             return
         self._preflight_active = False
