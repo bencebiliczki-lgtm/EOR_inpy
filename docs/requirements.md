@@ -202,17 +202,30 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   elavulása `DEGRADED` kapcsolatot jelezzen és maradjon látható, de önmagában ne
   állítsa le a nyomásszabályozást vagy a teljes mérést. A kapcsolatindításhoz
   nyomás és alapstátusz szükséges; a lassú mezők háttérben töltődhetnek fel.
+  A nyomáslekérdezés elsőbbséget élvezzen. A biztonságkritikus `STATUS` külön
+  ütemezést kapjon, és normál parancsfolyam se éheztethesse ki. A `FLOW` és
+  `VOLA` egyetlen körforgásos lassú sorban fusson. A következő határidő az előző
+  tranzakció tényleges befejezése után induljon; vezérlőparancs alatt a normál
+  polling szüneteljen. Sorban állás közben kitimeoutolt, még el nem kezdett
+  parancsot vissza kell vonni, hogy később ne futhasson le.
 - Developer/szerviz módban a közös Beállítások ablak külön
-  **Pumpatelemetria / STALE** oldala szerkessze a nyomás- és lassú polling
-  időközét, a két mezőcsoport STALE-határát és a kezdő telemetria timeoutját.
+  **Pumpatelemetria / STALE** oldala szerkessze a nyomás- és telemetria-polling
+  időközét, a PRESS, FLOW/VOLA és STATUS STALE-határát, valamint a kezdő
+  telemetria timeoutját.
   Nyomás-STALE-határ nem lehet rövidebb három pollingperiódusnál, illetve a
   soros timeout/próbálkozási keret plusz két pollingperiódusnál. A felület
   jelezze, hogy a nyomás STALE-határának növelése késlelteti a kapcsolatvesztés
   felismerését; az értékek csak a következő hardveraktiváláskor lépjenek életbe.
-  Az alapértelmezett nyomás-, FLOW-, VOLA- és STATUS-periódus 0,5 s; a
-  nyomás-STALE-határ 6 s, a többi mezőé 3 s, a kezdő telemetria timeoutja
-  3 s. Előkészítés és mérés ugyanazt az egy cache-elt pollingfolyamatot
-  használja; lassú mező után nem adható ki rejtett extra nyomáslekérdezés.
+  Az alapértelmezett nyomáspolling 0,5 s; a lassú körforgás egymást követő
+  elemei között 0,5 s szünet van. A nyomás-STALE-határ 6 s, a STATUS-é 8 s,
+  a FLOW/VOLA mezőké 33 s. A PRESS és FLOW/VOLA minimuma vegye figyelembe a
+  tényleges soros timeout/retry keretet; a STATUS biztonsági felismerési határa
+  az explicit jóváhagyott 8 s. Alacsonyabb elmentett érték ne kerülhessen
+  aktívan a workerbe. A kezdő timeout legalább két teljes soros timeout/retry keretet fedjen
+  le (`PRESS` + `STATUS`); az alapértelmezett 2 s × 2 próbálkozás mellett ez
+  8 s. Előkészítés és mérés ugyanazt az egy
+  cache-elt pollingfolyamatot használja. A felület külön jelezze a mentett és
+  a jelenlegi workerekben ténylegesen aktív időzítést.
 - A köpenynyomás felépülése alatt minden egyéb szenzor-, kapcsolat- és
   nyomáshatár maradjon aktív. Timeout, kezelői megszakítás vagy bármely hiba
   mindkét pumpán STOP-ot és a mérési runtime indításának tiltását váltsa ki.

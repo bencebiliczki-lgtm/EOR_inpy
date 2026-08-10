@@ -153,15 +153,15 @@ def test_measurement_preparation_enforces_configured_control_deadline() -> None:
 def test_blocking_preparation_commands_start_a_fresh_control_cycle() -> None:
     class SlowCommandPump(FakePump):
         def set_constant_pressure(self, target: float) -> None:
-            sleep(0.05)
+            sleep(0.1)
             super().set_constant_pressure(target)
 
         def run(self) -> None:
-            sleep(0.05)
+            sleep(0.1)
             super().run()
 
         def request_stop(self) -> None:
-            sleep(0.05)
+            sleep(0.1)
             super().request_stop()
 
     jacket = SlowCommandPump(120.0, [])
@@ -176,8 +176,8 @@ def test_blocking_preparation_commands_start_a_fresh_control_cycle() -> None:
     control.prepare_measurement_pumps(
         PumpStartupPlan(120.0, 60.0, 100.0, 10.0),
         timing=PumpControlTiming(
-                control_interval_seconds=0.01,
-                watchdog_tolerance_seconds=0.02,
+            control_interval_seconds=0.01,
+            watchdog_tolerance_seconds=0.04,
         ),
         confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
     )
@@ -194,6 +194,10 @@ def test_blocking_preparation_commands_start_a_fresh_control_cycle() -> None:
 
 
 def test_async_pump_workers_keep_slow_stop_outside_control_deadline() -> None:
+    class CacheOnlySupervisionPump(PollingPump):
+        def read_status(self) -> PumpStatus:
+            raise AssertionError("fast supervision must use read_cached_status")
+
     @dataclass
     class WorkerPump(FakePump):
         operating_status: str = "STOP REMOTE"
@@ -231,10 +235,18 @@ def test_async_pump_workers_keep_slow_stop_outside_control_deadline() -> None:
         slow_telemetry_stale_seconds=1.0,
         startup_timeout_seconds=1.0,
     )
-    jacket_raw = WorkerPump(120.0, [], stop_delay_seconds=0.07)
-    injection_raw = WorkerPump(100.0, [], stop_delay_seconds=0.07)
-    jacket = PollingPump(jacket_raw, name="jacket", intervals=intervals)
-    injection = PollingPump(injection_raw, name="injection", intervals=intervals)
+    jacket_raw = WorkerPump(120.0, [], stop_delay_seconds=0.12)
+    injection_raw = WorkerPump(100.0, [], stop_delay_seconds=0.12)
+    jacket = CacheOnlySupervisionPump(
+        jacket_raw,
+        name="jacket",
+        intervals=intervals,
+    )
+    injection = CacheOnlySupervisionPump(
+        injection_raw,
+        name="injection",
+        intervals=intervals,
+    )
     control = PumpControlService(jacket_pump=jacket, injection_pump=injection)
     control.authorize(PumpControlService.AUTHORIZATION)
     control.connect(PumpRole.JACKET)
@@ -242,11 +254,11 @@ def test_async_pump_workers_keep_slow_stop_outside_control_deadline() -> None:
 
     control.prepare_measurement_pumps(
         PumpStartupPlan(120.0, 60.0, 100.0, 10.0),
-        timing=PumpControlTiming(
-            control_interval_seconds=0.005,
-            watchdog_tolerance_seconds=0.001,
-            command_timeout_seconds=0.5,
-        ),
+            timing=PumpControlTiming(
+                control_interval_seconds=0.01,
+                watchdog_tolerance_seconds=0.04,
+                command_timeout_seconds=0.5,
+            ),
         confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
     )
 

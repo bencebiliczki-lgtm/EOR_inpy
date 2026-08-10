@@ -82,6 +82,7 @@ from eor_control.ni import NidaqmxDataAcquisition  # noqa: E402
 from eor_control.preflight import PreflightReport, PreflightStatus  # noqa: E402
 from eor_control.projects import ProjectRepository  # noqa: E402
 from eor_control.pump_control import PumpControlTiming, PumpRole  # noqa: E402
+from eor_control.pump_telemetry import PumpPollingIntervals  # noqa: E402
 from eor_control.simulators import (  # noqa: E402
     SimulatedDataAcquisition,
     SimulatedPump,
@@ -664,7 +665,8 @@ def test_pump_telemetry_stale_settings_are_validated_and_persisted(
     dialog.pressure_poll.setValue(0.5)
     dialog.slow_poll.setValue(2.0)
     dialog.pressure_stale.setValue(5.5)
-    dialog.slow_stale.setValue(5.0)
+    dialog.slow_stale.setValue(36.0)
+    dialog.status_stale.setValue(12.0)
     dialog.startup_timeout.setValue(8.0)
 
     dialog._save()
@@ -676,8 +678,36 @@ def test_pump_telemetry_stale_settings_are_validated_and_persisted(
     assert float(settings.value("hardware/stale_timeout_seconds")) == pytest.approx(
         5.5
     )
-    assert intervals.slow_telemetry_stale_seconds == pytest.approx(5.0)
+    assert intervals.slow_telemetry_stale_seconds == pytest.approx(36.0)
+    assert intervals.status_stale_seconds == pytest.approx(12.0)
     assert intervals.startup_timeout_seconds == pytest.approx(8.0)
+
+
+def test_pump_telemetry_dialog_distinguishes_saved_and_active_settings(
+    tmp_path: Path,
+) -> None:
+    application()
+    settings = QSettings(
+        str(tmp_path / "active-pump-telemetry.ini"), QSettings.Format.IniFormat
+    )
+    settings.setValue("developer/pump_pressure_poll_seconds", 0.5)
+    settings.setValue("developer/pump_slow_poll_seconds", 1.0)
+    active = PumpPollingIntervals(
+        pressure_seconds=0.7,
+        slow_telemetry_seconds=1.5,
+        pressure_stale_seconds=7.0,
+        slow_telemetry_stale_seconds=9.0,
+        startup_timeout_seconds=3.0,
+    )
+
+    dialog = PumpTelemetrySettingsDialog(settings, active_intervals=active)
+
+    assert "Mentett" in dialog.saved_settings.text()
+    assert "lassú szünet 1.000 s" in dialog.saved_settings.text()
+    assert "Aktív" in dialog.active_settings.text()
+    assert "PRESS 0.700 s" in dialog.active_settings.text()
+    assert "lassú szünet 1.500 s" in dialog.active_settings.text()
+    dialog.close()
 
 
 def test_pump_telemetry_uses_serial_budget_and_legacy_stale_setting(
@@ -693,7 +723,26 @@ def test_pump_telemetry_uses_serial_budget_and_legacy_stale_setting(
     intervals = PumpTelemetrySettingsDialog.intervals(settings)
 
     assert intervals.pressure_stale_seconds == pytest.approx(7.0)
+    assert intervals.slow_telemetry_stale_seconds == pytest.approx(33.0)
+    assert intervals.status_stale_seconds == pytest.approx(8.0)
+    assert intervals.startup_timeout_seconds == pytest.approx(8.0)
     assert not settings.contains("developer/pump_pressure_stale_seconds")
+
+
+def test_pump_startup_timeout_covers_pressure_and_status_retry_budgets(
+    tmp_path: Path,
+) -> None:
+    settings = QSettings(
+        str(tmp_path / "startup-budget.ini"), QSettings.Format.IniFormat
+    )
+    settings.setValue("hardware/serial_command_timeout_seconds", 2.3)
+    settings.setValue("hardware/serial_command_retries", 2)
+    settings.setValue("developer/pump_startup_timeout_seconds", 3.0)
+
+    intervals = PumpTelemetrySettingsDialog.intervals(settings)
+
+    assert intervals.startup_timeout_seconds == pytest.approx(9.2)
+    assert intervals.status_stale_seconds == pytest.approx(8.0)
 
 
 def test_pump_telemetry_menu_rejects_stale_limit_below_poll_interval(
@@ -710,6 +759,37 @@ def test_pump_telemetry_menu_rejects_stale_limit_below_poll_interval(
 
     assert not dialog._save_button.isEnabled()
     assert "HIBÁS BEÁLLÍTÁS" in dialog.validation.text()
+    dialog.close()
+
+
+def test_pump_telemetry_menu_rejects_slow_stale_below_one_round(
+    tmp_path: Path,
+) -> None:
+    application()
+    settings = QSettings(
+        str(tmp_path / "invalid-slow-stale.ini"), QSettings.Format.IniFormat
+    )
+    dialog = PumpTelemetrySettingsDialog(settings)
+    dialog.slow_poll.setValue(2.0)
+    dialog.slow_stale.setValue(5.0)
+
+    assert not dialog._save_button.isEnabled()
+    assert "FLOW/VOLA stale limit" in dialog.validation.text()
+    dialog.close()
+
+
+def test_pump_telemetry_menu_rejects_status_stale_below_retry_budget(
+    tmp_path: Path,
+) -> None:
+    application()
+    settings = QSettings(
+        str(tmp_path / "invalid-status-stale.ini"), QSettings.Format.IniFormat
+    )
+    dialog = PumpTelemetrySettingsDialog(settings)
+    dialog.status_stale.setValue(5.0)
+
+    assert not dialog._save_button.isEnabled()
+    assert "STATUS stale limit" in dialog.validation.text()
     dialog.close()
 
 

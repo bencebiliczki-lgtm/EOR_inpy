@@ -59,8 +59,9 @@ class PumpPollingIntervals:
     pressure_seconds: float = 0.5
     slow_telemetry_seconds: float = 0.5
     pressure_stale_seconds: float = 6.0
-    slow_telemetry_stale_seconds: float = 3.0
-    startup_timeout_seconds: float = 3.0
+    slow_telemetry_stale_seconds: float = 33.0
+    status_stale_seconds: float = 8.0
+    startup_timeout_seconds: float = 8.0
 
     def __post_init__(self) -> None:
         values = (
@@ -68,6 +69,7 @@ class PumpPollingIntervals:
             self.slow_telemetry_seconds,
             self.pressure_stale_seconds,
             self.slow_telemetry_stale_seconds,
+            self.status_stale_seconds,
             self.startup_timeout_seconds,
         )
         if not all(isfinite(value) and value > 0.0 for value in values):
@@ -76,6 +78,8 @@ class PumpPollingIntervals:
             raise ValueError("pump pressure stale limit must cover three polling intervals")
         if self.slow_telemetry_stale_seconds < self.slow_telemetry_seconds:
             raise ValueError("slow pump telemetry stale limit must cover one polling interval")
+        if self.status_stale_seconds < self.slow_telemetry_seconds:
+            raise ValueError("pump status stale limit must cover one polling interval")
 
 
 class PumpConnectionState(StrEnum):
@@ -123,6 +127,8 @@ class PollingPump:
     by the worker afterwards. Control reads only use the timestamped cache.
     """
 
+    COMMAND_QUEUE_WAIT_SECONDS = 2.0
+
     def __init__(
         self,
         pump: PollablePump,
@@ -155,10 +161,22 @@ class PollingPump:
         self._field_error_counts: dict[str, int] = {}
         self._operating_status_text: str | None = None
 
+    @property
+    def polling_intervals(self) -> PumpPollingIntervals:
+        """Return the immutable timing configuration active in this worker."""
+        return self._intervals
+
     def connect(self) -> None:
         with self._condition:
             if self._connected:
                 return
+            if self._thread is not None:
+                detail = (
+                    "worker is still stopping"
+                    if self._thread.is_alive()
+                    else "previous worker still requires disconnect cleanup"
+                )
+                raise RuntimeError(f"{self._name} pump {detail}; reconnect denied")
         with self._command_lock:
             self._pump.connect()
         with self._condition:
@@ -166,9 +184,11 @@ class PollingPump:
             self._stop_latched = False
             self._worker_error = None
             self._cache = None
-            self._stop_event.clear()
+            stop_event = Event()
+            self._stop_event = stop_event
             self._thread = Thread(
                 target=self._poll,
+                args=(stop_event,),
                 name=f"eor-{self._name}-pump-poll",
                 daemon=True,
             )
@@ -245,7 +265,7 @@ class PollingPump:
         operating_status = self._field_state(
             now,
             cache.operating_status_at,
-            self._intervals.slow_telemetry_stale_seconds,
+            self._intervals.status_stale_seconds,
             errors.get("status"),
             connected=connected,
         )
@@ -329,7 +349,7 @@ class PollingPump:
     def run(self) -> None:
         self._execute_command(
             PumpCommandKind.RUN,
-            priority=PumpCommandPriority.HIGH,
+            priority=PumpCommandPriority.NORMAL,
             verify_status=True,
         )
         with self._condition:
@@ -363,11 +383,23 @@ class PollingPump:
         self.cancel_pending_commands()
         with self._condition:
             self._connected = False
-            self._stop_event.set()
+            stop_event = self._stop_event
+            stop_event.set()
             thread = self._thread
+            self._condition.notify_all()
         self._log_connection_event("TELEMETRY_CONNECTION_LOST", "DISCONNECTED")
         if thread is not None and thread is not current_thread():
             thread.join(self._intervals.startup_timeout_seconds)
+            if thread.is_alive():
+                error = TimeoutError(
+                    f"{self._name} pump worker did not stop within "
+                    f"{self._intervals.startup_timeout_seconds:.1f} s; "
+                    "serial port left open and reconnect denied"
+                )
+                with self._condition:
+                    self._worker_error = error
+                    self._condition.notify_all()
+                raise error
         try:
             with self._command_lock:
                 self._pump.disconnect()
@@ -449,6 +481,34 @@ class PollingPump:
             self._pending_commands = 0
             self._condition.notify_all()
 
+    def cancel_command(self, command_id: str, *, reason: str) -> bool:
+        """Cancel a command only while it is still queued.
+
+        The heap entry is discarded lazily by ``_take_next_command``.  A
+        command that has already started cannot be interrupted safely in the
+        middle of a DASNET frame.
+        """
+        with self._condition:
+            result = self._command_results.get(command_id)
+            if result is None:
+                raise KeyError(f"unknown pump command id: {command_id}")
+            if result.status is not PumpCommandStatus.QUEUED:
+                return False
+            self._command_results[command_id] = PumpCommandResult(
+                command_id=result.command_id,
+                command=result.command,
+                status=PumpCommandStatus.CANCELLED,
+                submitted_monotonic=result.submitted_monotonic,
+                completed_monotonic=monotonic(),
+                error=reason,
+            )
+            self._pending_commands = sum(
+                queued_result.status is PumpCommandStatus.QUEUED
+                for queued_result in self._command_results.values()
+            )
+            self._condition.notify_all()
+            return True
+
     def submit_stop(self, *, emergency: bool = False) -> str:
         return self.submit_command(
             PumpCommand(
@@ -474,7 +534,7 @@ class PollingPump:
     ) -> PumpCommandResult:
         command = PumpCommand(kind, priority, value, verify_status=verify_status)
         command_id = self.submit_command(command, require_connected=require_connected)
-        wait_deadline = monotonic() + command.timeout_seconds + 2.0
+        queue_deadline = monotonic() + self.COMMAND_QUEUE_WAIT_SECONDS
         while True:
             result = self.command_result(command_id)
             if result.status.terminal:
@@ -489,15 +549,24 @@ class PollingPump:
                         result.error.removeprefix("ConnectionError:").strip()
                     )
                 raise RuntimeError(result.error or f"pump command {result.status.value}")
-            remaining = wait_deadline - monotonic()
-            if remaining <= 0.0:
-                raise TimeoutError(
-                    f"{self._name} command result wait timed out: {kind.value}"
-                )
+            if result.status is PumpCommandStatus.QUEUED:
+                remaining = queue_deadline - monotonic()
+                if remaining <= 0.0:
+                    message = (
+                        f"{self._name} queued command wait timed out and was "
+                        f"cancelled: {kind.value}"
+                    )
+                    if self.cancel_command(command_id, reason=message):
+                        raise TimeoutError(message)
+                    continue
+            else:
+                # RUNNING time is supervised independently by command_result().
+                # Never count queueing delay against the serial transaction.
+                remaining = 0.05
             with self._condition:
                 self._condition.wait(timeout=min(remaining, 0.05))
 
-    def _poll(self) -> None:
+    def _poll(self, stop_event: Event) -> None:
         try:
             pressure = self._read("PRESS", self._pump.read_pressure_bar)
             pressure_at = monotonic()
@@ -516,37 +585,87 @@ class PollingPump:
 
             schedule_origin = monotonic()
             next_pressure = schedule_origin + self._intervals.pressure_seconds
-            slow_step = self._intervals.slow_telemetry_seconds / 3.0
-            next_flow = schedule_origin
-            next_volume = schedule_origin + slow_step
-            next_status = schedule_origin + (2.0 * slow_step)
-            while not self._stop_event.is_set():
-                queued = self._take_next_command()
+            next_status = schedule_origin + self._intervals.slow_telemetry_seconds
+            next_slow = schedule_origin
+            slow_fields = ("flow", "volume")
+            slow_field_index = 0
+            consecutive_pressure_reads = 0
+            while not stop_event.is_set():
+                # Emergency and STOP commands are the only traffic allowed to
+                # overtake an overdue safety-critical pressure refresh.
+                queued = self._take_next_command(
+                    maximum_priority=PumpCommandPriority.HIGH
+                )
                 if queued is not None:
                     self._run_queued_command(*queued)
+                    command_completed = monotonic()
+                    next_pressure = command_completed
+                    consecutive_pressure_reads = 0
+                    if queued[1].verify_status:
+                        next_status = (
+                            command_completed
+                            + self._intervals.slow_telemetry_seconds
+                        )
+                    next_slow = (
+                        command_completed + self._intervals.slow_telemetry_seconds
+                    )
                     continue
-                deadlines = {
-                    "pressure": next_pressure,
-                    "flow": next_flow,
-                    "volume": next_volume,
-                    "status": next_status,
-                }
-                field, due = min(
-                    deadlines.items(),
-                    key=lambda item: (
-                        item[1],
-                        0 if item[0] == "pressure" else 1,
-                    ),
-                )
+                now = monotonic()
+                if now >= next_pressure and not (
+                    now >= next_slow and consecutive_pressure_reads >= 1
+                ):
+                    field, due = "pressure", next_pressure
+                elif now >= next_status:
+                    # STATUS is safety-critical and cannot be starved by a
+                    # continuous stream of normal CONFIG/RUN commands.
+                    field, due = "status", next_status
+                else:
+                    queued = self._take_next_command()
+                    if queued is not None:
+                        self._run_queued_command(*queued)
+                        command_completed = monotonic()
+                        next_pressure = command_completed
+                        consecutive_pressure_reads = 0
+                        if queued[1].verify_status:
+                            next_status = (
+                                command_completed
+                                + self._intervals.slow_telemetry_seconds
+                            )
+                        next_slow = (
+                            command_completed
+                            + self._intervals.slow_telemetry_seconds
+                        )
+                        continue
+                    if now >= next_slow:
+                        field, due = slow_fields[slow_field_index], next_slow
+                    else:
+                        field, due = min(
+                            (
+                                ("pressure", next_pressure),
+                                ("status", next_status),
+                                (slow_fields[slow_field_index], next_slow),
+                            ),
+                            key=lambda candidate: candidate[1],
+                        )
                 with self._condition:
                     self._condition.wait_for(
                         lambda: bool(self._command_queue)
-                        or self._stop_event.is_set(),
+                        or stop_event.is_set(),
                         timeout=max(0.0, due - monotonic()),
                     )
-                    if self._stop_event.is_set():
+                    if stop_event.is_set():
                         break
-                    if self._command_queue:
+                    urgent_command_queued = any(
+                        priority <= int(PumpCommandPriority.HIGH)
+                        and self._command_results[command_id].status
+                        is PumpCommandStatus.QUEUED
+                        for priority, _, command_id in self._command_queue
+                    )
+                    if self._command_queue and (
+                        field not in {"pressure", "status"}
+                        or monotonic() < due
+                        or urgent_command_queued
+                    ):
                         continue
                 started = monotonic()
                 lateness = max(0.0, started - due)
@@ -592,45 +711,47 @@ class PollingPump:
                 except Exception as field_error:
                     self._record_field_error(field, field_error)
                 finally:
-                    next_due = self._advance_polling_deadline(
-                        due,
-                        interval,
-                        monotonic(),
-                    )
+                    completed = monotonic()
                     if field == "pressure":
-                        next_pressure = next_due
-                    elif field == "flow":
-                        next_flow = next_due
-                    elif field == "volume":
-                        next_volume = next_due
+                        consecutive_pressure_reads += 1
+                        next_pressure = self._next_polling_deadline(
+                            completed,
+                            self._intervals.pressure_seconds,
+                        )
+                    elif field == "status":
+                        consecutive_pressure_reads = 0
+                        next_status = self._next_polling_deadline(
+                            completed,
+                            self._intervals.slow_telemetry_seconds,
+                        )
                     else:
-                        next_status = next_due
+                        consecutive_pressure_reads = 0
+                        slow_field_index = (slow_field_index + 1) % len(slow_fields)
+                        next_slow = self._next_polling_deadline(
+                            completed,
+                            self._intervals.slow_telemetry_seconds,
+                        )
                     if log_health:
                         self._log_telemetry_health()
         except Exception as error:
             with self._condition:
-                if not self._stop_event.is_set():
+                if not stop_event.is_set():
                     self._worker_error = error
                     self._connected = False
                 self._condition.notify_all()
-            if not self._stop_event.is_set():
+            if not stop_event.is_set():
                 self._log_connection_event(
                     "TELEMETRY_CONNECTION_LOST",
                     f"FAILED: {type(error).__name__}: {error}",
                 )
 
     @staticmethod
-    def _advance_polling_deadline(
-        previous_deadline: float,
+    def _next_polling_deadline(
+        transaction_completed: float,
         interval: float,
-        now: float,
     ) -> float:
-        """Keep the configured cadence without accumulating transaction drift."""
-        next_deadline = previous_deadline + interval
-        if next_deadline <= now:
-            missed_intervals = int((now - next_deadline) // interval) + 1
-            next_deadline += missed_intervals * interval
-        return next_deadline
+        """Schedule from completion; serial response time is part of the cadence."""
+        return transaction_completed + interval
 
     def _read(self, command: str, operation: Callable[[], T]) -> T:
         # Only this pump's worker calls the raw adapter. A transaction already
@@ -645,13 +766,24 @@ class PollingPump:
             with self._condition:
                 self._last_command_elapsed_ms = (monotonic() - started) * 1000.0
 
-    def _take_next_command(self) -> tuple[str, PumpCommand] | None:
+    def _take_next_command(
+        self,
+        *,
+        maximum_priority: PumpCommandPriority | None = None,
+    ) -> tuple[str, PumpCommand] | None:
         with self._condition:
             while self._command_queue:
-                _, _, command_id = heappop(self._command_queue)
+                priority, _, command_id = self._command_queue[0]
                 result = self._command_results[command_id]
                 if result.status is not PumpCommandStatus.QUEUED:
+                    heappop(self._command_queue)
                     continue
+                if (
+                    maximum_priority is not None
+                    and priority > int(maximum_priority)
+                ):
+                    return None
+                heappop(self._command_queue)
                 started = monotonic()
                 self._command_results[command_id] = PumpCommandResult(
                     command_id=result.command_id,
@@ -763,6 +895,24 @@ class PollingPump:
     @staticmethod
     def _verify_command_status(kind: PumpCommandKind, status: str) -> None:
         normalized = status.upper()
+        if kind is PumpCommandKind.ENTER_REMOTE:
+            stripped = normalized.strip()
+            responsive_state = (
+                "STATUS=STOP" in normalized
+                or "STATUS=RUN" in normalized
+                or stripped.startswith("STOP")
+                or stripped.startswith("RUN")
+            )
+            if (
+                "LOCAL" in normalized
+                or "PROBLEM" in normalized
+                or not responsive_state
+            ):
+                raise RuntimeError(
+                    "pump STATUS did not confirm REMOTE: "
+                    f"{status or 'empty response'}"
+                )
+            return
         expected = (
             "STOP"
             if kind is PumpCommandKind.STOP
@@ -947,11 +1097,11 @@ class PollingPump:
         return None if updated_at is None else max(0.0, monotonic() - updated_at)
 
     def _stale_limit(self, field: str) -> float:
-        return (
-            self._intervals.pressure_stale_seconds
-            if field == "pressure"
-            else self._intervals.slow_telemetry_stale_seconds
-        )
+        if field == "pressure":
+            return self._intervals.pressure_stale_seconds
+        if field == "status":
+            return self._intervals.status_stale_seconds
+        return self._intervals.slow_telemetry_stale_seconds
 
     def _log_field_event(
         self,
@@ -1005,7 +1155,9 @@ class PollingPump:
                 ),
                 "safety_rule": safety_rule,
                 "selected_fault_strategy": (
-                    "FULL_SAFE_STOP" if field == "pressure" else "DEGRADED_TELEMETRY"
+                    "FULL_SAFE_STOP"
+                    if field in {"pressure", "status"}
+                    else "DEGRADED_TELEMETRY"
                 ),
                 "action": action,
                 "action_result": action_result,

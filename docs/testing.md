@@ -227,7 +227,21 @@ igazolja a KÖP átállítási lépései közötti friss safety ciklust. A rollb
 Worker-regresszió ellenőrzi, hogy a már sorban álló STOP megelőzi a következő
 telemetriát, az egyik pumpa blokkolt tranzakciója nem állítja meg a másik workerét,
 a STATUS igazolja a STOP/RUN eredményt, és a parancstimeout nem control-cycle
-deadline néven jelenik meg.
+deadline néven jelenik meg. Külön teszt igazolja, hogy a sorban állás közben
+kitimeoutolt parancs törlődik és a blokkoló tranzakció után sem fut le.
+Külön ütemezési regresszió igazolja a biztonságkritikus `PRESS`/`STATUS`
+prioritást, a `FLOW → VOLA` körforgást, a tényleges tranzakcióidő utáni
+újraütemezést és a felzárkózó burst hiányát. A UI-teszt különböző
+értékekkel ellenőrzi a mentett és az aktív pollingbeállítás megjelenítését.
+Prioritási regresszió blokkolt telemetriakeret után igazolja a
+`STOP → PRESS → CONFIG` sorrendet, továbbá azt, hogy két normál parancs közé
+nyomásfrissítés kerül. LOCAL módban maradó BES esetén a REMOTE-visszaigazolás
+hibás, ezért RUN parancs nem követheti; a szabványos `STATUS=STOP/RUN` válasz
+viszont akkor is érvényes, ha nem ismétli meg szó szerint a `REMOTE` szót.
+A startup-budget teszt két teljes PRESS/STATUS retry-keretet követel meg. A
+blokkolt worker leválasztási regressziója igazolja, hogy timeoutnál a port nem
+záródik be, reconnect nem indul, és a cleanup csak a régi worker befejezése
+után hajtható végre.
 A részleges kapcsolati tesztek igazolják, hogy az egyik pumpa vagy NI-bemenet hibája
 mellett a többi eszköz sikeres státusza megmarad, a kapcsolódás és REMOTE módba
 lépés egy műveletként fut, REMOTE-hibánál pedig a port bezáródik. Bezáráskor minden
@@ -245,16 +259,15 @@ Külön regresszió rögzíti, hogy a nyomás `STALE` határa legalább három
 pollingperiódust és a soros timeout/próbálkozási keretet lefedi. A DASNET-teszt
 ellenőrzi, hogy a töredékes válaszolvasás egy próbálkozáson belül nem nyit több
 teljes timeoutablakot, a pumpatelemetria-regresszió pedig valós blokkolási idővel
-igazolja, hogy az abszolút pollinghatáridő nem halmoz tranzakciós driftet, és
-a lassú mezők után nem keletkezik konfigurálatlan extra nyomáslekérdezés.
-Külön teszt ellenőrzi, hogy a REMOTE, konfigurációs és RUN parancsok nem
-adnak ki a konfigurált pollingütemen kívüli rejtett nyomáslekérdezést.
+igazolja, hogy a tranzakció befejezésétől számított ütemezés nem hoz létre
+felzárkózó pollingburstöt. Külön teszt ellenőrzi a vezérlőparancsok közötti
+kötelező biztonsági PRESS/STATUS lehetőséget és a normál parancsok kifutását.
 Külön telemetriateszt igazolja, hogy FLOW/VOLA timeout mellett a nyomáspolling
 tovább fut, a nyomás minősége `GOOD` marad, míg a kapcsolat `DEGRADED` állapotot
 és mezőszintű hibát ad.
-A STALE szervizoldal UI-tesztje ellenőrzi a polling-, STALE- és startup
-timeoutértékek tartós mentését, visszatöltését, valamint a polling időköznél
-rövidebb STALE-határ mentésének tiltását.
+A STALE szervizoldal UI-tesztje ellenőrzi a polling-, külön PRESS/FLOW-VOLA/STATUS
+STALE- és startup timeoutértékek tartós mentését, visszatöltését, valamint a
+soros retry-keretnél rövidebb STALE-határ mentésének tiltását.
 Hiányos telemetria mellett a működő szenzor értéke látható,
 miközben a kapcsolatfrissítés nem indít közös biztonsági mérési ciklust, a
 biztonságkritikus RUN külön ellenőrzése pedig változatlan marad.

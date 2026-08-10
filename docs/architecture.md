@@ -542,6 +542,12 @@ vezérlési szál későbbi ciklusokban csak a `CommandResult` állapotát ellen
 Pumpánként egy `PollingPump` worker az adott COM-port kizárólagos tulajdonosa,
 ugyanott ütemezi a pollingot és a parancsokat. Emiatt ugyanazon porton nem
 keveredhet két keret, miközben a KÖP és BES külön workerén párhuzamosan haladhat.
+A worker a STOP-ot, majd az esedékes biztonságkritikus `PRESS` és `STATUS`
+lekérdezést részesíti előnyben; a `FLOW/VOLA` mezőket külön körforgásban olvassa.
+Az esedékes `STATUS`-t normál konfigurációs parancsfolyam sem éheztetheti ki.
+Az időköz a tranzakció befejezésétől számítódik,
+így a soros válaszidő nem hoz létre behozandó pollinghátralékot. Aktív
+vezérlőparancs alatt normál telemetria-tranzakció nem indul.
 A vezérlési watchdog csak a cache-/NI-kiértékelést méri; a queue-várakozásnak,
 parancstranzakciónak, állapotátmenetnek és teljes nyomásfelépítésnek külön
 időkorlátja van. A rollback mindkét STOP-ot előbb queue-ba helyezi, majd
@@ -635,10 +641,11 @@ dobozokat. Ezek a komponensek csak widgetet hoznak létre és a meglévő
 alkalmazási metódusokra kötik a signalokat; hardver- vagy vezérlési döntést
 nem tartalmaznak.
 
-Az előkészítés és a mérés ugyanazt a `PollingPump` cache-t olvassa. Az
-ütemező abszolút határidőkkel tartja a konfigurált periódust, kimaradt időrésnél
-a következő érvényes slotra lép, és FLOW/VOLA/STATUS után nem iktat be
-konfigurálatlan extra PRESS tranzakciót.
+Az előkészítés és a mérés ugyanazt a `PollingPump` cache-t olvassa. Az ütemező
+a tranzakció tényleges befejezésétől számítja a következő határidőt, ezért nem
+próbálja bursttel behozni a soros válaszidő miatt kimaradt időt. A `PRESS` és
+`STATUS` biztonsági prioritást kap, a `FLOW/VOLA` körforgás pedig csak a port
+fennmaradó kapacitását használja.
 A `PumpControlService` előkészítési felügyeleti ciklusa a
 `BackgroundControlRunner` aktuális ciklusidejét és watchdog-tűrését kapja meg.
 Abszolút monotonic határidőt használ, ezért az ellenőrzés végrehajtási ideje

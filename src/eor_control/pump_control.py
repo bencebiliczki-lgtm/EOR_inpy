@@ -185,7 +185,7 @@ class PumpControlService:
         self._connected[role] = True
         self._states[role] = PumpPreparationState()
         self._log(role.value, "CONNECTED")
-        return self._pumps[role].read_status()
+        return self._supervision_status(role)
 
     def connect_remote(self, role: PumpRole) -> PumpStatus:
         """Connect, identify and enter REMOTE mode as one manual operation."""
@@ -267,6 +267,31 @@ class PumpControlService:
         for role in PumpRole:
             self._require_connected(role)
         return {role: pump.read_status() for role, pump in self._pumps.items()}
+
+    def _supervision_status(self, role: PumpRole) -> PumpStatus:
+        """Use cache-only status for pumps that expose an asynchronous worker."""
+        pump = self._pumps[role]
+        submit = getattr(pump, "submit_command", None)
+        result_reader = getattr(pump, "command_result", None)
+        if callable(submit) or callable(result_reader):
+            if not callable(submit) or not callable(result_reader):
+                raise RuntimeError(
+                    f"{role.value} pump has an incomplete asynchronous interface"
+                )
+            cache_reader = getattr(pump, "read_cached_status", None)
+            if not callable(cache_reader):
+                raise RuntimeError(
+                    f"{role.value} asynchronous pump has no cache-only status reader"
+                )
+            status, _quality = cache_reader()
+            return cast(PumpStatus, status)
+        return pump.read_status()
+
+    def _supervision_statuses(self) -> dict[PumpRole, PumpStatus]:
+        self._require_authorized()
+        for role in PumpRole:
+            self._require_connected(role)
+        return {role: self._supervision_status(role) for role in PumpRole}
 
     def enter_remote(self, role: PumpRole) -> None:
         self._require_authorized()
@@ -418,7 +443,7 @@ class PumpControlService:
         timing: PumpControlTiming,
         startup_safety_check: Callable[[], tuple[str, ...]] | None,
     ) -> None:
-        """Run one blocking pump transaction per supervised state transition."""
+        """Advance state from cache while pump workers execute serial commands."""
         phase = _PreparationPhase.JACKET_REMOTE
         phase_deadline = monotonic() + timing.pressure_buildup_timeout_seconds
         next_control = monotonic()
@@ -428,7 +453,7 @@ class PumpControlService:
         while True:
             cycle_started = monotonic()
             self._require_startup_safe(startup_safety_check)
-            statuses = self.statuses()
+            statuses = self._supervision_statuses()
             self._require_control_deadline(
                 cycle_started,
                 timing.control_interval_seconds,
@@ -702,7 +727,7 @@ class PumpControlService:
 
     @staticmethod
     def _wait_after_preparation_command(interval_seconds: float) -> float:
-        """Start a new cadence after a bounded, blocking DASNET transaction."""
+        """Start a fresh supervision cadence after submitting one transition."""
         next_control = monotonic() + interval_seconds
         sleep(max(0.0, next_control - monotonic()))
         return next_control
@@ -720,12 +745,16 @@ class PumpControlService:
         pump = self._pumps[role]
         submit = getattr(pump, "submit_command", None)
         result_reader = getattr(pump, "command_result", None)
+        if callable(submit) != callable(result_reader):
+            raise RuntimeError(
+                f"{role.value} pump has an incomplete asynchronous command interface"
+            )
         if callable(submit) and callable(result_reader):
             command = PumpCommand(
                 kind,
                 (
                     PumpCommandPriority.HIGH
-                    if kind in {PumpCommandKind.STOP, PumpCommandKind.RUN}
+                    if kind is PumpCommandKind.STOP
                     else PumpCommandPriority.NORMAL
                 ),
                 value,
@@ -953,7 +982,7 @@ class PumpControlService:
             )
 
     def _require_injection_start_margin(self) -> float:
-        statuses = self.statuses()
+        statuses = self._supervision_statuses()
         margin = (
             statuses[PumpRole.JACKET].pressure_bar
             - statuses[PumpRole.INJECTION].pressure_bar

@@ -3672,7 +3672,11 @@ class ControlCycleSettingsDialog(ResizableDialog):
     DEFAULT_INTERVAL_SECONDS = 0.2
     DEFAULT_WATCHDOG_TOLERANCE_SECONDS = 0.05
 
-    def __init__(self, settings: QSettings, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        settings: QSettings,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._settings = settings
         self.setWindowTitle("Developer – vezérlési ciklus")
@@ -3783,10 +3787,17 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         "slow_telemetry_seconds": "developer/pump_slow_poll_seconds",
         "pressure_stale_seconds": "developer/pump_pressure_stale_seconds",
         "slow_telemetry_stale_seconds": "developer/pump_slow_stale_seconds",
+        "status_stale_seconds": "developer/pump_status_stale_seconds",
         "startup_timeout_seconds": "developer/pump_startup_timeout_seconds",
     }
 
-    def __init__(self, settings: QSettings, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        settings: QSettings,
+        parent: QWidget | None = None,
+        *,
+        active_intervals: PumpPollingIntervals | None = None,
+    ) -> None:
         super().__init__(parent)
         self._settings = settings
         self.setWindowTitle("Developer – pumpatelemetria és STALE")
@@ -3806,6 +3817,20 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         layout.addWidget(warning)
 
         defaults = self.intervals(settings)
+        self.saved_settings = QLabel(self._interval_summary("Mentett", defaults))
+        self.saved_settings.setObjectName("pump_telemetry_saved_settings")
+        self.saved_settings.setWordWrap(True)
+        layout.addWidget(self.saved_settings)
+        active_text = (
+            self._interval_summary("Aktív", active_intervals)
+            if active_intervals is not None
+            else "Aktív: nincs fizikai pumpaworker. A mentett értékek a következő "
+            "hardveraktiváláskor lépnek életbe."
+        )
+        self.active_settings = QLabel(active_text)
+        self.active_settings.setObjectName("pump_telemetry_active_settings")
+        self.active_settings.setWordWrap(True)
+        layout.addWidget(self.active_settings)
         form = QFormLayout()
         self.pressure_poll = self._seconds_field(0.1, 10.0, 0.1)
         self.pressure_poll.setObjectName("pump_pressure_poll_seconds")
@@ -3816,9 +3841,12 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         self.pressure_stale = self._seconds_field(0.2, 60.0, 0.1)
         self.pressure_stale.setObjectName("pump_pressure_stale_seconds")
         self.pressure_stale.setValue(defaults.pressure_stale_seconds)
-        self.slow_stale = self._seconds_field(0.5, 120.0, 0.5)
+        self.slow_stale = self._seconds_field(0.5, 600.0, 0.5)
         self.slow_stale.setObjectName("pump_slow_stale_seconds")
         self.slow_stale.setValue(defaults.slow_telemetry_stale_seconds)
+        self.status_stale = self._seconds_field(0.5, 120.0, 0.5)
+        self.status_stale.setObjectName("pump_status_stale_seconds")
+        self.status_stale.setValue(defaults.status_stale_seconds)
         self.startup_timeout = self._seconds_field(1.0, 120.0, 0.5)
         self.startup_timeout.setObjectName("pump_startup_timeout_seconds")
         self.startup_timeout.setValue(defaults.startup_timeout_seconds)
@@ -3827,7 +3855,10 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
             self.pressure_poll,
         )
         form.addRow(
-            input_field_label("FLOW/VOLA/STATUS polling időköze", self.slow_poll),
+            input_field_label(
+                "Telemetria-lekérdezések szünete",
+                self.slow_poll,
+            ),
             self.slow_poll,
         )
         form.addRow(
@@ -3835,8 +3866,12 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
             self.pressure_stale,
         )
         form.addRow(
-            input_field_label("FLOW/VOLA/STATUS STALE-határa", self.slow_stale),
+            input_field_label("FLOW/VOLA STALE-határa", self.slow_stale),
             self.slow_stale,
+        )
+        form.addRow(
+            input_field_label("STATUS STALE-határa", self.status_stale),
+            self.status_stale,
         )
         form.addRow(
             input_field_label("Kezdő telemetria timeout", self.startup_timeout),
@@ -3863,6 +3898,7 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
             self.slow_poll,
             self.pressure_stale,
             self.slow_stale,
+            self.status_stale,
             self.startup_timeout,
         ):
             field.valueChanged.connect(self._refresh_validation)
@@ -3879,6 +3915,20 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         field.setSuffix(" s")
         return field
 
+    @staticmethod
+    def _interval_summary(
+        label: str,
+        intervals: PumpPollingIntervals,
+    ) -> str:
+        return (
+            f"{label}: PRESS {intervals.pressure_seconds:.3f} s; lassú szünet "
+            f"{intervals.slow_telemetry_seconds:.3f} s; sorrend: PRESS elsőbbség, "
+            "STATUS, majd FLOW/VOLA körforgás; STALE PRESS/FLOW-VOLA/STATUS "
+            f"{intervals.pressure_stale_seconds:.3f} / "
+            f"{intervals.slow_telemetry_stale_seconds:.3f} / "
+            f"{intervals.status_stale_seconds:.3f} s."
+        )
+
     def selected_intervals(self) -> PumpPollingIntervals:
         pressure_poll = self.pressure_poll.value()
         minimum_pressure_stale = self.minimum_pressure_stale_seconds(
@@ -3889,11 +3939,34 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
                 "pump pressure stale limit must cover the configured DASNET "
                 f"timeout/retry budget ({minimum_pressure_stale:.3f} s)"
             )
+        minimum_slow_stale = self.minimum_slow_stale_seconds(
+            self._settings, self.slow_poll.value()
+        )
+        if self.slow_stale.value() < minimum_slow_stale:
+            raise ValueError(
+                "FLOW/VOLA stale limit must cover a complete prioritized poll "
+                f"round ({minimum_slow_stale:.3f} s serial retry budget)"
+            )
+        minimum_status_stale = self.minimum_status_stale_seconds()
+        if self.status_stale.value() < minimum_status_stale:
+            raise ValueError(
+                "STATUS stale limit must cover the prioritized polling round "
+                f"({minimum_status_stale:.3f} s serial retry budget)"
+            )
+        minimum_startup_timeout = self.minimum_startup_timeout_seconds(
+            self._settings
+        )
+        if self.startup_timeout.value() < minimum_startup_timeout:
+            raise ValueError(
+                "startup telemetry timeout must cover PRESS and STATUS retry "
+                f"budgets ({minimum_startup_timeout:.3f} s)"
+            )
         return PumpPollingIntervals(
             pressure_seconds=pressure_poll,
             slow_telemetry_seconds=self.slow_poll.value(),
             pressure_stale_seconds=self.pressure_stale.value(),
             slow_telemetry_stale_seconds=self.slow_stale.value(),
+            status_stale_seconds=self.status_stale.value(),
             startup_timeout_seconds=self.startup_timeout.value(),
         )
 
@@ -3932,6 +4005,9 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
             if isfinite(legacy_pressure_stale):
                 pressure_stale_fallback = legacy_pressure_stale
         pressure_seconds = value("pressure_seconds", defaults.pressure_seconds)
+        slow_telemetry_seconds = value(
+            "slow_telemetry_seconds", defaults.slow_telemetry_seconds
+        )
         configured_pressure_stale = value(
             "pressure_stale_seconds", pressure_stale_fallback
         )
@@ -3941,23 +4017,42 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
             command_timeout_seconds=command_timeout_seconds,
             command_attempts=command_attempts,
         )
+        minimum_startup_timeout = cls.minimum_startup_timeout_seconds(
+            settings,
+            command_timeout_seconds=command_timeout_seconds,
+            command_attempts=command_attempts,
+        )
+        minimum_slow_stale = cls.minimum_slow_stale_seconds(
+            settings,
+            slow_telemetry_seconds,
+            command_timeout_seconds=command_timeout_seconds,
+            command_attempts=command_attempts,
+        )
+        minimum_status_stale = cls.minimum_status_stale_seconds()
         try:
             return PumpPollingIntervals(
                 pressure_seconds=pressure_seconds,
-                slow_telemetry_seconds=value(
-                    "slow_telemetry_seconds",
-                    defaults.slow_telemetry_seconds,
-                ),
+                slow_telemetry_seconds=slow_telemetry_seconds,
                 pressure_stale_seconds=max(
                     configured_pressure_stale, minimum_pressure_stale
                 ),
-                slow_telemetry_stale_seconds=value(
-                    "slow_telemetry_stale_seconds",
-                    defaults.slow_telemetry_stale_seconds,
+                slow_telemetry_stale_seconds=max(
+                    value(
+                        "slow_telemetry_stale_seconds",
+                        defaults.slow_telemetry_stale_seconds,
+                    ),
+                    minimum_slow_stale,
                 ),
-                startup_timeout_seconds=value(
-                    "startup_timeout_seconds",
-                    defaults.startup_timeout_seconds,
+                status_stale_seconds=max(
+                    value("status_stale_seconds", defaults.status_stale_seconds),
+                    minimum_status_stale,
+                ),
+                startup_timeout_seconds=max(
+                    value(
+                        "startup_timeout_seconds",
+                        defaults.startup_timeout_seconds,
+                    ),
+                    minimum_startup_timeout,
                 ),
             )
         except ValueError:
@@ -3974,10 +4069,30 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
                     ),
                 ),
                 slow_telemetry_stale_seconds=(
-                    defaults.slow_telemetry_stale_seconds
+                    max(defaults.slow_telemetry_stale_seconds, minimum_slow_stale)
                 ),
-                startup_timeout_seconds=defaults.startup_timeout_seconds,
+                status_stale_seconds=max(
+                    defaults.status_stale_seconds, minimum_status_stale
+                ),
+                startup_timeout_seconds=max(
+                    defaults.startup_timeout_seconds,
+                    minimum_startup_timeout,
+                ),
             )
+
+    @staticmethod
+    def minimum_startup_timeout_seconds(
+        settings: QSettings,
+        *,
+        command_timeout_seconds: float | None = None,
+        command_attempts: int | None = None,
+    ) -> float:
+        timeout, attempts = PumpTelemetrySettingsDialog._serial_retry_budget(
+            settings,
+            command_timeout_seconds=command_timeout_seconds,
+            command_attempts=command_attempts,
+        )
+        return 2.0 * timeout * attempts
 
     @staticmethod
     def minimum_pressure_stale_seconds(
@@ -3987,6 +4102,44 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         command_timeout_seconds: float | None = None,
         command_attempts: int | None = None,
     ) -> float:
+        timeout, attempts = PumpTelemetrySettingsDialog._serial_retry_budget(
+            settings,
+            command_timeout_seconds=command_timeout_seconds,
+            command_attempts=command_attempts,
+        )
+        return max(
+            3.0 * pressure_seconds,
+            timeout * attempts + 2.0 * pressure_seconds,
+        )
+
+    @staticmethod
+    def minimum_status_stale_seconds() -> float:
+        """Return the explicitly approved safety recognition limit."""
+        return 8.0
+
+    @staticmethod
+    def minimum_slow_stale_seconds(
+        settings: QSettings,
+        slow_telemetry_seconds: float,
+        *,
+        command_timeout_seconds: float | None = None,
+        command_attempts: int | None = None,
+    ) -> float:
+        timeout, attempts = PumpTelemetrySettingsDialog._serial_retry_budget(
+            settings,
+            command_timeout_seconds=command_timeout_seconds,
+            command_attempts=command_attempts,
+        )
+        # FLOW and VOLA alternate; prioritized PRESS/STATUS traffic comes first.
+        return 8.0 * timeout * attempts + 2.0 * slow_telemetry_seconds
+
+    @staticmethod
+    def _serial_retry_budget(
+        settings: QSettings,
+        *,
+        command_timeout_seconds: float | None,
+        command_attempts: int | None,
+    ) -> tuple[float, int]:
         try:
             timeout = (
                 float(command_timeout_seconds)
@@ -4003,11 +4156,8 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         except (TypeError, ValueError):
             timeout, attempts = 2.0, 2
         if not isfinite(timeout) or timeout <= 0.0 or attempts < 1:
-            timeout, attempts = 2.0, 2
-        return max(
-            3.0 * pressure_seconds,
-            timeout * attempts + 2.0 * pressure_seconds,
-        )
+            return 2.0, 2
+        return timeout, attempts
 
     def _refresh_validation(self, *_args: object) -> None:
         try:
@@ -4033,6 +4183,7 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
             "slow_telemetry_stale_seconds": (
                 intervals.slow_telemetry_stale_seconds
             ),
+            "status_stale_seconds": intervals.status_stale_seconds,
             "startup_timeout_seconds": intervals.startup_timeout_seconds,
         }
         for field, value in values.items():
@@ -4041,6 +4192,7 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
             "hardware/stale_timeout_seconds", intervals.pressure_stale_seconds
         )
         self._settings.sync()
+        self.saved_settings.setText(self._interval_summary("Mentett", intervals))
         self.accept()
 
 
@@ -5890,6 +6042,14 @@ class DashboardWindow(QMainWindow):
         self._pending_measurement_pump_plan: MeasurementPumpPlan | None = None
         self._applied_measurement_flow_ml_per_hour: float | None = None
         self._active_hardware_configuration: HardwareConfiguration | None = None
+        self._active_pump_telemetry_intervals = next(
+            (
+                pump.polling_intervals
+                for pump in (devices.jacket_pump, devices.injection_pump)
+                if isinstance(pump, PollingPump)
+            ),
+            None,
+        )
         self._hardware_connection_result: ConnectionTestResult | None = None
         self._hardware_daq: NidaqmxDataAcquisition | None = None
         self._hardware_actuator: AnalogValveActuator | None = None
@@ -7402,7 +7562,10 @@ class DashboardWindow(QMainWindow):
                 "A pumpatelemetria időzítése futó vagy szüneteltetett mérés "
                 "közben nem módosítható."
             )
-        dialog = PumpTelemetrySettingsDialog(self._user_settings)
+        dialog = PumpTelemetrySettingsDialog(
+            self._user_settings,
+            active_intervals=self._active_pump_telemetry_intervals,
+        )
         self._embedded_settings_dialog(dialog)
 
         def applied() -> None:
@@ -7412,10 +7575,11 @@ class DashboardWindow(QMainWindow):
                 "CONFIG",
                 "pump telemetry settings updated; effective on next hardware "
                 f"activation: pressure_poll={intervals.pressure_seconds:.3f}s; "
-                f"slow_poll={intervals.slow_telemetry_seconds:.3f}s; "
+                f"slow_gap={intervals.slow_telemetry_seconds:.3f}s; "
                 f"pressure_stale={intervals.pressure_stale_seconds:.3f}s; "
                 "slow_stale="
                 f"{intervals.slow_telemetry_stale_seconds:.3f}s; "
+                f"status_stale={intervals.status_stale_seconds:.3f}s; "
                 f"startup_timeout={intervals.startup_timeout_seconds:.3f}s",
                 level="WARNING",
             )
@@ -8784,6 +8948,11 @@ class DashboardWindow(QMainWindow):
                     "A korábbi hardverkapcsolatok lezárása sikertelen: "
                     + "; ".join(cleanup_errors)
                 )
+        pump_telemetry_intervals = PumpTelemetrySettingsDialog.intervals(
+            self._user_settings,
+            command_timeout_seconds=configuration.serial_command_timeout_seconds,
+            command_attempts=configuration.serial_command_retries,
+        )
         jacket = (
             PollingPump(
                 open_isco_pump(
@@ -8792,13 +8961,7 @@ class DashboardWindow(QMainWindow):
                     diagnostic_category=DiagnosticCategory.JACKET_PUMP,
                 ),
                 name="jacket",
-                intervals=PumpTelemetrySettingsDialog.intervals(
-                    self._user_settings,
-                    command_timeout_seconds=(
-                        configuration.serial_command_timeout_seconds
-                    ),
-                    command_attempts=configuration.serial_command_retries,
-                ),
+                intervals=pump_telemetry_intervals,
                 diagnostics=self._diagnostics,
                 diagnostic_category=DiagnosticCategory.JACKET_PUMP,
             )
@@ -8814,13 +8977,7 @@ class DashboardWindow(QMainWindow):
                         diagnostic_category=DiagnosticCategory.INJECTION_PUMP,
                     ),
                     name="injection",
-                    intervals=PumpTelemetrySettingsDialog.intervals(
-                        self._user_settings,
-                        command_timeout_seconds=(
-                            configuration.serial_command_timeout_seconds
-                        ),
-                        command_attempts=configuration.serial_command_retries,
-                    ),
+                    intervals=pump_telemetry_intervals,
                     diagnostics=self._diagnostics,
                     diagnostic_category=DiagnosticCategory.INJECTION_PUMP,
                 )
@@ -8921,6 +9078,7 @@ class DashboardWindow(QMainWindow):
         self._hardware_status_active = False
         self._last_hardware_status_record = None
         self._active_hardware_configuration = configuration
+        self._active_pump_telemetry_intervals = pump_telemetry_intervals
         self._hardware_connection_result = connection_result
         self._hardware_daq = daq
         self._hardware_actuator = actuator
@@ -9039,6 +9197,7 @@ class DashboardWindow(QMainWindow):
         self._devices.connect()
         self._pump_control = self._make_simulation_pump_control()
         self._active_hardware_configuration = None
+        self._active_pump_telemetry_intervals = None
         self._hardware_connection_result = None
         self._hardware_daq = None
         self._hardware_actuator = None

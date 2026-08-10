@@ -100,19 +100,19 @@ Alapértékek:
 | Adat | Polling | STALE-határ |
 |---|---:|---:|
 | `PRESS` | 0,5 s | 6 s |
-| `FLOW` | 0,5 s | 3 s |
-| `VOLA`/`VOL` | 0,5 s | 3 s |
-| `STATUS` | 0,5 s | 3 s |
-| Kezdő telemetria | — | 3 s timeout |
+| `FLOW` | lassú körforgás | 33 s |
+| `VOLA`/`VOL` | lassú körforgás | 33 s |
+| `STATUS` | elsőbbségi biztonsági polling | 8 s |
+| Kezdő telemetria | — | 8 s timeout |
 
-A mezők egymáshoz képest eltolva futnak. Az ütemező monotonic, abszolút
-határidőket használ, ezért a soros tranzakció ideje nem adódik hozzá minden
-következő periódushoz. Kimaradt slotnál a következő érvényes időpontra lép.
-FLOW/VOLA/STATUS vagy vezérlőparancs után nincs rejtett extra `PRESS` kérés.
+A `PRESS` kapja a legmagasabb telemetria-prioritást, utána az önálló `STATUS`,
+majd a `FLOW → VOLA` körforgás következik. A következő esedékesség az előző
+tranzakció tényleges befejezésétől számítódik, ezért a worker nem épít fel
+behozhatatlan pollinghátralékot és nem indít felzárkózó burstöt.
 
-A nyomás biztonságkritikus: hibás vagy STALE nyomás reteszelt leállítást
-okozhat. A kizárólag FLOW/VOLA mezőt érintő hiba `DEGRADED` kapcsolatot jelez,
-de önmagában nem állítja le a nyomásszabályozást.
+A nyomás és a STATUS biztonságkritikus: hibás vagy STALE értékük reteszelt
+leállítást okozhat. A kizárólag FLOW/VOLA mezőt érintő hiba `DEGRADED`
+kapcsolatot jelez, de önmagában nem állítja le a nyomásszabályozást.
 
 ### Mit jelent a „lekérdezési idő”?
 
@@ -121,7 +121,7 @@ egymást:
 
 | Időzítés | Alapérték | Mit csinál? |
 |---|---:|---|
-| Pumpa soros polling | 0,5 s mezőnként | DASNET `PRESS`, `FLOW`, `VOLA`, `STATUS` kéréseket ad ki |
+| Pumpa soros polling | 0,5 s ütemezési szünet | Elsőbbségi `PRESS`/`STATUS`, majd körforgásos `FLOW`/`VOLA` DASNET-kéréseket ad ki |
 | Vezérlési ciklus | 0,2 s | A pumpacache-t és az NI-adatokat biztonságilag kiértékeli; méréskor PID-et futtat |
 | READY/ELŐKÉSZÍTVE dashboard | 1,0 s | A cache és az NI-adatok alapján frissíti a kijelzést; nem ad ki új pumpalekérdezést |
 | Adatrögzítés | 1,0 s | Az esedékes vezérlési ciklus eredményét tartósan elmenti |
@@ -133,22 +133,21 @@ saját blokkoló soros olvasást.
 
 ### Egy 0,5 s-os pollingperiódus példája
 
-A mezők egymáshoz képest eltolva futnak. Ideális, azonnali válasz esetén egy
-pumpa hozzávetőleges üteme:
+A mezők nem önálló, párhuzamos 0,5 s-os periódusok. Ideális, azonnali válasz
+esetén egy pumpa lehetséges üteme:
 
 ```text
 t = 0,000 s   FLOW
-t = 0,167 s   VOLA
-t = 0,333 s   STATUS
-t = 0,500 s   PRESS, majd FLOW
-t = 0,667 s   VOLA
-t = 0,833 s   STATUS
-t = 1,000 s   PRESS, majd FLOW
+t = 0,500 s   PRESS
+t = 1,000 s   STATUS
+t = 1,500 s   PRESS
+t = 2,000 s   VOLA
+t = 2,500 s   PRESS
+t = 3,000 s   STATUS
 ```
 
-A `PRESS` és a `FLOW` saját periódusa egyaránt 0,5 s; amikor egyszerre
-esedékesek, a `PRESS` kap elsőbbséget. A KÖP és a BES saját workerrel és
-saját időzítéssel rendelkezik.
+A konkrét időpontokat a válaszidő módosítja; a táblázat csak a prioritást
+szemlélteti. A KÖP és a BES saját workerrel és saját időzítéssel rendelkezik.
 
 ### Mi módosítja a tényleges lekérdezési időt?
 
@@ -163,15 +162,15 @@ tényleges frissítést az alábbiak befolyásolják:
   `STOP`, `SETFLOW` vagy más vezérlőparancs;
 - a Windows szálütemezése és a célgép terhelése.
 
-Egy már futó soros olvasást a program nem szakít félbe. Utána a várakozó
-kezelői vagy biztonsági parancs elsőbbséget kap a következő pollingkéréssel
-szemben. A kimaradt polling-slotokat a rendszer nem próbálja gyors egymásutánban
-„behozni”; a következő jövőbeli abszolút slotra lép. Az adat korát a STALE-határ
+Egy már futó soros olvasást a program nem szakít félbe. Utána a biztonsági STOP,
+az esedékes PRESS/STATUS, majd a várakozó normál parancs kap lehetőséget. A
+kimaradt pollingot a rendszer nem próbálja gyors egymásutánban „behozni”; a
+következő határidőt a befejezés után számítja. Az adat korát a STALE-határ
 felügyeli.
 
 Példa: ha egy `STOP` tranzakció 0,45 s-nál kezdődik és 0,30 s-ig tart, a
 0,50 s-ra tervezett `PRESS` csak a STOP után futhat. A rendszer nem ad ki emiatt
-extra `PRESS` kérést, hanem visszaáll az abszolút pollingütemre.
+felzárkózó `PRESS`-csomagot, hanem a befejezéstől újraütemez.
 
 ### Lekérdezés alkalmazási állapotonként
 
@@ -179,11 +178,11 @@ extra `PRESS` kérést, hanem visszaáll az abszolút pollingütemre.
 |---|---|---|---|
 | Szimuláció | Nincs fizikai DASNET-forgalom | A szimulátor adatait olvassa | A 0,2 s-os vezérlési ciklus szimulált nyomást kap, COM-port nem nyílik meg |
 | `IDLE` | Nincs; a pumpaport zárva | Nincs aktív pumpacache | Programindítás után, hardveraktiválás előtt nincs `PRESS` kérés |
-| Kapcsolódás | Először `RSVP`, `IDENTIFY`, majd kezdeti `PRESS` és `STATUS` | A kapcsolat legfeljebb a kezdő telemetria timeoutjáig, alapértelmezetten 3 s-ig vár | A `READY` csak az első nyomás- és státuszadat után jön létre; FLOW/VOLA később töltődhet fel |
-| `READY` | Folyamatos 0,5 s-os mezőperiódusok | A dashboard alapértelmezetten 1 s-onként olvassa a cache-t és az NI-t | A pumpa nyomása 12,0 s-nál frissülhet, a dashboard 12,4 s-nál mutatja; a dashboard nem küld új `PRESS` parancsot |
-| `PREPARING` | Ugyanaz a folyamatos 0,5 s-os polling | A beállított vezérlési ciklus, alapértelmezetten 0,2 s, olvassa a cache-t és az NI-t | KÖP felfutásnál 0,2 s-onként ellenőrzi a KÖP–BES margint, miközben új pumpanyomás rendszerint 0,5 s-onként érkezik |
-| `WAITING_CONFIRMATION` / **ELŐKÉSZÍTVE** | A 0,5 s-os polling változatlanul fut | A dashboard/biztonsági státusz alapértelmezetten 1 s-onként olvas; PID és adatmentés nincs | A KÖP nyomástartásban, a BES STOP-ban van, de mindkettő `PRESS/FLOW/VOLA/STATUS` cache-e frissül |
-| `RUNNING` | A 0,5 s-os polling változatlanul fut | A vezérlési/PID-ciklus alapértelmezetten 0,2 s, az adatrögzítés alapértelmezetten 1 s | 1 másodperc alatt kb. 5 vezérlési kiértékelés, mezőnként kb. 2 pumpalekérdezés és 1 mentett rekord esedékes |
+| Kapcsolódás | Először `RSVP`, `IDENTIFY`, majd kezdeti `PRESS` és `STATUS` | A kezdő telemetria timeout legalább a két lekérdezés teljes retry-kerete; alapértelmezetten 8 s | A `READY` csak az első nyomás- és státuszadat után jön létre; FLOW/VOLA később töltődhet fel |
+| `READY` | Elsőbbségi `PRESS/STATUS`; a `FLOW/VOLA` lassú körforgás | A dashboard alapértelmezetten 1 s-onként olvassa a cache-t és az NI-t | A dashboard nem küld soros parancsot; csak a worker cache-ét jeleníti meg |
+| `PREPARING` | Ugyanez a polling, vezérlőparancs alatt szüneteltetve | A beállított vezérlési ciklus, alapértelmezetten 0,2 s, olvassa a cache-t és az NI-t | A soros válaszidő nem terheli a control-cycle watchdogot, a következő `PRESS` pedig elsőbbséget kap |
+| `WAITING_CONFIRMATION` / **ELŐKÉSZÍTVE** | Elsőbbségi `PRESS` és körforgásos lassú telemetria | A dashboard/biztonsági státusz alapértelmezetten 1 s-onként olvas; PID és adatmentés nincs | A KÖP nyomástartásban, a BES STOP-ban van, a cache a port tényleges kapacitásával frissül |
+| `RUNNING` | Elsőbbségi `PRESS` és körforgásos lassú telemetria | A vezérlési/PID-ciklus alapértelmezetten 0,2 s, az adatrögzítés alapértelmezetten 1 s | A vezérlés cache-t olvas; nem próbál a soros port válaszidejénél gyorsabb lekérdezési terhelést kikényszeríteni |
 | `PAUSED` | A 0,5 s-os polling tovább fut | A 0,2 s-os biztonsági hold-ciklus tovább fut; PID-változtatás és adatrögzítés szünetel | A nyomáshatár továbbra is felismerhető, miközben a szelep utolsó kimenete tartott |
 | Normál STOP után `READY` | A STOP parancs elsőbbséget kap, utána a polling folytatódik | Ismét az 1 s-os dashboard-státusz olvassa a cache-t | A port nyitva marad, ezért új mérés előtt is látható az aktuális nyomás |
 | Helyben reteszelt `FAULT` | Ha a kapcsolat megmaradt, a worker tovább frissítheti a cache-t | Automatikus újraindítás nincs; kezelői nyugtázás és friss biztonsági ellenőrzés kell | A rendelkezésre álló telemetria nem oldja fel magától a hibareteszt |
@@ -193,10 +192,13 @@ extra `PRESS` kérést, hanem visszaáll az abszolút pollingütemre.
 ### Melyik beállítás mit változtat?
 
 - `developer/pump_pressure_poll_seconds`: csak a `PRESS` soros periódusát;
-- `developer/pump_slow_poll_seconds`: a `FLOW`, `VOLA` és `STATUS` saját
-  periódusát;
+- `developer/pump_slow_poll_seconds`: a telemetria-tranzakciók közötti névleges
+  szünetet; a biztonságkritikus `PRESS/STATUS` elsőbbséget kap, a fennmaradó
+  kapacitásban a worker `FLOW → VOLA` körforgást használ;
 - `developer/pump_pressure_stale_seconds`: ennyi idős nyomás minősül STALE-nek;
-- `developer/pump_slow_stale_seconds`: a lassú mezők STALE-határa;
+- `developer/pump_slow_stale_seconds`: a `FLOW/VOLA` mezők STALE-határa;
+- `developer/pump_status_stale_seconds`: a biztonságkritikus `STATUS`
+  explicit jóváhagyott, legalább 8 s-os STALE-határa;
 - `developer/pump_startup_timeout_seconds`: a kapcsolódáskori első
   telemetria várakozása;
 - `developer/control_interval_seconds`: előkészítési biztonsági és
@@ -207,6 +209,20 @@ extra `PRESS` kérést, hanem visszaáll az abszolút pollingütemre.
 
 A pumpapolling-beállítások a következő hardveraktiváláskor lépnek
 életbe, mert a `PollingPump` workerek létrehozásakor kerülnek beolvasásra.
+A beállítási oldal ezért külön mutatja a lemezen **mentett** és a workerekben
+ténylegesen **aktív** értékeket.
+
+Leválasztáskor a soros port csak a worker igazolt befejezése után zárható le.
+Ha a worker egy aktív DASNET-tranzakcióban nem áll meg a shutdown timeoutig, a
+port nyitva marad, a hiba láthatóvá válik, és reconnect nem engedélyezett. A
+worker későbbi befejezése után külön disconnect-cleanup szükséges.
+
+A pumpánkénti worker egyszerre csak egy DASNET-tranzakciót futtat. A sorrend
+`emergency STOP → STOP → esedékes PRESS/STATUS → RUN/CONFIG → FLOW/VOLA`.
+Az esedékes STATUS-t normál parancsfolyam sem éheztetheti ki. Egy mező
+befejezése után a következő határidő a tényleges befejezési időből indul; nincs
+elmaradást behozó lekérdezéscsomag. Vezérlőparancs alatt a normál polling
+szünetel, majd a worker újraértékeli a biztonsági telemetria esedékességét.
 
 ## Előkészítési parancssorrend
 
@@ -296,7 +312,14 @@ pollingja a tranzakció idejére szünetel, de a másik pumpa workerét ez nem
 blokkolja. A már sorba állított vezérlő- vagy biztonsági parancs a következő
 pollingtranzakció előtt kap lehetőséget.
 
-`REMOTE`, `RUN` és `STOP` csak célzott STATUS-visszaolvasás után sikeres. Minden
+Ha egy normál parancs a queue-várakozási határig még nem indult el, a worker
+`CANCELLED` állapotba teszi. Így a hívó által már timeoutként kezelt parancs a
+blokkoló DASNET-tranzakció után sem futhat le későn. A már `RUNNING` parancsot a
+soros keret közepén nem szakítja meg; arra a külön tranzakció-timeout vonatkozik.
+
+`REMOTE`, `RUN` és `STOP` csak célzott STATUS-visszaolvasás után sikeres. A
+REMOTE ellenőrzés a szabványos `STATUS=STOP` vagy `STATUS=RUN` választ elfogadja,
+ha nincs `LOCAL`/problémajelzés; nem követeli meg a `REMOTE` szó visszhangját. Minden
 parancs egyedi azonosítóval naplózza a queue-várakozást, tranzakcióidőt,
 ellenőrzési időt és eredményt. A parancstimeout külön hiba, például
 `injection command timeout: STOP`; nem jelenhet meg control-cycle deadline-ként.
@@ -401,9 +424,10 @@ fenntartott hardverkapcsolat `READY` állapotban megmarad.
 | `pump_startup/injection_pressure_limit_bar` | BES `MAXPRESS` |
 | `pump_startup/margin_stability_seconds` | Stabilitási idő |
 | `developer/pump_pressure_poll_seconds` | Nyomáspolling |
-| `developer/pump_slow_poll_seconds` | FLOW/VOLA/STATUS polling |
+| `developer/pump_slow_poll_seconds` | Telemetria-tranzakciók névleges szünete |
 | `developer/pump_pressure_stale_seconds` | Nyomás STALE-határ |
-| `developer/pump_slow_stale_seconds` | Lassú mezők STALE-határa |
+| `developer/pump_slow_stale_seconds` | FLOW/VOLA STALE-határa |
+| `developer/pump_status_stale_seconds` | STATUS STALE-határa |
 | `developer/pump_startup_timeout_seconds` | Kezdő telemetria timeout |
 | `developer/control_interval_seconds` | Előkészítési és mérési vezérlési ciklus |
 | `developer/watchdog_tolerance_seconds` | Vezérlésiciklus-watchdog tűrése |

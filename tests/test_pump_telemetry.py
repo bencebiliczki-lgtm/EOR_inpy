@@ -158,6 +158,7 @@ def slow_intervals() -> PumpPollingIntervals:
         slow_telemetry_seconds=10.0,
         pressure_stale_seconds=30.0,
         slow_telemetry_stale_seconds=20.0,
+        status_stale_seconds=20.0,
         startup_timeout_seconds=1.0,
     )
 
@@ -169,7 +170,9 @@ def test_default_pressure_stale_window_covers_observed_serial_jitter() -> None:
     assert intervals.slow_telemetry_seconds == pytest.approx(0.5)
     assert intervals.pressure_stale_seconds == pytest.approx(6.0)
     assert intervals.pressure_stale_seconds >= 3.0 * intervals.pressure_seconds
-    assert intervals.slow_telemetry_stale_seconds == pytest.approx(3.0)
+    assert intervals.slow_telemetry_stale_seconds == pytest.approx(33.0)
+    assert intervals.status_stale_seconds == pytest.approx(8.0)
+    assert intervals.startup_timeout_seconds == pytest.approx(8.0)
 
 
 def test_control_reads_use_initialized_cache_without_serial_delay() -> None:
@@ -208,7 +211,7 @@ def test_slow_field_failure_does_not_make_pressure_stale_or_stop_worker() -> Non
         pressure_seconds=0.02,
         slow_telemetry_seconds=0.03,
         pressure_stale_seconds=0.2,
-        slow_telemetry_stale_seconds=0.06,
+        slow_telemetry_stale_seconds=0.2,
         startup_timeout_seconds=1.0,
     )
     pump = PollingPump(raw, name="test", intervals=intervals)
@@ -228,8 +231,16 @@ def test_slow_field_failure_does_not_make_pressure_stale_or_stop_worker() -> Non
     pump.disconnect()
 
 
-def test_blocking_slow_fields_do_not_trigger_unscheduled_pressure_reads() -> None:
-    raw = BlockingSlowTelemetryPump(delay_seconds=0.0)
+def test_pressure_gets_priority_after_a_blocking_slow_field() -> None:
+    @dataclass
+    class PressurePriorityProbe(BlockingSlowTelemetryPump):
+        pressure_reads_at_volume_start: list[int] = field(default_factory=list)
+
+        def read_remaining_volume_ml(self) -> float:
+            self.pressure_reads_at_volume_start.append(self.calls["pressure"])
+            return super().read_remaining_volume_ml()
+
+    raw = PressurePriorityProbe(delay_seconds=0.0)
     intervals = PumpPollingIntervals(
         pressure_seconds=0.02,
         slow_telemetry_seconds=0.03,
@@ -243,22 +254,60 @@ def test_blocking_slow_fields_do_not_trigger_unscheduled_pressure_reads() -> Non
 
     telemetry = pump.read_telemetry()
 
-    # A blocking serial transaction may legitimately make pressure stale. The
-    # poller must not compensate with hidden PRESS requests outside the cadence.
-    assert telemetry.pressure.quality is DataQuality.STALE
-    assert telemetry.pressure.age_seconds is not None
-    assert telemetry.pressure.age_seconds >= intervals.pressure_stale_seconds
-    assert raw.calls["pressure"] == 1
+    # As soon as the slow transaction finishes, the overdue pressure read wins
+    # over VOLA/STATUS and refreshes the safety-critical value.
+    assert telemetry.pressure.quality is DataQuality.GOOD
+    assert raw.calls["pressure"] >= 2
+    assert raw.calls["flow"] == 1
+    assert len(raw.pressure_reads_at_volume_start) == 1
+    assert raw.pressure_reads_at_volume_start[0] >= 2
     pump.disconnect()
 
 
-def test_polling_deadline_uses_absolute_cadence_and_skips_missed_slots() -> None:
-    assert PollingPump._advance_polling_deadline(10.0, 0.5, 10.2) == pytest.approx(
-        10.5
+def test_polling_deadline_is_rebased_after_actual_transaction_completion() -> None:
+    assert PollingPump._next_polling_deadline(10.2, 0.5) == pytest.approx(10.7)
+    assert PollingPump._next_polling_deadline(11.2, 0.5) == pytest.approx(11.7)
+
+
+def test_slow_telemetry_is_round_robin_not_three_independent_periods() -> None:
+    @dataclass
+    class TimedSlowPump(SlowPollablePump):
+        slow_events: list[tuple[str, float]] = field(default_factory=list)
+
+        def read_flow_ml_per_hour(self) -> float:
+            self.slow_events.append(("FLOW", monotonic()))
+            return super().read_flow_ml_per_hour()
+
+        def read_remaining_volume_ml(self) -> float:
+            self.slow_events.append(("VOLA", monotonic()))
+            return super().read_remaining_volume_ml()
+
+        def read_operating_status(self) -> str:
+            self.slow_events.append(("STATUS", monotonic()))
+            return super().read_operating_status()
+
+    raw = TimedSlowPump(delay_seconds=0.01)
+    intervals = PumpPollingIntervals(
+        pressure_seconds=0.02,
+        slow_telemetry_seconds=0.04,
+        pressure_stale_seconds=0.5,
+        slow_telemetry_stale_seconds=0.5,
+        startup_timeout_seconds=1.0,
     )
-    assert PollingPump._advance_polling_deadline(10.0, 0.5, 11.2) == pytest.approx(
-        11.5
+    pump = PollingPump(raw, name="test", intervals=intervals)
+    pump.connect()
+    deadline = monotonic() + 1.0
+    while len(raw.slow_events) < 4 and monotonic() < deadline:
+        sleep(0.01)
+
+    # The first STATUS belongs to connection initialization. Runtime STATUS is
+    # a separate safety poll; FLOW and VOLA remain a two-field round robin.
+    runtime_events = raw.slow_events[1:4]
+    assert [name for name, _ in runtime_events] == ["FLOW", "STATUS", "VOLA"]
+    assert runtime_events[2][1] - runtime_events[0][1] >= (
+        intervals.slow_telemetry_seconds
     )
+    pump.disconnect()
 
 
 def test_failed_stop_is_latched_until_acknowledgement() -> None:
@@ -278,7 +327,7 @@ def test_failed_stop_is_latched_until_acknowledgement() -> None:
     pump.disconnect()
 
 
-def test_control_commands_do_not_add_pressure_reads_outside_polling_cadence() -> None:
+def test_control_commands_trigger_intermediate_pressure_cache_refreshes() -> None:
     raw = SlowPollablePump(delay_seconds=0.0)
     pump = PollingPump(raw, name="test", intervals=slow_intervals())
     pump.connect()
@@ -288,7 +337,11 @@ def test_control_commands_do_not_add_pressure_reads_outside_polling_cadence() ->
     pump.set_constant_flow(10.0)
     pump.run()
 
-    assert raw.calls["pressure"] == pressure_reads_after_connect
+    deadline = monotonic() + 1.0
+    while raw.calls["pressure"] < pressure_reads_after_connect + 3:
+        assert monotonic() < deadline
+        sleep(0.01)
+    assert raw.calls["pressure"] == pressure_reads_after_connect + 3
     assert pump.read_telemetry().pressure.quality is DataQuality.GOOD
     pump.disconnect()
 
@@ -312,12 +365,114 @@ def test_queued_control_command_precedes_next_polling_transaction() -> None:
     raw.release_flow.set()
     command.join(timeout=1.0)
     assert not command.is_alive()
-    deadline = monotonic() + 1.0
+    deadline = monotonic() + 2.0
     while "VOLA" not in raw.operations and monotonic() < deadline:
         sleep(0.01)
 
     assert raw.operations.index("FLOW_END") < raw.operations.index("REMOTE")
     assert raw.operations.index("REMOTE") < raw.operations.index("VOLA")
+    pump.disconnect()
+
+
+def test_pressure_refresh_runs_between_normal_control_commands() -> None:
+    @dataclass
+    class InterCommandPressurePump(SlowPollablePump):
+        operations: list[str] = field(default_factory=list)
+
+        def read_pressure_bar(self) -> float:
+            self.operations.append("PRESS")
+            return super().read_pressure_bar()
+
+        def set_constant_flow(self, flow_ml_per_hour: float) -> None:
+            self.operations.append("CONFIG_FLOW")
+            super().set_constant_flow(flow_ml_per_hour)
+
+        def set_constant_pressure(self, pressure_bar: float) -> None:
+            self.operations.append("CONFIG_PRESSURE")
+            super().set_constant_pressure(pressure_bar)
+
+    raw = InterCommandPressurePump(delay_seconds=0.0)
+    pump = PollingPump(raw, name="test", intervals=slow_intervals())
+    pump.connect()
+    raw.operations.clear()
+    first = pump.submit_command(
+        PumpCommand(
+            PumpCommandKind.SET_CONSTANT_FLOW,
+            PumpCommandPriority.NORMAL,
+            value=10.0,
+        )
+    )
+    second = pump.submit_command(
+        PumpCommand(
+            PumpCommandKind.SET_CONSTANT_PRESSURE,
+            PumpCommandPriority.NORMAL,
+            value=120.0,
+        )
+    )
+    deadline = monotonic() + 2.0
+    first_result = pump.command_result(first)
+    second_result = pump.command_result(second)
+    while not (first_result.status.terminal and second_result.status.terminal):
+        if monotonic() >= deadline:
+            break
+        sleep(0.01)
+        first_result = pump.command_result(first)
+        second_result = pump.command_result(second)
+
+    pump.disconnect()
+    assert first_result.status is PumpCommandStatus.SUCCEEDED, raw.operations
+    assert second_result.status is PumpCommandStatus.SUCCEEDED, raw.operations
+    assert raw.operations.index("CONFIG_FLOW") < raw.operations.index("PRESS")
+    assert raw.operations.index("PRESS") < raw.operations.index("CONFIG_PRESSURE")
+
+
+def test_stop_precedes_overdue_pressure_and_normal_command() -> None:
+    @dataclass
+    class StopPriorityPump(CommandPriorityPump):
+        def read_pressure_bar(self) -> float:
+            self.operations.append("PRESS")
+            return super().read_pressure_bar()
+
+        def set_constant_flow(self, flow_ml_per_hour: float) -> None:
+            self.operations.append("CONFIG")
+            super().set_constant_flow(flow_ml_per_hour)
+
+        def request_stop(self) -> None:
+            self.operations.append("STOP")
+            super().request_stop()
+
+    raw = StopPriorityPump(delay_seconds=0.0)
+    intervals = PumpPollingIntervals(
+        pressure_seconds=0.02,
+        slow_telemetry_seconds=0.3,
+        pressure_stale_seconds=1.0,
+        slow_telemetry_stale_seconds=1.0,
+        startup_timeout_seconds=1.0,
+    )
+    pump = PollingPump(raw, name="test", intervals=intervals)
+    pump.connect()
+    assert raw.flow_started.wait(timeout=1.0)
+    raw.operations.clear()
+    normal = pump.submit_command(
+        PumpCommand(
+            PumpCommandKind.SET_CONSTANT_FLOW,
+            PumpCommandPriority.NORMAL,
+            value=10.0,
+        )
+    )
+    stop = pump.submit_stop()
+    sleep(0.03)
+    raw.release_flow.set()
+    deadline = monotonic() + 1.0
+    while not (
+        pump.command_result(normal).status.terminal
+        and pump.command_result(stop).status.terminal
+    ):
+        assert monotonic() < deadline
+        sleep(0.01)
+
+    assert raw.operations.index("STOP") < raw.operations.index("PRESS")
+    assert raw.operations.index("PRESS") < raw.operations.index("CONFIG")
     pump.disconnect()
 
 
@@ -368,6 +523,59 @@ def test_stop_fails_when_status_does_not_confirm_stop() -> None:
         pump.request_stop()
 
     assert raw.calls["stop"] == 1
+    pump.disconnect()
+
+
+def test_remote_command_fails_when_pump_remains_in_local_mode() -> None:
+    class LocalModePump(SlowPollablePump):
+        operating_status = "STOP LOCAL"
+
+        def enter_remote(self) -> None:
+            self.calls["remote"] += 1
+
+    raw = LocalModePump(delay_seconds=0.0, operating_status="STOP LOCAL")
+    pump = PollingPump(raw, name="injection", intervals=slow_intervals())
+    pump.connect()
+
+    with pytest.raises(RuntimeError, match="did not confirm REMOTE"):
+        pump.enter_remote()
+
+    assert raw.calls["remote"] == 1
+    pump.disconnect()
+
+
+def test_remote_command_accepts_standard_run_stop_status_without_remote_word() -> None:
+    class StandardStatusPump(SlowPollablePump):
+        def enter_remote(self) -> None:
+            self.calls["remote"] += 1
+            self.operating_status = "STATUS=STOP"
+
+    raw = StandardStatusPump(delay_seconds=0.0, operating_status="STATUS=STOP")
+    pump = PollingPump(raw, name="injection", intervals=slow_intervals())
+    pump.connect()
+
+    pump.enter_remote()
+
+    assert raw.calls["remote"] == 1
+    assert pump.read_telemetry().operating_status.quality is DataQuality.GOOD
+    pump.disconnect()
+
+
+def test_queued_command_timeout_cancels_command_before_it_can_run() -> None:
+    class ShortQueueWaitPump(PollingPump):
+        COMMAND_QUEUE_WAIT_SECONDS = 0.05
+
+    raw = CommandPriorityPump(delay_seconds=0.0)
+    pump = ShortQueueWaitPump(raw, name="test", intervals=slow_intervals())
+    pump.connect()
+    assert raw.flow_started.wait(timeout=1.0)
+
+    with pytest.raises(TimeoutError, match="was cancelled"):
+        pump.set_constant_flow(10.0)
+
+    raw.release_flow.set()
+    sleep(0.1)
+    assert raw.calls["set_flow"] == 0
     pump.disconnect()
 
 
@@ -425,7 +633,18 @@ def test_each_field_logs_single_stale_transition_and_recovery(
         diagnostic_category=DiagnosticCategory.JACKET_PUMP,
     )
     pump.connect()
-    sleep(0.04)
+    initialization_deadline = monotonic() + 1.0
+    while True:
+        initialized = pump.read_telemetry()
+        if all(
+            state.last_update_monotonic is not None
+            for state in (initialized.pressure, initialized.flow, initialized.volume)
+        ):
+            break
+        assert monotonic() < initialization_deadline
+        sleep(0.01)
+    existing_events = logger.events_after(0)
+    baseline_sequence = existing_events[-1].sequence if existing_events else 0
     raw.failed_field = failed_field
     sleep(0.09)
 
@@ -440,7 +659,7 @@ def test_each_field_logs_single_stale_transition_and_recovery(
     assert failed_state.quality is DataQuality.STALE
     stale_events = [
         event
-        for event in logger.events_after(0)
+        for event in logger.events_after(baseline_sequence)
         if event.event_id == "TELEMETRY_QUALITY_CHANGED"
         and dict(event.fields)["field"] == failed_field
         and dict(event.fields)["new_quality"] == DataQuality.STALE.value
@@ -453,7 +672,7 @@ def test_each_field_logs_single_stale_transition_and_recovery(
     )
 
     raw.failed_field = None
-    recovery_deadline = monotonic() + 1.0
+    recovery_deadline = monotonic() + 2.0
     while True:
         recovered = pump.read_telemetry()
         recovered_state = {
@@ -469,7 +688,7 @@ def test_each_field_logs_single_stale_transition_and_recovery(
     assert recovered_state.quality is DataQuality.GOOD
     recovery_events = [
         event
-        for event in logger.events_after(0)
+        for event in logger.events_after(baseline_sequence)
         if event.event_id == "TELEMETRY_QUALITY_RECOVERED"
         and dict(event.fields)["field"] == failed_field
     ]
@@ -487,7 +706,7 @@ def test_multiple_fields_log_distinct_stale_transitions_in_order(
         pressure_seconds=0.02,
         slow_telemetry_seconds=0.03,
         pressure_stale_seconds=0.06,
-        slow_telemetry_stale_seconds=0.05,
+        slow_telemetry_stale_seconds=0.2,
         startup_timeout_seconds=1.0,
     )
     pump = PollingPump(
@@ -503,7 +722,7 @@ def test_multiple_fields_log_distinct_stale_transitions_in_order(
     sleep(0.08)
     pump.read_telemetry()
     raw.failed_fields.add("flow")
-    sleep(0.08)
+    sleep(0.25)
     telemetry = pump.read_telemetry()
 
     assert telemetry.pressure.quality is DataQuality.STALE
@@ -593,3 +812,44 @@ def test_disconnect_and_reconnect_are_separate_events(tmp_path: Path) -> None:
     assert event_ids.count("TELEMETRY_CONNECTION_LOST") == 1
     assert event_ids.count("TELEMETRY_CONNECTION_RESTORED") == 2
     pump.disconnect()
+
+
+def test_disconnect_does_not_close_or_reconnect_while_worker_is_blocked() -> None:
+    @dataclass
+    class BlockingDisconnectPump(SlowPollablePump):
+        flow_started: Event = field(default_factory=Event)
+        release_flow: Event = field(default_factory=Event)
+
+        def read_flow_ml_per_hour(self) -> float:
+            self.calls["flow"] += 1
+            self.flow_started.set()
+            self.release_flow.wait()
+            return 12.0
+
+    raw = BlockingDisconnectPump(delay_seconds=0.0)
+    intervals = PumpPollingIntervals(
+        pressure_seconds=0.02,
+        slow_telemetry_seconds=0.03,
+        pressure_stale_seconds=0.2,
+        slow_telemetry_stale_seconds=0.2,
+        startup_timeout_seconds=0.05,
+    )
+    pump = PollingPump(raw, name="test", intervals=intervals)
+    pump.connect()
+    assert raw.flow_started.wait(timeout=1.0)
+
+    with pytest.raises(TimeoutError, match="serial port left open"):
+        pump.disconnect()
+    assert raw.calls["disconnect"] == 0
+    with pytest.raises(RuntimeError, match="worker is still stopping"):
+        pump.connect()
+
+    raw.release_flow.set()
+    deadline = monotonic() + 1.0
+    while pump._thread is not None and pump._thread.is_alive():
+        assert monotonic() < deadline
+        sleep(0.01)
+    with pytest.raises(RuntimeError, match="requires disconnect cleanup"):
+        pump.connect()
+    pump.disconnect()
+    assert raw.calls["disconnect"] == 1
