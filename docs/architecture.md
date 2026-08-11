@@ -1,5 +1,8 @@
 # Architektúra
 
+A projektenkénti SQLite mérési adattár, írószál, lekérdezés, export, migráció és
+NAS-snapshot részletes leírása: [project-storage.md](project-storage.md).
+
 ## Rétegek
 
 1. **UI:** állapotmegjelenítés, projektkezelés, diagramok és kezelői parancsok.
@@ -47,12 +50,13 @@ Qt főszálból közvetlenül nem fut.
 
 ## Projektfájlok, export és NAS
 
-A projekt `configuration_json` pillanatképe `devices` objektumban tárolja az öt
-moduláris eszköz szerepkör projektenkénti engedélyezését. A Projektbeállítások ezt
-közvetlenül módosítja; az Eszközbeállítások ebből inicializálja a hozzáadott
-eszközöket. A futtatási út összeveti az aktív hardverkonfigurációt a projekt
-profiljával, ezért projektváltás vagy profilszerkesztés után eltérő összeállítással
-nem indítható normál mérés.
+Az öt moduláris eszköz szerepköre, portja és csatornája globális
+`hardware/*` felhasználói beállítás. A Projektbeállítások nem módosítja ezeket,
+ezért projektváltáskor az aktív hardverösszeállítás változatlan marad. A mérési
+konfigurációs pillanatkép továbbra is rögzíti a méréskor aktív `devices` értékeket
+az auditálhatóság érdekében, de ez a pillanatkép nem vezérli a következő mérést.
+Régi telepítésnél, ha még nincs globális profil, az első aktív projekt explicit
+`devices` profilja egyszer globális beállítássá migrálódik.
 
 A `ProjectMeasurementWriter` az aktív projekt azonosítójából és Windows-biztos
 nevéből és dátumából `projects/<év>/<dátum>_<azonosító>_<név>` könyvtárat képez.
@@ -714,3 +718,6 @@ A hibák, figyelmeztetések és kezelői módosítások fázisonként egy
 rekordot azonosít; az aktuális és a teljes mérési diagram ugyanazt a rekordot
 jeleníti meg. A fázis Excel-exportja az eseményeket külön munkalapon és a
 nyomásdiagram marker-sorozatában is megőrzi.
+
+A pumpaworkerek, a korlátos queue-k, az aszinkron diagnosztikai író és a véges
+leállítás tulajdonosi modelljét a `docs/threading.md` részletezi.

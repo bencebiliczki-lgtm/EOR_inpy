@@ -265,9 +265,10 @@ def test_pressure_gets_priority_after_a_blocking_slow_field() -> None:
     pump.disconnect()
 
 
-def test_polling_deadline_is_rebased_after_actual_transaction_completion() -> None:
-    assert PollingPump._next_polling_deadline(10.2, 0.5) == pytest.approx(10.7)
-    assert PollingPump._next_polling_deadline(11.2, 0.5) == pytest.approx(11.7)
+def test_polling_deadline_uses_fixed_grid_and_skips_missed_fake_clock_slots() -> None:
+    assert PollingPump._next_polling_deadline(10.0, 10.2, 0.5) == pytest.approx(10.5)
+    assert PollingPump._next_polling_deadline(10.0, 11.2, 0.5) == pytest.approx(11.5)
+    assert PollingPump._next_polling_deadline(10.0, 15.0, 0.5) == pytest.approx(15.5)
 
 
 def test_slow_telemetry_is_round_robin_not_three_independent_periods() -> None:
@@ -949,6 +950,75 @@ def test_command_submission_requires_a_running_worker() -> None:
 
     with pytest.raises(ConnectionError, match="worker is not running"):
         pump.submit_stop(emergency=True)
+
+
+def test_connect_transactions_and_single_close_stay_on_the_owned_worker() -> None:
+    caller_ident = get_ident()
+
+    @dataclass
+    class ThreadAffinityPump(SlowPollablePump):
+        transaction_threads: list[tuple[str, int]] = field(default_factory=list)
+
+        def connect(self) -> None:
+            self.transaction_threads.append(("connect", get_ident()))
+            super().connect()
+
+        def _read(self, name: str, value: float | str) -> float | str:
+            self.transaction_threads.append((name, get_ident()))
+            return super()._read(name, value)
+
+        def disconnect(self) -> None:
+            self.transaction_threads.append(("disconnect", get_ident()))
+            super().disconnect()
+
+    raw = ThreadAffinityPump(delay_seconds=0.0)
+    pump = PollingPump(raw, name="jacket", intervals=slow_intervals())
+    pump.connect()
+    pump.connect()
+    worker_ident = pump.worker_snapshot().worker_ident
+    pump.disconnect()
+
+    transaction_idents = {thread_id for _, thread_id in raw.transaction_threads}
+    assert transaction_idents == {worker_ident}
+    assert caller_ident not in transaction_idents
+    assert raw.calls["connect"] == 1
+    assert raw.calls["disconnect"] == 1
+
+
+def test_bounded_command_queue_admits_emergency_stop_by_preemption() -> None:
+    raw = CommandPriorityPump(delay_seconds=0.0)
+    pump = PollingPump(
+        raw,
+        name="injection",
+        intervals=slow_intervals(),
+        command_queue_capacity=4,
+    )
+    pump.connect()
+    assert raw.flow_started.wait(timeout=1.0)
+    normal_ids = [
+        pump.submit_command(PumpCommand(kind, PumpCommandPriority.NORMAL, value))
+        for kind, value in (
+            (PumpCommandKind.CLEAR, None),
+            (PumpCommandKind.RETURN_LOCAL, None),
+            (PumpCommandKind.RUN, None),
+            (PumpCommandKind.SET_CONSTANT_PRESSURE, 5.0),
+        )
+    ]
+
+    stop_id = pump.submit_stop(emergency=True)
+    assert pump.worker_snapshot().queue_size == 4
+    assert len(pump._command_queue) == 4
+    assert sum(
+        pump.command_result(command_id).status is PumpCommandStatus.CANCELLED
+        for command_id in normal_ids
+    ) == 1
+    raw.release_flow.set()
+    deadline = monotonic() + 1.0
+    while not pump.command_result(stop_id).status.terminal:
+        assert monotonic() < deadline
+        sleep(0.01)
+    assert pump.command_result(stop_id).status is PumpCommandStatus.SUCCEEDED
+    pump.disconnect()
 
 
 def test_one_pump_worker_progresses_while_other_pump_is_blocked() -> None:

@@ -179,6 +179,10 @@ TX/RX eseményeket és az NI funkció szerinti kategorizálást. A Qt-teszt egye
 pumpakategóriát engedélyez, majd ellenőrzi, hogy a Developer táblában az NI esemény
 nem, a pumpaesemény viszont megjelenik. A felderítési összegzés láthatóságát külön
 teszt ellenőrzi normál és Developer módban.
+Az aszinkron naplóíró regressziói blokkolt lemezíró mellett igazolják az `emit`
+nem blokkoló jellegét, a korlátos queue-t, a debug események számlált összevonását,
+a kritikus safety esemény megőrzését és az 1000 eseményes kötegelt file-open/flush
+számot. Külön teszt fedi a nyers TX/RX kapcsoló hibamegőrző viselkedését.
 
 A pumpavezérlési tesztek ellenőrzik a REMOTE–konfigurálás–RUN–STOP–LOCAL sorrendet,
 a belső RUN-engedélytoken ellenőrzését, a konfigurálatlan indítás tiltását, a
@@ -231,10 +235,16 @@ telemetriát, az egyik pumpa blokkolt tranzakciója nem állítja meg a másik w
 a STATUS igazolja a STOP/RUN eredményt, és a parancstimeout nem control-cycle
 deadline néven jelenik meg. Külön teszt igazolja, hogy a sorban állás közben
 kitimeoutolt parancs törlődik és a blokkoló tranzakció után sem fut le.
+Külön szál-affinitási teszt igazolja, hogy a port connect–olvasás–disconnect teljes
+életciklusa ugyanabban a pumpaworkerben fut, a dupla connect nem hoz létre új
+workert vagy második portnyitást, a lezárás pedig pontosan egyszer történik meg.
+Queue-telítési regresszió ellenőrzi, hogy a normál queue korlátos, az emergency
+STOP pedig egy normál queued elem megszakításával is bejut és lefut.
 Külön ütemezési regresszió igazolja a biztonságkritikus `PRESS`/`STATUS`
 prioritást, a külön 0,5 s-os PRESS és 3 s-os STATUS periódust, a célzott
-parancsellenőrzés utáni STATUS-halasztást, a `FLOW → VOLA` körforgást, a tényleges
-tranzakcióidő utáni újraütemezést és a felzárkózó burst hiányát. A UI-teszt különböző
+parancsellenőrzés utáni STATUS-halasztást, a `FLOW → VOLA` körforgást, a fix
+monotonic határidőrácsot, a kimaradt slotok átugrását és a felzárkózó burst
+hiányát. A UI-teszt különböző
 értékekkel ellenőrzi a mentett és az aktív pollingbeállítás megjelenítését.
 Prioritási regresszió blokkolt telemetriakeret után igazolja a
 `STOP → CONFIG → PRESS` sorrendet, továbbá azt, hogy a sorban álló normál
@@ -293,10 +303,10 @@ csatorna nem kötelező, nem kerül a kapcsolattesztbe, a mérési rekordban hi�
 érték marad, és nem keletkezik biztonsági hiba. Külön regresszió igazolja,
 hogy a manuális szelepírás nem indít teljes mérési mintavételt, valamint a
 manuális pumpabiztonság nem kér nem kapcsolódó eszközadatot.
-Külön projektprofil-regresszió ellenőrzi az eszközök projektenkénti hozzáadását
-és eltávolítását, a projektprofil Eszközbeállításokba töltését, valamint azt, hogy
-ehhez nem jelenik meg helyszíni validációs adatblokk.
-A csak szelepet tartalmazó projektprofil UI-tesztje igazolja, hogy sikeres
+Külön globálisprofil-regresszió ellenőrzi az eszközök egyszeri migrációját és
+azt, hogy a projektváltás nem írja felül a globális eszközbeállítást, a
+Projektbeállítások pedig nem kínál eszközprofil-szerkesztést.
+A csak szelepet tartalmazó globális profil UI-tesztje igazolja, hogy sikeres
 olvasási kapcsolatpróba és globális hardvermód nélkül is megnyithatja a
 közvetlen eszközkezelést, miközben a többi eszköz nincs hozzáadva.
 

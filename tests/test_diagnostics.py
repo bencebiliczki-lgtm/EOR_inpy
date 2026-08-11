@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
-from time import time
+from threading import Event
+from time import monotonic, time
 
 from eor_control.diagnostics import (
     STRUCTURED_EVENT_FIELDS,
@@ -8,6 +9,19 @@ from eor_control.diagnostics import (
     DiagnosticLogger,
     LogRetentionSettings,
 )
+
+
+class BlockingBatchLogger(DiagnosticLogger):
+    def __init__(self, path: Path, **kwargs: object) -> None:
+        super().__init__(path, **kwargs)  # type: ignore[arg-type]
+        self.batch_started = Event()
+        self.release_batch = Event()
+        self.written_messages: list[str] = []
+
+    def _append_file_batch(self, events: list[object]) -> None:
+        self.batch_started.set()
+        assert self.release_batch.wait(timeout=2.0)
+        self.written_messages.extend(event.message for event in events)  # type: ignore[attr-defined]
 
 
 def test_disabled_logger_does_not_record_or_create_file(tmp_path: Path) -> None:
@@ -29,6 +43,7 @@ def test_logger_filters_categories_and_appends_file(tmp_path: Path) -> None:
 
     logger.emit(DiagnosticCategory.NI_LINE, "RX", "2.0 V")
     logger.emit(DiagnosticCategory.JACKET_PUMP, "TX", "6R <58>&\r")
+    logger.flush()
 
     events = logger.events_after(0)
     assert len(events) == 1
@@ -68,6 +83,7 @@ def test_hardware_events_are_written_to_separate_file(tmp_path: Path) -> None:
     logger.emit(DiagnosticCategory.SYSTEM, "DISCOVERY", "inventory complete")
     logger.emit(DiagnosticCategory.JACKET_PUMP, "TX", "RSVP")
     logger.emit(DiagnosticCategory.NI_LINE, "RX", "2.0 V")
+    logger.flush()
 
     application_log = application_path.read_text(encoding="utf-8")
     assert "EOR alkalmazásnapló" in application_log
@@ -184,8 +200,95 @@ def test_active_log_rotates_before_append_when_size_limit_is_reached(
     )
 
     logger.emit(DiagnosticCategory.SYSTEM, "STATE", "after rotation")
+    logger.flush()
 
     rotated = tuple(tmp_path.glob("application-*.html"))
     assert len(rotated) == 1
     assert rotated[0].stat().st_size == 1024 * 1024
     assert "after rotation" in active.read_text(encoding="utf-8")
+
+
+def test_slow_disk_writer_does_not_block_diagnostic_emit(tmp_path: Path) -> None:
+    logger = BlockingBatchLogger(
+        tmp_path / "application.html",
+        write_queue_capacity=32,
+        batch_size=1,
+    )
+    logger.configure(enabled=True, categories=DiagnosticCategory)
+    logger.emit(DiagnosticCategory.SYSTEM, "STATE", "writer blocker")
+    assert logger.batch_started.wait(timeout=1.0)
+
+    started = monotonic()
+    for index in range(12):
+        logger.emit(DiagnosticCategory.RUNTIME, "STATE", f"event {index}")
+    elapsed = monotonic() - started
+
+    assert elapsed < 0.1
+    logger.release_batch.set()
+    logger.flush()
+    assert len(logger.written_messages) == 13
+    logger.close()
+
+
+def test_bounded_log_queue_coalesces_debug_but_preserves_critical_stop(
+    tmp_path: Path,
+) -> None:
+    logger = BlockingBatchLogger(
+        tmp_path / "application.html",
+        write_queue_capacity=16,
+        batch_size=1,
+    )
+    logger.configure(enabled=True, categories=DiagnosticCategory)
+    logger.emit(DiagnosticCategory.SYSTEM, "STATE", "writer blocker")
+    assert logger.batch_started.wait(timeout=1.0)
+    for index in range(40):
+        logger.emit(
+            DiagnosticCategory.RUNTIME,
+            "TRACE",
+            f"debug {index}",
+            level="DEBUG",
+        )
+    logger.emit_event(
+        DiagnosticCategory.RUNTIME,
+        "SAFETY_STOP_REQUESTED",
+        level="CRITICAL",
+    )
+
+    metrics = logger.queue_metrics
+    assert metrics.current_size <= metrics.capacity
+    assert metrics.coalesced_events > 0
+    logger.release_batch.set()
+    logger.flush()
+    assert any("SAFETY_STOP_REQUESTED" in message for message in logger.written_messages)
+    logger.close()
+
+
+def test_async_logger_batches_many_events_into_few_file_operations(tmp_path: Path) -> None:
+    logger = DiagnosticLogger(
+        tmp_path / "application.html",
+        batch_size=256,
+        batch_interval_seconds=0.05,
+    )
+    logger.configure(enabled=True, categories=DiagnosticCategory)
+    for index in range(1000):
+        logger.emit(DiagnosticCategory.SYSTEM, "STATE", f"event {index}")
+    logger.flush()
+
+    metrics = logger.queue_metrics
+    assert metrics.written_events == 1000
+    assert metrics.batches <= 8
+    assert metrics.file_opens <= 2
+    assert metrics.flushes <= 3
+    logger.close()
+
+
+def test_raw_frame_setting_suppresses_only_ordinary_frames(tmp_path: Path) -> None:
+    logger = DiagnosticLogger(tmp_path / "hardware.html")
+    logger.configure(enabled=True, categories=DiagnosticCategory)
+    logger.configure_raw_hardware_frames(False)
+
+    logger.emit(DiagnosticCategory.JACKET_PUMP, "TX", "PRESS")
+    logger.emit(DiagnosticCategory.JACKET_PUMP, "TX", "failed PRESS", level="ERROR")
+
+    assert [event.message for event in logger.events_after(0)] == ["failed PRESS"]
+    logger.close()

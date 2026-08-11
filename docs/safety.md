@@ -1,5 +1,11 @@
 # Biztonsági modell
 
+A mérési perzisztencia korlátozott várólistát használ. Kritikus sorszint,
+írószálhiba vagy sikertelen SQLite-tranzakció nem eredményezhet csendes
+adatvesztést: explicit hibaként jut vissza a futásfelügyelethez, kezelői
+figyelmeztetést és biztonságos mérésleállítást igényel. A NAS kiesése önmagában nem
+biztonsági hiba, mert a mérés elsődlegesen a helyi `project.sqlite` fájlba ír.
+
 ## Felügyelt pumpaindítás
 
 A mérésindítás nem kerülheti meg a pumpák külön fizikai engedélyezését: a kezelőnek

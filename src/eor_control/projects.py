@@ -30,6 +30,7 @@ class MeasurementProject:
     configuration: dict[str, object]
     calibration_snapshot: dict[str, object]
     stages: tuple[MeasurementStage, ...] = ()
+    project_path: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +49,7 @@ class PidProfile:
 
 
 class ProjectRepository:
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,7 +74,8 @@ class ProjectRepository:
                         operator TEXT NOT NULL,
                         notes TEXT NOT NULL,
                         configuration_json TEXT NOT NULL,
-                        calibration_snapshot_json TEXT NOT NULL
+                        calibration_snapshot_json TEXT NOT NULL,
+                        project_path TEXT NOT NULL DEFAULT ''
                     );
                     CREATE TABLE measurement_stages (
                         id INTEGER PRIMARY KEY,
@@ -104,10 +106,10 @@ class ProjectRepository:
                         created_at_utc TEXT NOT NULL,
                         updated_at_utc TEXT NOT NULL
                     );
-                    PRAGMA user_version = 4;
+                    PRAGMA user_version = 5;
                     """
                 )
-            version = 4
+            version = 5
         if version == 1:
             with self._connection:
                 self._connection.executescript(
@@ -154,6 +156,16 @@ class ProjectRepository:
                         updated_at_utc TEXT NOT NULL
                     );
                     PRAGMA user_version = 4;
+                    """
+                )
+            version = 4
+        if version == 4:
+            with self._connection:
+                self._connection.executescript(
+                    """
+                    ALTER TABLE projects
+                    ADD COLUMN project_path TEXT NOT NULL DEFAULT '';
+                    PRAGMA user_version = 5;
                     """
                 )
 
@@ -209,6 +221,16 @@ class ProjectRepository:
             self._connection.execute(
                 "UPDATE projects SET configuration_json = ? WHERE id = ?",
                 (configuration_json, project_id),
+            )
+        return self.get_project(project_id)
+
+    def update_project_path(self, project_id: int, project_path: Path) -> MeasurementProject:
+        """Store the local per-project database path in the global registry."""
+        self._require_project(project_id)
+        with self._connection:
+            self._connection.execute(
+                "UPDATE projects SET project_path = ? WHERE id = ?",
+                (str(project_path.resolve()), project_id),
             )
         return self.get_project(project_id)
 
@@ -490,6 +512,7 @@ class ProjectRepository:
             configuration=cast(dict[str, object], configuration),
             calibration_snapshot=cast(dict[str, object], calibration),
             stages=stages,
+            project_path=cast(str, row["project_path"]),
         )
 
     @staticmethod

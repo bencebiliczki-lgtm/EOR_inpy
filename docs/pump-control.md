@@ -81,7 +81,7 @@ Fizikai parancs csak akkor adható ki, ha:
 - a program hardvermódban van;
 - a kezelő explicit engedélyezte a fizikai hardvert;
 - az NI fizikai kimenet külön engedélye is rendelkezésre áll, ha szükséges;
-- a kiválasztott projekt eszközprofilja egyezik az aktív hardverprofillal;
+- a globális eszközprofil egyezik az aktív hardverprofillal;
 - mindkét pumpa sikeresen kapcsolódott és ISCO 260D-ként azonosítható;
 - nincs aktív biztonsági retesz.
 
@@ -104,15 +104,16 @@ Alapértékek:
 | Adat | Polling | STALE-határ |
 |---|---:|---:|
 | `PRESS` | 1 s | 6 s |
-| `FLOW` | 10 s-os lassú körforgás | legalább 33 s |
-| `VOLA`/`VOL` | 10 s-os lassú körforgás | legalább 33 s |
+| `FLOW` | a 10 s-os teljes lassú körben egyszer | legalább 33 s |
+| `VOLA`/`VOL` | a 10 s-os teljes lassú körben egyszer | legalább 33 s |
 | `STATUS` | 4 s | 8 s |
 | Kezdő telemetria | — | 8 s timeout |
 
 A `PRESS` kapja a legmagasabb telemetria-prioritást, utána az önálló `STATUS`,
-majd a `FLOW → VOLA` körforgás következik. A következő esedékesség az előző
-tranzakció tényleges befejezésétől számítódik, ezért a worker nem épít fel
-behozhatatlan pollinghátralékot és nem indít felzárkózó burstöt.
+majd a `FLOW → VOLA` körforgás következik. A polling monotonic időalapú, rögzített
+határidőrácsot követ. Ha egy tranzakció miatt egy vagy több időpont kimarad, a
+worker a következő jövőbeli időpontra ugrik; nem épít fel hátralékot és nem indít
+felzárkózó burstöt.
 
 A nyomás és a STATUS biztonságkritikus: hibás vagy STALE értékük reteszelt
 leállítást okozhat. A kizárólag FLOW/VOLA mezőt érintő hiba `DEGRADED`
@@ -197,9 +198,9 @@ felzárkózó `PRESS`-csomagot, hanem a befejezéstől újraütemez.
 - `developer/pump_pressure_poll_seconds`: csak a `PRESS` soros periódusát;
 - `developer/pump_status_poll_seconds`: a `STATUS` külön, alapértelmezetten
   4 s-os periódusát;
-- `developer/pump_slow_poll_seconds`: a telemetria-tranzakciók közötti névleges
-  szünetet; a biztonságkritikus `PRESS/STATUS` elsőbbséget kap, a fennmaradó
-  kapacitásban a worker `FLOW → VOLA` körforgást használ;
+- `developer/pump_slow_poll_seconds`: a teljes `FLOW → VOLA` kör névleges
+  periódusát; a két mező ideális esetben fél periódusra követi egymást, és
+  mindegyik egyszer frissül egy teljes periódus alatt;
 - `developer/pump_pressure_stale_seconds`: ennyi idős nyomás minősül STALE-nek;
 - `developer/pump_slow_stale_seconds`: a `FLOW/VOLA` mezők STALE-határa;
 - `developer/pump_status_stale_seconds`: a biztonságkritikus `STATUS`
@@ -475,8 +476,8 @@ fenntartott hardverkapcsolat `READY` állapotban megmarad.
 | `pump_startup/injection_pressure_limit_bar` | BES `MAXPRESS` |
 | `pump_startup/margin_stability_seconds` | Stabilitási idő |
 | `developer/pump_pressure_poll_seconds` | Nyomáspolling |
-| `developer/pump_slow_poll_seconds` | Telemetria-tranzakciók névleges szünete |
-| `developer/pump_status_poll_seconds` | Külön STATUS-polling, alapérték 3 s |
+| `developer/pump_slow_poll_seconds` | Teljes FLOW/VOLA kör névleges periódusa |
+| `developer/pump_status_poll_seconds` | Külön STATUS-polling, alapérték 4 s |
 | `developer/pump_pressure_stale_seconds` | Nyomás STALE-határ |
 | `developer/pump_slow_stale_seconds` | FLOW/VOLA STALE-határa |
 | `developer/pump_status_stale_seconds` | STATUS STALE-határa |

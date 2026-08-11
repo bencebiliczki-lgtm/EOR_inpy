@@ -56,7 +56,7 @@ def test_run_terminal_accepts_a_scripted_session(tmp_path: Path) -> None:
     input_stream = StringIO("status\nconnect\nstart\nstop\ndisconnect\nexit\n")
     output_stream = StringIO()
     assert run_terminal(input_stream, output_stream, data_root=tmp_path) == 0
-    assert tuple(tmp_path.rglob("*_simulation_live_raw.csv"))
+    assert tuple(tmp_path.rglob("project.sqlite"))
     output = output_stream.getvalue()
     assert "AFKI EOR terminál" in output
     assert "Állapot=IDLE" in output

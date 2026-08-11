@@ -1,5 +1,6 @@
 import csv
 import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from eor_control.data_management import (
     test_nas_connection as probe_nas_connection,
 )
 from eor_control.domain import MeasurementRecord, MeasurementSnapshot, PumpStatus
+from eor_control.project_database import MeasurementQuery, list_phases, query_measurements
 from eor_control.storage import CsvMeasurementWriter
 
 
@@ -56,10 +58,10 @@ def test_project_writer_uses_separate_safe_project_paths(tmp_path: Path) -> None
     writer.close()
 
     assert first != second
-    assert first.name == "Első_projekt_víz_live_raw.csv"
+    assert first.name == "project.sqlite"
     assert first.parent.parent.name.isdigit()
-    assert len(read_measurement_table(first).rows) == 1
-    assert len(read_measurement_table(second).rows) == 1
+    assert len(query_measurements(first, MeasurementQuery()).rows) == 1
+    assert len(query_measurements(second, MeasurementQuery()).rows) == 1
     assert safe_filename('  hibás<>:"/\\|?* név  ') == "hibás_név"
 
 
@@ -78,13 +80,21 @@ def test_project_writer_creates_portable_json_snapshots(tmp_path: Path) -> None:
     writer.close()
 
     assert source.parent.parent.name == "2025"
-    project = json.loads((source.parent / "project.json").read_text(encoding="utf-8"))
-    assert project["name"] == "Kőzet A"
-    assert project["measurement_kind"] == "live"
-    assert project["stages"] == [{"name": "Hidegvizes", "type": "Hidegvizes"}]
-    assert json.loads(
-        (source.parent / "config_snapshot.json").read_text(encoding="utf-8")
-    ) == {"interval": 5}
+    connection = sqlite3.connect(source)
+    try:
+        project = connection.execute(
+            "SELECT name, settings_json FROM project"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert project is not None
+    settings = json.loads(project[1])
+    assert project[0] == "Kőzet A"
+    assert settings["measurement_kind"] == "live"
+    assert settings["configured_stages"] == [
+        {"name": "Hidegvizes", "type": "Hidegvizes"}
+    ]
+    assert settings["interval"] == 5
 
 
 def test_simulation_writer_persists_with_unambiguous_provenance(tmp_path: Path) -> None:
@@ -99,17 +109,18 @@ def test_simulation_writer_persists_with_unambiguous_provenance(tmp_path: Path) 
     writer.write(record("víz"))
     writer.close()
 
-    assert source.name == "Kőzet_A_víz_simulation_live_raw.csv"
-    assert len(read_measurement_table(source).rows) == 1
-    project = json.loads(
-        (source.parent / "project_simulation.json").read_text(encoding="utf-8")
-    )
-    assert project["measurement_kind"] == "simulation"
-    assert json.loads(
-        (source.parent / "config_snapshot_simulation.json").read_text(
-            encoding="utf-8"
+    assert source.name == "project.sqlite"
+    assert source.parent.name.endswith("_simulation")
+    assert len(query_measurements(source, MeasurementQuery()).rows) == 1
+    connection = sqlite3.connect(source)
+    try:
+        settings = json.loads(
+            connection.execute("SELECT settings_json FROM project").fetchone()[0]
         )
-    )["mode"] == "simulation"
+    finally:
+        connection.close()
+    assert settings["measurement_kind"] == "simulation"
+    assert settings["mode"] == "simulation"
     assert project_excel_path(source, "víz").name == "Kőzet_A_simulation.xlsx"
 
 
@@ -224,11 +235,10 @@ def test_project_excel_uses_one_charted_worksheet_per_stage(tmp_path: Path) -> N
 
     workbook = load_workbook(destination, read_only=False)
     assert destination.name == "Excel.xlsx"
-    assert workbook.sheetnames == ["víz", "olaj"]
-    assert workbook["víz"]["C2"].value == 120.5
-    assert workbook["olaj"]["C2"].value == 120.5
-    assert len(workbook["víz"]._charts) == 1
-    assert len(workbook["olaj"]._charts) == 1
+    assert workbook.sheetnames == ["01 víz", "02 olaj"]
+    assert workbook["01 víz"]["C2"].value == 120.5
+    assert workbook["02 olaj"]["C2"].value == 120.5
+    assert workbook["01 víz"].max_column == 13
 
     writer.select_project(1, "Excel", stage_name="víz")
     writer.write(
@@ -238,9 +248,8 @@ def test_project_excel_uses_one_charted_worksheet_per_stage(tmp_path: Path) -> N
     export_measurement_excel(water_source, destination, stage_name="víz")
 
     refreshed = load_workbook(destination, read_only=False)
-    assert refreshed.sheetnames == ["víz", "olaj"]
-    assert refreshed["víz"].max_row == 3
-    assert len(refreshed["víz"]._charts) == 1
+    assert refreshed.sheetnames == ["01 víz", "02 olaj", "03 víz"]
+    assert refreshed["03 víz"].max_row == 2
 
 
 def test_measurement_event_is_stored_once_and_exported_as_chart_marker(
@@ -270,15 +279,14 @@ def test_measurement_event_is_stored_once_and_exported_as_chart_marker(
 
     writer.write_event(event)
     writer.write_event(event)
+    writer.complete_current_phase()
     destination = project_excel_path(source, "víz")
     export_measurement_excel(source, destination, stage_name="víz")
 
     assert read_measurement_events((source,)) == (event,)
     workbook = load_workbook(destination, read_only=False)
-    event_sheet = workbook["víz események"]
-    assert event_sheet.max_row == 2
-    assert event_sheet["A2"].value == "evt-1"
-    assert len(workbook["víz"]._charts[0].series) == 6
+    assert workbook.sheetnames == ["01 víz"]
+    assert workbook["01 víz"].max_column == 13
 
 
 def test_project_writer_creates_one_raw_csv_per_measurement_stage(
@@ -290,13 +298,8 @@ def test_project_writer_creates_one_raw_csv_per_measurement_stage(
     writer.write(record("olaj"))
     writer.close()
 
-    phase_paths = sorted(water_path.parent.glob("*_live_raw.csv"))
-    assert [path.name for path in phase_paths] == [
-        "Projekt_olaj_live_raw.csv",
-        "Projekt_víz_live_raw.csv",
-    ]
-    assert read_measurement_table(water_path).column("active_stage") == ("víz",)
-    assert read_measurement_table(phase_paths[0]).column("active_stage") == ("olaj",)
+    assert not tuple(water_path.parent.glob("*_live_raw.csv"))
+    assert [phase.name for phase in list_phases(water_path)] == ["víz", "olaj"]
 
 
 @pytest.mark.parametrize("measurement_kind", ["live", "simulation"])
@@ -312,16 +315,16 @@ def test_both_measurement_kinds_use_the_same_stage_completion_pipeline(
     water_path = writer.select_project(1, "Projekt", stage_name="víz")
     writer.write(record("víz"))
 
+    assert writer.complete_current_phase() == water_path
     oil_path = writer.select_project(1, "Projekt", stage_name="olaj")
-
     assert completed == [(water_path, "víz")]
     writer.write(record("olaj"))
     assert writer.complete_current_phase() == oil_path
     assert completed == [(water_path, "víz"), (oil_path, "olaj")]
     assert writer.complete_current_phase() is None
     assert completed == [(water_path, "víz"), (oil_path, "olaj")]
-    assert len(read_measurement_table(water_path).rows) == 1
-    assert len(read_measurement_table(oil_path).rows) == 1
+    assert water_path == oil_path
+    assert len(query_measurements(water_path, MeasurementQuery()).rows) == 2
 
 
 def test_multiple_phase_files_are_combined_only_for_reading(tmp_path: Path) -> None:
@@ -337,9 +340,8 @@ def test_multiple_phase_files_are_combined_only_for_reading(tmp_path: Path) -> N
     table = read_measurement_tables((late_path, early_path))
 
     assert table.column("active_stage") == ("víz", "olaj")
-    assert sorted(early_path.parent.glob("*_live_raw.csv")) == sorted(
-        (early_path, late_path)
-    )
+    assert early_path == late_path
+    assert not tuple(early_path.parent.glob("*_live_raw.csv"))
 
 
 def test_disabled_project_writer_never_creates_simulation_files(tmp_path: Path) -> None:

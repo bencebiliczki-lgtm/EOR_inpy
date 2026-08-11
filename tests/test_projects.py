@@ -238,8 +238,17 @@ def test_version_one_database_is_migrated_with_stage_metadata(tmp_path: Path) ->
     assert stage.name == "Chemical"
     assert stage.fluid == "A"
     check = sqlite3.connect(path)
-    assert check.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert check.execute("PRAGMA user_version").fetchone()[0] == 5
     assert check.execute(
         "SELECT stage_type FROM measurement_stages WHERE id = ?", (stage.id,)
     ).fetchone()[0] == "Chemical"
     check.close()
+
+
+def test_global_registry_stores_per_project_database_path(tmp_path: Path) -> None:
+    with ProjectRepository(tmp_path / "projects.sqlite3") as repository:
+        project_id = create_project(repository)
+        database = tmp_path / "projects" / "project.sqlite"
+        updated = repository.update_project_path(project_id, database)
+
+    assert updated.project_path == str(database.resolve())

@@ -62,22 +62,19 @@ előtt ellenőrzi is ezek elérhetőségét, így hiányos hardveres build nem k
 Ezeket, valamint a kábelezési megjegyzést a felhasználó az Eszközbeállításokban
 adja meg; a program a beállításokat megőrzi.
 
-## Projektenkénti moduláris eszközprofil
+## Globális moduláris eszközprofil
 
-Minden projekt konfigurációs pillanatképe külön `devices` profilt tárol. A
-Projektbeállításokban a köpenypumpa, a besajtolópumpa, a vonali
-nyomásmérő, a differenciálnyomás-mérő és a szelep AO-kimenete külön
-hozzáadható vagy eltávolítható. Az Eszközbeállítások ezt a projektprofilt tölti
-be, és sikeres aktiváláskor visszamenti. Csak a hozzáadott eszköz
-konfigurációja és csak olvasási kapcsolattesztje kötelező. Hiányos magprofil
-Developer manuális tesztmódot, a két pumpát, differenciálnyomást és
-szelepkimenetet tartalmazó profil normál mérési hardvermódot ad. A vonali
-nyomásmérő nem része a kötelező magnak.
+A köpenypumpa, a besajtolópumpa, a vonali nyomásmérő, a
+differenciálnyomás-mérő és a szelep AO-kimenete egyetlen globális
+`hardware/*` profilban engedélyezhető. Az Eszközbeállítások ezt tölti be és
+menti; a Projektbeállítások csak projekt- és mérésifázis-adatokat kezel.
+Projektváltás nem cseréli le a portokat, csatornákat vagy az engedélyezett
+eszközöket. A mérés konfigurációs pillanatképe auditcélból tartalmazza az aktív
+eszközlistát, de nem írja vissza a globális profilt.
 
-A projekt eszközlistájának szerkesztéséhez nincs helyszíni validációs adatlap
-vagy vezetett funkcionális teszt. Ha az aktív hardverösszeállítás eltér a
-kiválasztott projekt profiljától, normál mérés csak az eszközök újraaktiválása
-után indítható.
+Régi adatbázisból az első aktív projekt explicit `devices` profilja csak akkor
+migrálódik, ha még egyetlen globális eszközjelző sincs elmentve. A migráció után
+másik projekt korábbi profilja már nem változtatja meg a globális beállítást.
 
 A Developer közvetlen eszközkezelőben minden szerepkör önállóan próbálható,
 globális hardvermód aktiválása nélkül. A két pumpa és a két NI-bemenet saját,

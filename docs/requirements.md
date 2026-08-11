@@ -254,10 +254,10 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   NI kimeneti csatornához és a szelep 0/100%-os feszültségleképezéséhez
   kötve mentse. A csatorna vagy a leképezés módosítása után az irányt
   ismét fizikailag ellenőrizni kell.
-- A hozzáadott eszközök listája projektenként tárolódjon és a
-  Projektbeállításokban kapcsolatpróba vagy helyszíni validáció nélkül legyen
-  szerkeszthető. Az Eszközbeállítások a kiválasztott projekt profilját használja;
-  eltérő aktív hardverprofillal normál mérés nem indulhat.
+- A hozzáadott eszközök listája globálisan tárolódjon, és projektváltáskor ne
+  változzon meg. Kizárólag az Eszközbeállítások módosíthatja; a
+  Projektbeállítások nem tartalmazhat eszközprofil-szerkesztőt. A globális
+  beállítástól eltérő aktív hardverkonfigurációval normál mérés nem indulhat.
 - A manuális hardvervezérlés külön biztonsági profilt használjon: a megcélzott
   pumpa kapcsolatát, véges saját státuszát és maximális nyomását, illetve a
   szelep 0–100%-os tartományát ellenőrizze. Nem kapcsolódó, ki nem épített

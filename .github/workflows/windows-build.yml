@@ -159,12 +159,46 @@ jobs:
               if transport is not None:
                   transport.set_keepalive(15)
 
-              run_powershell(
-                  client,
-                  "$ErrorActionPreference = 'Stop'; "
-                  f"[System.IO.Directory]::CreateDirectory("
-                  f"'{remote_windows_dir}') | Out-Null",
-              )
+              cleanup_script = r"""
+          $ErrorActionPreference = 'Stop'
+          $TargetDir = [System.IO.Path]::GetFullPath('__REMOTE_WINDOWS_DIR__')
+          $ExpectedDir = [System.IO.Path]::GetFullPath('C:\Users\eor\Desktop')
+          if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+              $TargetDir.TrimEnd('\'),
+              $ExpectedDir.TrimEnd('\')
+          )) {
+              throw "Refusing deployment cleanup outside the expected target: $TargetDir"
+          }
+
+          [System.IO.Directory]::CreateDirectory($TargetDir) | Out-Null
+
+          $ExtractedPath = [System.IO.Path]::GetFullPath(
+              (Join-Path -Path $TargetDir -ChildPath 'AFKI-EOR')
+          )
+          $TargetPrefix = $TargetDir.TrimEnd('\') + '\'
+          if (-not $ExtractedPath.StartsWith(
+              $TargetPrefix,
+              [System.StringComparison]::OrdinalIgnoreCase
+          )) {
+              throw "Refusing extracted-directory cleanup outside target: $ExtractedPath"
+          }
+          if (Test-Path -LiteralPath $ExtractedPath) {
+              Remove-Item -LiteralPath $ExtractedPath -Recurse -Force
+              Write-Output "Removed previous extracted directory: $ExtractedPath"
+          }
+
+          $Archives = @(
+              Get-ChildItem -LiteralPath $TargetDir -File -Filter 'AFKI-EOR-*.zip'
+          )
+          foreach ($Archive in $Archives) {
+              Remove-Item -LiteralPath $Archive.FullName -Force
+              Write-Output "Removed previous package: $($Archive.FullName)"
+          }
+          Write-Output "Deployment target cleanup completed. Archives removed: $($Archives.Count)"
+          """.replace("__REMOTE_WINDOWS_DIR__", remote_windows_dir)
+
+              print(f"Cleaning previous deployment from: {remote_windows_dir}")
+              run_powershell(client, cleanup_script)
 
               sftp = client.open_sftp()
               target_path = posixpath.join(

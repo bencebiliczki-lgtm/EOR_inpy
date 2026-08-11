@@ -142,6 +142,7 @@ from eor_control.ui import (  # noqa: E402
     build_simulated_dashboard,
     configure_windows_application_identity,
     format_dashboard_pressure,
+    global_device_profile,
     migrate_legacy_project_database,
     migrate_legacy_project_files,
     portable_user_settings,
@@ -725,10 +726,10 @@ def test_pump_telemetry_dialog_distinguishes_saved_and_active_settings(
     dialog = PumpTelemetrySettingsDialog(settings, active_intervals=active)
 
     assert "Mentett" in dialog.saved_settings.text()
-    assert "FLOW/VOLA polling 1.000 s" in dialog.saved_settings.text()
+    assert "FLOW/VOLA teljes kör 1.000 s" in dialog.saved_settings.text()
     assert "Aktív" in dialog.active_settings.text()
     assert "PRESS 0.700 s" in dialog.active_settings.text()
-    assert "FLOW/VOLA polling 1.500 s" in dialog.active_settings.text()
+    assert "FLOW/VOLA teljes kör 1.500 s" in dialog.active_settings.text()
     dialog.close()
 
 
@@ -1450,7 +1451,8 @@ def test_device_communication_exposes_preparation_and_exact_worker_queue(
     assert worker_table.rowCount() == 2
     assert worker_table.item(0, 3).text() == "COM1"
     assert worker_table.item(0, 6).text() == "RUN"
-    assert worker_table.item(0, 9).text().endswith("/ 2")
+    assert "qmax=0" in worker_table.item(0, 9).text()
+    assert worker_table.item(0, 9).text().endswith("miss=2")
 
     queue_dialog = PumpCommandQueueDialog(provider)
     table = queue_dialog.findChild(QTableWidget, "physical_pump_command_queue")
@@ -1534,6 +1536,49 @@ def test_measurement_history_table_shares_stage_and_time_filters() -> None:
 
     assert len(view._filtered_row_indices) == 300
     assert view._table_model.rowCount() == 300
+
+
+def test_diagram_axes_and_series_show_the_recorded_measurement_units(
+    tmp_path: Path,
+) -> None:
+    application()
+    history = MeasurementHistoryView()
+    history_axis = history._plot.getAxis("left")
+
+    assert history_axis.labelText == "Érték"
+    assert history_axis.labelUnits == "bar"
+    assert history._checks["jacket_pressure_bar"].text().endswith("[bar]")
+    assert history._checks["jacket_flow_ml_per_hour"].text().endswith("[mL/h]")
+    assert history._checks["jacket_remaining_volume_ml"].text().endswith("[mL]")
+    assert history._checks["valve_percent"].text().endswith("[%]")
+
+    for key in (
+        "jacket_pressure_bar",
+        "injection_pressure_bar",
+        "line_pressure_bar",
+        "differential_pressure_bar",
+    ):
+        history._checks[key].setChecked(False)
+    history._checks["jacket_flow_ml_per_hour"].setChecked(True)
+    assert history_axis.labelText == "Érték"
+    assert history_axis.labelUnits == "mL/h"
+
+    history._checks["jacket_pressure_bar"].setChecked(True)
+    assert history_axis.labelText == "Érték — vegyes mértékegységek"
+    assert history_axis.labelUnits == ""
+
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        tmp_path / "projects.sqlite3",
+    )
+    pressure_axis = window._plot.getAxis("left")
+    flow_axis = window._flow_plot.getAxis("left")
+    assert pressure_axis.labelText == "Nyomás"
+    assert pressure_axis.labelUnits == "bar"
+    assert flow_axis.labelText == "Térfogatáram"
+    assert flow_axis.labelUnits == "mL/h"
+    history.close()
+    window.close()
 
 
 def test_completed_stage_excel_export_runs_in_background(
@@ -1726,6 +1771,7 @@ def test_device_settings_discovers_dropdown_choices(
     assert dialog._read_configuration().line_pressure_channel == "Dev2/ai0"
     assert "2 soros csatlakozó" in dialog._discovery_status.text()
     assert not dialog._discovery_status.isHidden()
+    diagnostics.flush()
     discovery_log = log_path.read_text(encoding="utf-8")
     assert 'data-category="system"' in discovery_log
     assert "2 COM-port" in discovery_log
@@ -1811,19 +1857,20 @@ def test_device_settings_can_remove_optional_line_pressure_device(
     dialog.close()
 
 
-def test_device_settings_uses_selected_project_device_profile(tmp_path: Path) -> None:
+def test_device_settings_uses_global_device_profile(tmp_path: Path) -> None:
     application()
+    settings = QSettings(
+        str(tmp_path / "global-profile.ini"), QSettings.Format.IniFormat
+    )
+    settings.setValue("hardware/jacket_pump_enabled", True)
+    settings.setValue("hardware/injection_pump_enabled", False)
+    settings.setValue("hardware/line_pressure_enabled", False)
+    settings.setValue("hardware/differential_pressure_enabled", True)
+    settings.setValue("hardware/valve_output_enabled", True)
     dialog = DeviceSettingsDialog(
         UnusedTester(),  # type: ignore[arg-type]
-        settings=QSettings(str(tmp_path / "project-profile.ini"), QSettings.Format.IniFormat),
+        settings=settings,
         current_mode=RunMode.SIMULATION,
-        device_profile={
-            "jacket_pump_enabled": True,
-            "injection_pump_enabled": False,
-            "line_pressure_enabled": False,
-            "differential_pressure_enabled": True,
-            "valve_output_enabled": True,
-        },
         discoverer=HardwareDiscovery,
     )
 
@@ -1840,19 +1887,21 @@ def test_valve_only_profile_can_open_independent_direct_control(
 ) -> None:
     application()
     direct_configurations: list[HardwareConfiguration] = []
+    settings = QSettings(str(tmp_path / "valve-only.ini"), QSettings.Format.IniFormat)
+    for key in (
+        "jacket_pump_enabled",
+        "injection_pump_enabled",
+        "line_pressure_enabled",
+        "differential_pressure_enabled",
+    ):
+        settings.setValue(f"hardware/{key}", False)
+    settings.setValue("hardware/valve_output_enabled", True)
     dialog = DeviceSettingsDialog(
         UnusedTester(),  # type: ignore[arg-type]
-        settings=QSettings(str(tmp_path / "valve-only.ini"), QSettings.Format.IniFormat),
+        settings=settings,
         current_mode=RunMode.SIMULATION,
         developer_mode=True,
         direct_control_opener=direct_configurations.append,
-        device_profile={
-            "jacket_pump_enabled": False,
-            "injection_pump_enabled": False,
-            "line_pressure_enabled": False,
-            "differential_pressure_enabled": False,
-            "valve_output_enabled": True,
-        },
         discoverer=lambda: HardwareDiscovery(
             ni_output_channels=(NiPhysicalChannelInfo("Dev1/ao0", "Dev1"),)
         ),
@@ -2042,7 +2091,7 @@ def test_project_selector_can_delete_project_but_keeps_raw_files(
         dialog.close()
 
 
-def test_project_settings_adds_and_removes_devices_without_validation(
+def test_project_settings_does_not_override_global_device_profile(
     tmp_path: Path,
 ) -> None:
     application()
@@ -2070,16 +2119,55 @@ def test_project_settings_adds_and_removes_devices_without_validation(
             calibration_snapshot={},
         )
 
-        assert not dialog.device_checks["line_pressure_enabled"].isChecked()
-        dialog.device_checks["injection_pump_enabled"].setChecked(False)
-        dialog.device_checks["line_pressure_enabled"].setChecked(True)
-        dialog._save_device_profile()
+        assert dialog.findChild(QWidget, "global_device_settings_notice") is not None
+        assert dialog.findChild(QPushButton, "save_project_device_profile") is None
+        dialog._accept_if_complete()
 
         saved = repository.get_project(project.id).configuration["devices"]
         assert isinstance(saved, dict)
-        assert saved["injection_pump_enabled"] is False
-        assert saved["line_pressure_enabled"] is True
+        assert saved["injection_pump_enabled"] is True
+        assert saved["line_pressure_enabled"] is False
         dialog.close()
+
+
+def test_legacy_project_device_profile_migrates_once_to_global_settings(
+    tmp_path: Path,
+) -> None:
+    settings = QSettings(
+        str(tmp_path / "device-profile-migration.ini"),
+        QSettings.Format.IniFormat,
+    )
+    first_project = {
+        "devices": {
+            "jacket_pump_enabled": True,
+            "injection_pump_enabled": False,
+            "line_pressure_enabled": False,
+            "differential_pressure_enabled": True,
+            "valve_output_enabled": True,
+        }
+    }
+    second_project = {
+        "devices": {
+            "jacket_pump_enabled": False,
+            "injection_pump_enabled": True,
+            "line_pressure_enabled": True,
+            "differential_pressure_enabled": False,
+            "valve_output_enabled": False,
+        }
+    }
+
+    migrated = global_device_profile(
+        settings,
+        legacy_project_configuration=first_project,
+    )
+    after_project_change = global_device_profile(
+        settings,
+        legacy_project_configuration=second_project,
+    )
+
+    assert migrated == first_project["devices"]
+    assert after_project_change == migrated
+    assert settings.value("hardware/injection_pump_enabled", type=bool) is False
 
 
 def test_dashboard_requires_project_selector_without_last_project(tmp_path: Path) -> None:
@@ -3371,9 +3459,10 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert window._jacket_label.text() == "— bar"
     measurement_path = window._measurement_writer.current_path
     assert measurement_path is not None
-    assert measurement_path.name.endswith("_simulation_live_raw.csv")
+    assert measurement_path.name == "project.sqlite"
     assert measurement_path.is_file()
-    assert tuple((tmp_path / "projects").rglob("*_simulation_live_raw.csv"))
+    assert tuple((tmp_path / "projects").rglob("project.sqlite"))
+    assert not tuple((tmp_path / "projects").rglob("*_simulation_live_raw.csv"))
     window._open_measurement_history()
     assert window._measurement_tabs.currentWidget() is window._history_view
     history = window._history_view

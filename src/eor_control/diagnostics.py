@@ -5,10 +5,12 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
+from heapq import heapify, heappop, heappush
 from html import escape
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Condition, Lock, Thread
 from time import monotonic
+from typing import BinaryIO
 from uuid import uuid4
 
 from eor_control.timezone import as_hungarian_time
@@ -35,6 +37,27 @@ class DiagnosticEvent:
     message: str
     event_id: str = "DIAGNOSTIC"
     fields: tuple[tuple[str, str], ...] = ()
+
+
+class DiagnosticQueueFullError(RuntimeError):
+    """A critical diagnostic event could not enter the bounded writer queue."""
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticQueueMetrics:
+    capacity: int
+    current_size: int
+    maximum_size: int
+    enqueued_events: int
+    written_events: int
+    coalesced_events: int
+    batches: int
+    file_opens: int
+    flushes: int
+    average_queue_latency_ms: float
+    maximum_queue_latency_ms: float
+    writer_running: bool
+    last_error: str
 
 
 STRUCTURED_EVENT_FIELDS = (
@@ -139,9 +162,15 @@ class DiagnosticLogger:
         *,
         hardware_path: Path | None = None,
         capacity: int = 5000,
+        write_queue_capacity: int = 4096,
+        batch_size: int = 256,
+        batch_interval_seconds: float = 0.2,
+        flush_interval_seconds: float = 0.5,
     ) -> None:
-        if capacity < 1:
+        if capacity < 1 or write_queue_capacity < 16:
             raise ValueError("diagnostic capacity must be positive")
+        if batch_size < 1 or batch_interval_seconds <= 0 or flush_interval_seconds <= 0:
+            raise ValueError("diagnostic writer timings and batch size must be positive")
         self._path = path
         self._hardware_path = hardware_path or path
         self._events: deque[DiagnosticEvent] = deque(maxlen=capacity)
@@ -155,6 +184,31 @@ class DiagnosticLogger:
         self._protected_log_paths: set[Path] = set()
         self._last_maintenance: LogMaintenanceResult | None = None
         self._maintenance_thread: Thread | None = None
+        self._raw_hardware_frames_enabled = True
+        self._write_capacity = write_queue_capacity
+        self._critical_reserve = max(8, min(256, write_queue_capacity // 10))
+        self._batch_size = batch_size
+        self._batch_interval = batch_interval_seconds
+        self._flush_interval = flush_interval_seconds
+        self._write_condition = Condition()
+        self._write_queue: list[tuple[int, int, DiagnosticEvent]] = []
+        self._write_thread: Thread | None = None
+        self._write_stopping = False
+        self._write_inflight = False
+        self._writer_error: BaseException | None = None
+        self._maximum_queue_size = 0
+        self._enqueued_events = 0
+        self._written_events = 0
+        self._coalesced_events = 0
+        self._pending_coalesced = 0
+        self._batch_count = 0
+        self._file_opens = 0
+        self._flush_count = 0
+        self._queue_latency_total = 0.0
+        self._queue_latency_max = 0.0
+        self._queue_latency_count = 0
+        self._io_lock = Lock()
+        self._open_files: dict[Path, BinaryIO] = {}
 
     @property
     def enabled(self) -> bool:
@@ -180,9 +234,39 @@ class DiagnosticLogger:
             return self._retention
 
     @property
+    def raw_hardware_frames_enabled(self) -> bool:
+        with self._lock:
+            return self._raw_hardware_frames_enabled
+
+    @property
     def last_maintenance(self) -> LogMaintenanceResult | None:
         with self._lock:
             return self._last_maintenance
+
+    @property
+    def queue_metrics(self) -> DiagnosticQueueMetrics:
+        with self._write_condition:
+            latency_average = (
+                self._queue_latency_total / self._queue_latency_count
+                if self._queue_latency_count
+                else 0.0
+            )
+            thread = self._write_thread
+            return DiagnosticQueueMetrics(
+                capacity=self._write_capacity,
+                current_size=len(self._write_queue),
+                maximum_size=self._maximum_queue_size,
+                enqueued_events=self._enqueued_events,
+                written_events=self._written_events,
+                coalesced_events=self._coalesced_events,
+                batches=self._batch_count,
+                file_opens=self._file_opens,
+                flushes=self._flush_count,
+                average_queue_latency_ms=latency_average * 1000.0,
+                maximum_queue_latency_ms=self._queue_latency_max * 1000.0,
+                writer_running=bool(thread is not None and thread.is_alive()),
+                last_error="" if self._writer_error is None else str(self._writer_error),
+            )
 
     @property
     def directory_size_bytes(self) -> int:
@@ -217,6 +301,11 @@ class DiagnosticLogger:
             self._enabled = enabled
             self._categories = set(categories)
 
+    def configure_raw_hardware_frames(self, enabled: bool) -> None:
+        """Enable or suppress ordinary TX/RX frames without hiding faults."""
+        with self._lock:
+            self._raw_hardware_frames_enabled = enabled
+
     def emit(
         self,
         category: DiagnosticCategory,
@@ -227,6 +316,13 @@ class DiagnosticLogger:
     ) -> None:
         with self._lock:
             if not self._enabled or category not in self._categories:
+                return
+            if (
+                category in self.HARDWARE_CATEGORIES
+                and direction.upper() in {"TX", "RX"}
+                and not self._raw_hardware_frames_enabled
+                and level.upper() not in {"WARNING", "ERROR", "CRITICAL"}
+            ):
                 return
             self._sequence += 1
             event = DiagnosticEvent(
@@ -239,7 +335,7 @@ class DiagnosticLogger:
                 message=message.replace("\r", "[CR]").replace("\n", "[LF]"),
             )
             self._events.append(event)
-            self._append_file(event)
+        self._enqueue_file_event(event)
 
     def emit_event(
         self,
@@ -297,9 +393,195 @@ class DiagnosticLogger:
                 fields=event_fields,
             )
             self._events.append(event)
-            self._append_file(event)
+        self._enqueue_file_event(event)
+
+    @staticmethod
+    def _event_priority(event: DiagnosticEvent) -> int:
+        marker = f"{event.event_id} {event.direction}".upper()
+        level = event.level.upper()
+        if "EMERGENCY_STOP" in marker or "SAFETY_STOP" in marker or level == "CRITICAL":
+            return 0
+        if level == "ERROR" or "TIMEOUT" in marker:
+            return 1
+        if level == "WARNING":
+            return 2
+        if event.direction.upper() in {"TX", "RX"}:
+            return 4
+        if level == "DEBUG":
+            return 5
+        return 3
+
+    def _enqueue_file_event(self, event: DiagnosticEvent) -> None:
+        priority = self._event_priority(event)
+        with self._write_condition:
+            if self._write_stopping:
+                raise RuntimeError("diagnostic logger is closing")
+            normal_limit = self._write_capacity - self._critical_reserve
+            if priority >= 3 and len(self._write_queue) >= normal_limit:
+                self._coalesced_events += 1
+                self._pending_coalesced += 1
+                return
+            if len(self._write_queue) >= self._write_capacity:
+                candidate_index = max(
+                    range(len(self._write_queue)),
+                    key=lambda index: self._write_queue[index][0],
+                )
+                candidate_priority = self._write_queue[candidate_index][0]
+                if candidate_priority > priority:
+                    self._write_queue.pop(candidate_index)
+                    heapify(self._write_queue)
+                    self._coalesced_events += 1
+                    self._pending_coalesced += 1
+                else:
+                    raise DiagnosticQueueFullError(
+                        "a kritikus diagnosztikai várólista megtelt"
+                    )
+            heappush(self._write_queue, (priority, event.sequence, event))
+            self._enqueued_events += 1
+            self._maximum_queue_size = max(
+                self._maximum_queue_size,
+                len(self._write_queue),
+            )
+            self._ensure_writer_locked()
+            self._write_condition.notify_all()
+
+    def _ensure_writer_locked(self) -> None:
+        thread = self._write_thread
+        if thread is not None and thread.is_alive():
+            return
+        self._writer_error = None
+        self._write_thread = Thread(
+            target=self._run_writer,
+            name="eor-diagnostic-writer",
+            daemon=True,
+        )
+        self._write_thread.start()
+
+    def _coalesced_summary(self, count: int) -> DiagnosticEvent:
+        with self._lock:
+            self._sequence += 1
+            event = DiagnosticEvent(
+                sequence=self._sequence,
+                recorded_at=datetime.now(UTC),
+                monotonic_seconds=monotonic(),
+                category=DiagnosticCategory.SYSTEM,
+                direction="LOGGER",
+                level="WARNING",
+                message=f"{count} ismétlődő normál diagnosztikai esemény összevonva",
+                event_id="DIAGNOSTIC_EVENTS_COALESCED",
+                fields=(("coalesced_events", str(count)),),
+            )
+            self._events.append(event)
+            return event
+
+    def _run_writer(self) -> None:
+        last_activity = monotonic()
+        last_flush = last_activity
+        batch: list[DiagnosticEvent]
+        try:
+            while True:
+                close_idle_files = False
+                with self._write_condition:
+                    while not self._write_queue and not self._write_stopping:
+                        self._write_condition.wait(timeout=1.0)
+                        if not self._write_queue and monotonic() - last_activity >= 1.0:
+                            close_idle_files = True
+                            break
+                    if close_idle_files:
+                        batch = []
+                        coalesced = 0
+                    elif self._write_stopping and not self._write_queue:
+                        break
+                    else:
+                        deadline = monotonic() + self._batch_interval
+                        while (
+                            len(self._write_queue) < self._batch_size
+                            and not self._write_stopping
+                            and monotonic() < deadline
+                        ):
+                            self._write_condition.wait(timeout=deadline - monotonic())
+                        batch = []
+                        while self._write_queue and len(batch) < self._batch_size:
+                            _, _, event = heappop(self._write_queue)
+                            batch.append(event)
+                        coalesced = self._pending_coalesced
+                        self._pending_coalesced = 0
+                        self._write_inflight = True
+                if close_idle_files:
+                    self._close_open_files()
+                    last_activity = monotonic()
+                    last_flush = last_activity
+                    continue
+                if coalesced:
+                    batch.insert(0, self._coalesced_summary(coalesced))
+                started = monotonic()
+                for event in batch:
+                    latency = max(0.0, started - event.monotonic_seconds)
+                    with self._write_condition:
+                        self._queue_latency_total += latency
+                        self._queue_latency_max = max(self._queue_latency_max, latency)
+                        self._queue_latency_count += 1
+                self._append_file_batch(batch)
+                last_activity = monotonic()
+                if last_activity - last_flush >= self._flush_interval:
+                    self._flush_open_files()
+                    last_flush = last_activity
+                with self._write_condition:
+                    self._written_events += len(batch)
+                    self._batch_count += 1
+                    self._write_inflight = False
+                    self._write_condition.notify_all()
+            self._flush_open_files()
+        except BaseException as error:
+            with self._write_condition:
+                self._writer_error = error
+                self._write_inflight = False
+                self._write_condition.notify_all()
+        finally:
+            self._close_open_files()
+            with self._write_condition:
+                self._write_thread = None
+                self._write_condition.notify_all()
+
+    def flush(self, timeout_seconds: float = 5.0) -> None:
+        deadline = monotonic() + timeout_seconds
+        with self._write_condition:
+            while self._write_queue or self._write_inflight:
+                if self._writer_error is not None:
+                    raise RuntimeError(
+                        f"diagnostic writer failed: {self._writer_error}"
+                    ) from self._writer_error
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("diagnostic writer queue did not flush in time")
+                self._write_condition.wait(timeout=min(remaining, 0.05))
+        self._flush_open_files()
+
+    def close(self, timeout_seconds: float = 5.0) -> None:
+        deadline = monotonic() + timeout_seconds
+        with self._lock:
+            maintenance_thread = self._maintenance_thread
+        if maintenance_thread is not None and maintenance_thread.is_alive():
+            maintenance_thread.join(max(0.0, deadline - monotonic()))
+            if maintenance_thread.is_alive():
+                raise TimeoutError("diagnostic maintenance did not stop in time")
+        with self._write_condition:
+            if self._write_stopping:
+                return
+            self._write_stopping = True
+            thread = self._write_thread
+            self._write_condition.notify_all()
+        if thread is not None:
+            thread.join(max(0.0, deadline - monotonic()))
+            if thread.is_alive():
+                raise TimeoutError("diagnostic writer did not stop in time")
+        if self._writer_error is not None:
+            raise RuntimeError(
+                f"diagnostic writer failed: {self._writer_error}"
+            ) from self._writer_error
 
     def cleanup_logs(self) -> LogMaintenanceResult:
+        self.flush()
         with self._lock:
             settings = self._retention
         result = self._perform_cleanup(settings)
@@ -358,6 +640,74 @@ class DiagnosticLogger:
         with self._lock:
             self._events.clear()
 
+    def _append_file_batch(self, events: list[DiagnosticEvent]) -> None:
+        if type(self)._append_file is not DiagnosticLogger._append_file:
+            for event in events:
+                self._append_file(event)
+            return
+        grouped: dict[Path, list[DiagnosticEvent]] = {}
+        for event in events:
+            path = (
+                self._hardware_path
+                if event.category in self.HARDWARE_CATEGORIES
+                else self._path
+            )
+            grouped.setdefault(path, []).append(event)
+        suffix = self._HTML_SUFFIX.encode("utf-8")
+        with self._io_lock:
+            for path, path_events in grouped.items():
+                handle = self._log_handle(path, path_events[-1])
+                handle.seek(-len(suffix), 2)
+                for event in path_events:
+                    handle.write(self._html_row(event).encode("utf-8"))
+                handle.write(suffix)
+                handle.truncate()
+
+    def _log_handle(self, path: Path, event: DiagnosticEvent) -> BinaryIO:
+        handle = self._open_files.get(path)
+        if handle is not None and self._rotation_required(path, event.recorded_at):
+            handle.flush()
+            handle.close()
+            self._open_files.pop(path, None)
+            handle = None
+        if handle is not None:
+            return handle
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._rotate_if_required(path, event.recorded_at)
+        title = (
+            "EOR diagnosztikai napló"
+            if self._hardware_path == self._path
+            else (
+                "EOR hardverkommunikációs napló"
+                if event.category in self.HARDWARE_CATEGORIES
+                else "EOR alkalmazásnapló"
+            )
+        )
+        self._ensure_html_document(path, title)
+        handle = path.open("r+b")
+        self._open_files[path] = handle
+        self._file_opens += 1
+        return handle
+
+    def _flush_open_files(self) -> None:
+        with self._io_lock:
+            for handle in self._open_files.values():
+                handle.flush()
+            if self._open_files:
+                self._flush_count += 1
+
+    def _close_open_files(self) -> None:
+        with self._io_lock:
+            handles = tuple(self._open_files.values())
+            self._open_files.clear()
+            for handle in handles:
+                try:
+                    handle.flush()
+                finally:
+                    handle.close()
+            if handles:
+                self._flush_count += 1
+
     def _append_file(self, event: DiagnosticEvent) -> None:
         path = (
             self._hardware_path
@@ -386,24 +736,27 @@ class DiagnosticLogger:
             file.flush()
 
     def _rotate_if_required(self, path: Path, recorded_at: datetime) -> None:
-        date_key = recorded_at.strftime("%Y%m%d")
-        existing_date = (
-            datetime.fromtimestamp(path.stat().st_mtime, UTC).strftime("%Y%m%d")
-            if path.exists()
-            else date_key
-        )
-        previous_date = self._active_log_dates.setdefault(path, existing_date)
-        size_limit = self._retention.maximum_file_size_mb * 1024 * 1024
-        too_large = path.exists() and path.stat().st_size >= size_limit
-        new_day = path.exists() and previous_date != date_key
-        if not too_large and not new_day:
+        if not self._rotation_required(path, recorded_at):
             return
+        date_key = recorded_at.strftime("%Y%m%d")
         timestamp = recorded_at.strftime("%Y%m%d-%H%M%S")
         rotated = path.with_name(
             f"{path.stem}-{timestamp}-{uuid4().hex[:8]}{path.suffix}"
         )
         path.replace(rotated)
         self._active_log_dates[path] = date_key
+
+    def _rotation_required(self, path: Path, recorded_at: datetime) -> bool:
+        if not path.exists():
+            return False
+        date_key = recorded_at.strftime("%Y%m%d")
+        existing_date = datetime.fromtimestamp(
+            path.stat().st_mtime,
+            UTC,
+        ).strftime("%Y%m%d")
+        previous_date = self._active_log_dates.setdefault(path, existing_date)
+        size_limit = self._retention.maximum_file_size_mb * 1024 * 1024
+        return path.stat().st_size >= size_limit or previous_date != date_key
 
     def _perform_cleanup(
         self, settings: LogRetentionSettings
