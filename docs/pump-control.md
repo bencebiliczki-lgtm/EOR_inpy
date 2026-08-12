@@ -13,8 +13,8 @@ vészleállítót és a pumpák saját nyomásvédelmét.
    eszközök csak olvasási kapcsolati ellenőrzését. Szimulációs módban ez a
    lépés nem szükséges.
 3. Megnyomja az **Előkészítés** gombot.
-4. Ellenőrzi és elfogadja a kezdőnyomásokat, a nyomáshatárokat, az
-   előkészítési flow-kat és a stabilitási időt.
+4. Ellenőrzi és elfogadja a kezdőnyomásokat, a közös pumpanyomás-határt, az
+   előkészítési flow-kat, a minimális köpenynyomás-többletet és a stabilitási időt.
 5. A rendszer automatikusan felépíti a nyomást, majd **ELŐKÉSZÍTVE**
    állapotban vár. Ekkor a BES pumpa STOP állapotú, a KÖP a megadott
    nyomást tartja. PID és mérési adatmentés még nem fut.
@@ -39,7 +39,7 @@ runtime indul el.
 | `PumpControlService` | A KÖP/BES parancssorrendje, RUN-kapuk és előkészítés |
 | `PollingPump` | Egyetlen időzített telemetria-cache pumpánként, soros hozzáférés kizárása |
 | `IscoPump` | DASNET-parancsok, csatornák, egységek és válaszok feldolgozása |
-| `SafetyMonitor` | Nyomás-, adatminőségi, kapcsolat-, túllövési és deadline-reteszek |
+| `SafetyMonitor` | Nyomás-, adatminőségi, kapcsolat- és deadline-reteszek |
 
 A UI nem beszél közvetlenül a soros driverrel. Minden fizikai pumpaművelet
 az alkalmazási és pumpavezérlési szolgáltatáson keresztül fut.
@@ -426,17 +426,16 @@ A pumpaparancsoknál és a vezérlési ciklusban ellenőrzött fontosabb feltét
 
 - érvényes, friss nyomástelemetria;
 - mindkét pumpa kapcsolata;
-- KÖP és BES maximális nyomása;
+- a KÖP és BES közös maximális nyomása;
 - vonali és differenciálnyomás határa;
 - a BES nyomása nem lehet nagyobb a KÖP nyomásánál;
 - a BES `RUN` előtt a konfigurált minimális KÖP–BES nyomáskülönbség;
-- a szabályozott nyomás célérték feletti megengedett túllövése;
 - véges mérési adatok és megfelelő adatminőség;
 - vezérlésiciklus-deadline;
 - kézi vészleállítás.
 
 A szoftveres nyomáshatárok mellett az előkészítés még a `RUN` előtt
-mindkét pumpán beállítja a pumpa saját `MAXPRESS` határát. Ezt helyszíni
+mindkét pumpán ugyanazt a közös `MAXPRESS` határt állítja be. Ezt helyszíni
 validációval kell összevetni a teljes hidraulikus rendszer leggyengébb elemének
 határával.
 
@@ -472,8 +471,8 @@ fenntartott hardverkapcsolat `READY` állapotban megmarad.
 | `pump_startup/injection_start_pressure_bar` | BES kezdőnyomás |
 | `pump_startup/injection_startup_flow_ml_per_hour` | BES előkészítési flow |
 | `pump_startup/injection_measurement_flow_ml_per_hour` | Korábbi kompatibilitási kulcs; a mérésindítás nem alkalmazza |
-| `pump_startup/jacket_pressure_limit_bar` | KÖP `MAXPRESS` |
-| `pump_startup/injection_pressure_limit_bar` | BES `MAXPRESS` |
+| `safety/max_pump` | Mindkét pumpára alkalmazott közös `MAXPRESS` |
+| `safety/minimum_margin` | Előkészítéskor szerkeszthető minimális KÖP–BES többlet |
 | `pump_startup/margin_stability_seconds` | Stabilitási idő |
 | `developer/pump_pressure_poll_seconds` | Nyomáspolling |
 | `developer/pump_slow_poll_seconds` | Teljes FLOW/VOLA kör névleges periódusa |

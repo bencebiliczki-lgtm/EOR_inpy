@@ -89,8 +89,8 @@ class PumpStartupPlan:
     injection_start_pressure_bar: float
     injection_startup_flow_ml_per_hour: float
     injection_measurement_flow_ml_per_hour: float | None = None
-    jacket_pressure_limit_bar: float | None = None
-    injection_pressure_limit_bar: float | None = None
+    pressure_limit_bar: float | None = None
+    minimum_jacket_margin_bar: float = 20.0
     margin_stability_seconds: float = 2.0
 
     @property
@@ -483,8 +483,8 @@ class PumpControlService:
         jacket_buildup_flow_ml_per_hour: float,
         injection_start_pressure_bar: float,
         injection_target_flow_ml_per_hour: float,
-        jacket_pressure_limit_bar: float | None = None,
-        injection_pressure_limit_bar: float | None = None,
+        pressure_limit_bar: float | None = None,
+        minimum_jacket_margin_bar: float | None = None,
         confirmation: str,
         startup_safety_check: Callable[[], tuple[str, ...]] | None = None,
         control_interval_seconds: float = 0.2,
@@ -498,8 +498,12 @@ class PumpControlService:
                 jacket_buildup_flow_ml_per_hour=jacket_buildup_flow_ml_per_hour,
                 injection_start_pressure_bar=injection_start_pressure_bar,
                 injection_startup_flow_ml_per_hour=injection_target_flow_ml_per_hour,
-                jacket_pressure_limit_bar=jacket_pressure_limit_bar,
-                injection_pressure_limit_bar=injection_pressure_limit_bar,
+                pressure_limit_bar=pressure_limit_bar,
+                minimum_jacket_margin_bar=(
+                    self._minimum_margin
+                    if minimum_jacket_margin_bar is None
+                    else minimum_jacket_margin_bar
+                ),
                 margin_stability_seconds=margin_stability_seconds,
             ),
             timing=PumpControlTiming(
@@ -525,6 +529,7 @@ class PumpControlService:
         if confirmation != self.START_MEASUREMENT_CONFIRMATION:
             raise PermissionError("measurement pump-start confirmation did not match")
         self._validate_startup(plan, timing)
+        self.set_minimum_jacket_margin_bar(plan.minimum_jacket_margin_bar)
         for role in PumpRole:
             self._require_connected(role)
 
@@ -695,13 +700,13 @@ class PumpControlService:
                     phase = _PreparationPhase.JACKET_PRESSURE_LIMIT
                 command_executed = True
             elif phase is _PreparationPhase.JACKET_PRESSURE_LIMIT:
-                if plan.jacket_pressure_limit_bar is not None:
+                if plan.pressure_limit_bar is not None:
                     pending = self._start_preparation_command(
                         PumpRole.JACKET,
                         PumpCommandKind.SET_PRESSURE_LIMIT,
                         _PreparationPhase.INJECTION_PRESSURE_LIMIT,
                         timing,
-                        value=plan.jacket_pressure_limit_bar,
+                        value=plan.pressure_limit_bar,
                     )
                     command_executed = True
                     if pending is None:
@@ -709,13 +714,13 @@ class PumpControlService:
                 else:
                     phase = _PreparationPhase.INJECTION_PRESSURE_LIMIT
             elif phase is _PreparationPhase.INJECTION_PRESSURE_LIMIT:
-                if plan.injection_pressure_limit_bar is not None:
+                if plan.pressure_limit_bar is not None:
                     pending = self._start_preparation_command(
                         PumpRole.INJECTION,
                         PumpCommandKind.SET_PRESSURE_LIMIT,
                         _PreparationPhase.JACKET_FLOW,
                         timing,
-                        value=plan.injection_pressure_limit_bar,
+                        value=plan.pressure_limit_bar,
                     )
                     command_executed = True
                     if pending is None:
@@ -760,7 +765,7 @@ class PumpControlService:
                     resume_after_jacket_hold = _PreparationPhase.WAIT_MARGIN
                     phase = _PreparationPhase.JACKET_TARGET_STOP
                 else:
-                    margin_ready = margin >= self._minimum_margin
+                    margin_ready = margin >= plan.minimum_jacket_margin_bar
                     stable_since = (
                         now
                         if margin_ready and stable_since is None
@@ -844,7 +849,9 @@ class PumpControlService:
             elif phase is _PreparationPhase.WAIT_MARGIN_RECOVERY:
                 if injection_pressure >= plan.injection_start_pressure_bar:
                     phase = _PreparationPhase.BUILD_PRESSURES
-                elif margin >= (self._minimum_margin + margin_recovery_hysteresis_bar):
+                elif margin >= (
+                    plan.minimum_jacket_margin_bar + margin_recovery_hysteresis_bar
+                ):
                     phase = _PreparationPhase.INJECTION_RUN
             elif phase is _PreparationPhase.INJECTION_TARGET_STOP:
                 pending = self._start_preparation_command(
@@ -868,7 +875,7 @@ class PumpControlService:
                     jacket_state.mode is PumpOperatingMode.CONSTANT_PRESSURE
                     and jacket_state.running
                 )
-                if margin < self._minimum_margin and injection_state.running:
+                if margin < plan.minimum_jacket_margin_bar and injection_state.running:
                     phase = _PreparationPhase.INJECTION_MARGIN_STOP
                 elif injection_at_target and injection_state.running:
                     phase = _PreparationPhase.INJECTION_TARGET_STOP
@@ -878,13 +885,13 @@ class PumpControlService:
                 elif (
                     not injection_at_target
                     and not injection_state.running
-                    and margin >= self._minimum_margin
+                    and margin >= plan.minimum_jacket_margin_bar
                 ):
                     phase = _PreparationPhase.INJECTION_RUN
                 elif (
                     jacket_at_target
                     and injection_at_target
-                    and margin >= self._minimum_margin
+                    and margin >= plan.minimum_jacket_margin_bar
                     and jacket_holding
                     and not injection_state.running
                 ):
@@ -1023,7 +1030,7 @@ class PumpControlService:
             injection_pressure_bar=injection_pressure,
             injection_target_pressure_bar=plan.injection_start_pressure_bar,
             pressure_margin_bar=jacket_pressure - injection_pressure,
-            minimum_margin_bar=self._minimum_margin,
+            minimum_margin_bar=plan.minimum_jacket_margin_bar,
             jacket_state=state_text(PumpRole.JACKET),
             injection_state=state_text(PumpRole.INJECTION),
             jacket_quality=jacket_quality,
@@ -1125,19 +1132,25 @@ class PumpControlService:
             raise ValueError("control watchdog tolerance must be nonnegative and finite")
         if not isfinite(plan.margin_stability_seconds) or plan.margin_stability_seconds < 0.0:
             raise ValueError("margin stability time must be nonnegative and finite")
-        limits = (plan.jacket_pressure_limit_bar, plan.injection_pressure_limit_bar)
-        if not all(limit is None or isfinite(limit) and limit > 0.0 for limit in limits):
+        if (
+            not isfinite(plan.minimum_jacket_margin_bar)
+            or plan.minimum_jacket_margin_bar <= 0.0
+        ):
+            raise ValueError("minimum jacket margin must be positive and finite")
+        if plan.pressure_limit_bar is not None and (
+            not isfinite(plan.pressure_limit_bar) or plan.pressure_limit_bar <= 0.0
+        ):
             raise ValueError("pump pressure limits must be positive and finite")
         if (
-            plan.jacket_pressure_limit_bar is not None
-            and plan.jacket_target_pressure_bar > plan.jacket_pressure_limit_bar
+            plan.pressure_limit_bar is not None
+            and plan.jacket_target_pressure_bar > plan.pressure_limit_bar
         ):
-            raise ValueError("jacket target pressure exceeds its pump pressure limit")
+            raise ValueError("jacket target pressure exceeds the common pump pressure limit")
         if (
-            plan.injection_pressure_limit_bar is not None
-            and plan.injection_start_pressure_bar > plan.injection_pressure_limit_bar
+            plan.pressure_limit_bar is not None
+            and plan.injection_start_pressure_bar > plan.pressure_limit_bar
         ):
-            raise ValueError("injection target pressure exceeds its pump pressure limit")
+            raise ValueError("injection target pressure exceeds the common pump pressure limit")
 
     def set_pressure_limit(self, role: PumpRole, pressure_bar: float) -> None:
         self._require_authorized()
@@ -1162,6 +1175,21 @@ class PumpControlService:
             f"hardware pressure limit={pressure_bar}",
             level="WARNING",
         )
+
+    def apply_common_pressure_limit(self, pressure_bar: float) -> None:
+        """Put both stopped pumps in REMOTE and program the common MAXPRESS limit."""
+        self._require_authorized()
+        if not isfinite(pressure_bar) or pressure_bar <= 0.0:
+            raise ValueError("pump pressure limit must be positive and finite")
+        for role in PumpRole:
+            self._require_connected(role)
+            if self._states[role].running:
+                raise RuntimeError("both pumps must be stopped before setting pressure limit")
+        for role in PumpRole:
+            if not self._states[role].remote:
+                self.enter_remote(role)
+        for role in PumpRole:
+            self.set_pressure_limit(role, pressure_bar)
 
     @staticmethod
     def _require_startup_safe(

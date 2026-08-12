@@ -181,6 +181,8 @@ főszál nem vár hardver-I/O-ra. Érvénytelen átmeneti értéknél a korábbi
 aktív. A PID-paraméterekhez nem tartozik külön fizikai validáltsági jelző;
 a UI és a runtime a `PidParameters` számszaki ellenőrzését használja. A leválasztás és a reteszelt hiba
 biztonságos lezárása kizárólag az alkalmazási állapotgépen keresztül történik.
+A PID-mezők a Szelepvezérlés kártya alapértelmezetten összecsukott alpaneljén
+vannak; az alpanel láthatósága nem kapcsolódik a Developer módhoz.
 Az aktív szakasz egyetlen `QComboBox` példánya az **Aktív projekt** összefoglaló
 kártyán jelenik meg. Ez a runtime, az INI-ben mentett utolsó szakasz és a
 fázisonkénti CSV-író közös kiválasztási forrása; nincs külön, eltérő állapotú
@@ -197,7 +199,12 @@ kalibrációját és a biztonsági határértékeket. Elfogadás előtt validál
 lineáris kalibrációt és a `SafetyLimits` értékeit, majd a `MeasurementService`
 alkalmazási rétegen keresztül alkalmazza őket. Futó mérés közben az ablak tiltott.
 A köpenynyomás minimális többletének alapértéke 20 bar, az UI-ban pozitív,
-0,1 bar vagy nagyobb értékre konfigurálható. Biztonsági
+0,1 bar vagy nagyobb értékre konfigurálható, és az előkészítő ablakban is
+módosítható. A két korábbi pumpahatár helyett egy közös `MAXPRESS` érték van;
+a **Mentés és alkalmazás** aszinkron, felügyelt parancsútvonalon REMOTE módba
+kapcsolja a leállított pumpákat, majd mindkettőbe beírja. Hardvermódban a
+parancs külön kezelői megerősítést igényel. Az előkészítési állapotgép a
+`RUN` előtt biztonsági okból megismétli ugyanezt. Biztonsági
 újrakonfigurálás nem törli a monitor reteszelt okait; azok csak a riasztás
 kezelői bezárásakor futtatott friss, sikeres biztonsági ellenőrzéssel oldhatók.
 
@@ -252,13 +259,14 @@ Az `appearance/dashboard/*` QSettings-kulcsok őrzik a választást. Futó vagy
 szüneteltetett mérés alatt a jobb oldalsáv és a STOP/vészleállítás kártyája nem
 rejthető el.
 
-A projekt kiválasztását a modális `ProjectSelectionDialog` végzi. A korábbi
+A projekt kiválasztását a nem modális `ProjectSelectionDialog` végzi. A korábbi
 projekteket legutóbbi elöl sorrendben, a projektenként az INI-ben tárolt utolsó
 mérési fázissal listázza, és új projektet is létre tud hozni az alapértelmezett
 fázisokkal. Érvényes `project/last_project_id` hiányában a főablak első
 megjelenésekor automatikusan megnyílik. A részletes szakaszszerkesztést továbbra is
 a külön `ProjectSettingsDialog` biztosítja. A főablak csak az elfogadott projekt-
-és szakaszazonosítót veszi át; a párbeszéd megszakítása nem módosítja az aktív
+és szakaszazonosítót veszi át eseményvezérelt lezárási callbackben; a párbeszéd
+megszakítása nem módosítja az aktív
 mérést.
 
 ## Háttér-vezérlési runtime
@@ -393,6 +401,9 @@ A Developer mód külön, az INI-ben megmaradó kapcsoló. Normál módban a sik
 eszközfelderítés technikai összegzése és az eszközkommunikációs Developer nézet
 rejtve marad; a felderítési figyelmeztetések és hibák azonban minden módban
 láthatók.
+Szimulációban a mérésindítás engedélyfeltétele a Developer mód. Ezt a
+dashboard gombállapota, az előellenőrzés indítása és a runtime indítási kapuja is
+ellenőrzi, így az aszinkron előellenőrzés közbeni módváltás sem kerüli meg.
 A Developer menü **Szimulációs mód** kapcsolója az aktuális `RunMode` állapotát
 mutatja. Az alkalmazás az utolsó sikeresen aktivált üzemmódot az
 `application/last_run_mode` beállításban megőrzi. Ha legutóbb HARDVER módban futott,
@@ -589,7 +600,7 @@ helyreállítja a Remote módot és újrapróbálja a parancsot. A pumpastátusz
 engedélyezett NI-bemenetek külön
 hibahatárral olvashatók, ezért egy nem hozzáadott érzékelő nem jelenik meg
 kapcsolathibaként. Pumpa-RUN előtt a `ManualSafetyMonitor` csak a megcélzott pumpa
-kapcsolatát, véges saját adatait és maximális nyomását ellenőrzi. A kézi
+kapcsolatát, véges saját adatait és a közös pumpanyomás-határt ellenőrzi. A kézi
 szelepjel a `ControlLoop.write_manual_output()` útvonalán, 0–100%-os
 tartományellenőrzéssel jut az aktuátorra. A STOP, safe-state és leválasztás
 mindig külön-külön megkísérelhető. A manuális ablak minden bezárási útvonala

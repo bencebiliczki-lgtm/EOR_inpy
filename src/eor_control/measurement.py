@@ -115,7 +115,6 @@ class MeasurementService:
         valve_percent: float,
         persist: bool = True,
         control_deadline_missed: bool = False,
-        pressure_target_bar: float | None = None,
         use_line_pressure_for_control: bool = False,
         enforce_minimum_margin: bool = False,
     ) -> MeasurementRecord:
@@ -157,21 +156,13 @@ class MeasurementService:
             raw_line_voltage=raw_line_voltage,
             raw_differential_voltage=raw_differential_voltage,
         )
-        if use_line_pressure_for_control:
-            if snapshot.line_pressure_bar is None:
-                raise ValueError(
-                    "line pressure control source is selected but the sensor is not configured"
-                )
-            controlled_pressure = snapshot.line_pressure_bar
-        else:
-            controlled_pressure = snapshot.injection_pump.pressure_bar
+        if use_line_pressure_for_control and snapshot.line_pressure_bar is None:
+            raise ValueError(
+                "line pressure control source is selected but the sensor is not configured"
+            )
         decision = self._safety_monitor.evaluate(
             snapshot,
             control_deadline_missed=control_deadline_missed,
-            controlled_pressure_bar=(
-                controlled_pressure if pressure_target_bar is not None else None
-            ),
-            pressure_target_bar=pressure_target_bar,
             enforce_minimum_margin=enforce_minimum_margin,
         )
         record = MeasurementRecord(

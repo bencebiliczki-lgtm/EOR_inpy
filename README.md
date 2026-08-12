@@ -67,6 +67,8 @@ lehet visszatérni a fizikai kimenet nélküli, de az éles méréssel azonos m�
 mentett, exportált és NAS-szinkronizált szimulációhoz. A váltás leállított mérésnél
 biztonságosan lezárja az élő hardverkapcsolatot. A kapcsoló kikapcsolása az eszközbeállítási
 ablakot nyitja meg; az éles mód továbbra is felderítést és külön megerősítést kér.
+Szimulációs módban mérést csak bekapcsolt Developer móddal lehet indítani;
+Developer mód nélkül az indítógomb letiltva marad.
 A `Developer` → `Szimuláció és hibateszt…` oldal állítható pumpanyomás-rámpát,
 válaszkésést és saját nyomáshatárokat biztosít. Ugyanitt pumpa-STALE,
 kapcsolatvesztés, üres cilinder, motorhiba és túlnyomás, továbbá NI-jelhiba és
@@ -82,9 +84,8 @@ előkészítése után a mérés a `Mérés indítása` gomb megnyomására indu
 A projekt és szakaszok a
 felhasználó `Dokumentumok\EOR\projects.sqlite3` adatbázisában maradnak meg, a
 nyers projektfájlok pedig a `Dokumentumok\EOR\projects` könyvtárba kerülnek. A PID
-erősítések, hatásirány és
-kimeneti korlátok Developer módban módosíthatók. Normál kezelői nézetben csak az
-üzemi vezérlési mezők láthatók. Kritikus hardverhibánál a program safe-state-et
+erősítések, hatásirány és kimeneti korlátok a Szelepvezérlés kártya
+összecsukható PID-paneljén, a Developer módtól függetlenül módosíthatók. Kritikus hardverhibánál a program safe-state-et
 kér, felszabadítja a portokat, majd részletes hibaüzenet után automatikusan
 megnyitja az Eszközbeállításokat.
 Projekt létrehozásakor nem szükséges felhasználót vagy tulajdonost megadni; minden
@@ -98,7 +99,7 @@ Projekt a projektválasztó képernyőről és a projektkezelőből is törölhe
 megerősítés után. Ez a projekt- és fázis-metaadatokat törli; a korábbi nyers mérési
 CSV-k biztonsági és visszakövethetőségi okból megmaradnak.
 
-A **Szelepvezérlés** panelen a PID-beállítások névvel menthető profilokba
+A **Szelepvezérlés** panel összecsukható PID-részén a beállítások névvel menthető profilokba
 rendezhetők. A profil a `Kp`, `Ki`, `Kd`, hatásirány, kimeneti minimum/maximum és
 nyomásforrás értékeket tárolja. A profilok közös SQLite-adatok: kiválaszthatók,
 felülírhatók és megerősítés után törölhetők. Egy mentett profil kézi módosítása

@@ -9,7 +9,7 @@ biztonsági hiba, mert a mérés elsődlegesen a helyi `project.sqlite` fájlba 
 ## Felügyelt pumpaindítás
 
 A mérésindítás nem kerülheti meg a pumpák külön fizikai engedélyezését: a kezelőnek
-mindkét kezdőnyomást, a pumpák saját hardveres nyomáshatárát és a két indítási
+mindkét kezdőnyomást, a közös hardveres pumpanyomás-határt és a két indítási
 térfogatáramot tartalmazó pumpaterv
 megjelenítése után explicit, alapértelmezetten elutasított gombos indítási
 megerősítést kell adnia. Begépelendő parancsszöveg nincs. Már a bevitelkor
@@ -21,7 +21,7 @@ túllépése azonnal megszakítja az indítást. A cél-nyomásnál a köpenypum
 állandó nyomástartásra vált. A szükséges nyomástöbblet nélkül a besajtolópumpa nem
 kaphat `RUN` parancsot. Sikeres `RUN` után a nyomástöbblet folyamatos safety
 interlock: elvesztése azonnal leállítja a BES-t, amely csak a hiszterézissel
-megnövelt visszaállási küszöbnél indulhat újra. A saját pumpanyomás-határok, adatminőség-, kapcsolat-,
+megnövelt visszaállási küszöbnél indulhat újra. A közös pumpanyomás-határ, adatminőség-, kapcsolat-,
 vonali- és differenciálnyomás-védelmek változatlanul aktívak. A mérési
 adatrögzítés csak mindkét friss, `GOOD` minőségű kezdőnyomás és a biztonságos
 nyomáskülönbség egyidejű teljesülése után indulhat. A célnyomás elérésének nincs
@@ -54,7 +54,6 @@ hibája nem akadályozhatja meg a többi biztonsági művelet megkísérlését.
 
 - konfigurált maximális pumpanyomás túllépése;
 - differenciálnyomás `Y` határának elérése;
-- szabályozási cél fölé növő nyomás konfigurált `X` eltéréssel;
 - szenzorjel tartományon kívül, nem szám vagy elavult adat;
 - pumpa-, NI- vagy vezérlési kommunikáció elvesztése;
 - vezérlési ciklus határidejének túllépése;
@@ -101,16 +100,11 @@ bezárás elutasított, a retesz és a riasztássáv változatlan marad. A nem v
 mérési érték, a kézi vészleállítás és a vezérlési határidő túllépése reteszelt
 hibát vált ki.
 
-Automata szabályozásban a kiválasztott nyomásforrás értéke külön céltúllövési
-interlockot kap. A konfigurált célérték plusz a `max_control_overshoot_bar` eltérés
-elérése reteszelt hibát és kimenettiltást vált ki. A dashboardon ez az eltérés
-pozitív, véges barértékként állítható.
-
 ## Manuális biztonsági profil
 
 A Developer manuális vezérlés nem készít teljes mérési pillanatképet minden
 parancshoz. Pumpa-RUN előtt csak a kiválasztott, hozzáadott pumpa kapcsolatát,
-véges nyomás-/áramlás-/térfogatadatát és saját maximális nyomását ellenőrzi.
+véges nyomás-/áramlás-/térfogatadatát és a közös pumpanyomás-határt ellenőrzi.
 A manuális szelepírás a megerősítés mellett a véges 0–100%-os tartományt és
 az NI kimenet hardverengedélyét ellenőrzi. Nem hozzáadott vonali vagy
 differenciálnyomás-bemenet nem generál manuális reteszt. A STOP, STOP ALL és
@@ -125,8 +119,8 @@ runtime, álló pumpák, aktuális sikeres kapcsolatpróba, aktív/reteszelt hib
 A PID nyomásszűrése csak a szabályozási ágra hat. Az NI vonali és
 differenciálnyomás kemény maximum-interlockja az EMA előtti, mediánból kalibrált
 nyers nyomást értékeli, ezért a szűrés késleltetése nem takarhat el veszélyes
-túllépést. A szűrt érték a PID, kijelzés, grafikon és céltúllövési felügyelet
-bemenete. A túl gyakori irányváltás `VALVE_OSCILLATION`
+túllépést. A szűrt érték a PID, kijelzés és grafikon bemenete. A túl gyakori
+irányváltás `VALVE_OSCILLATION`
 runtime hibát és reteszelt safe-state útvonalat vált ki.
 
 A szelep fizikai skálája `0% = zárt`, `100% = nyitott`; a nagyobb nyitás

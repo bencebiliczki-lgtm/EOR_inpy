@@ -3,7 +3,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
-from time import sleep
+from time import monotonic, sleep
 from types import SimpleNamespace
 
 import pytest
@@ -314,6 +314,10 @@ def test_calibration_settings_scroll_without_overlapping_fields() -> None:
     application().processEvents()
 
     assert dialog.minimum_margin.minimum() == pytest.approx(0.1)
+    assert dialog.max_pump.value() == pytest.approx(350.0)
+    assert not hasattr(dialog, "max_jacket")
+    assert not hasattr(dialog, "max_injection")
+    assert not hasattr(dialog, "max_overshoot")
 
     field_groups = (
         (
@@ -448,15 +452,13 @@ def test_simulation_settings_scroll_without_overlapping_model_fields() -> None:
         page.jacket_ramp,
         page.injection_ramp,
         page.response_delay,
-        page.jacket_limit,
-        page.injection_limit,
     )
     assert all(field.height() >= 38 for field in fields)
     assert all(
         first.geometry().bottom() < second.geometry().top()
         for first, second in zip(fields, fields[1:], strict=False)
     )
-    assert page.injection_limit.geometry().bottom() < page.apply_model.geometry().top()
+    assert page.response_delay.geometry().bottom() < page.apply_model.geometry().top()
     assert page.device.height() >= 38
     assert page.fault.height() >= 38
     assert page._content_scroll.verticalScrollBar().isVisible()
@@ -508,8 +510,8 @@ def test_dashboard_settings_hub_embeds_real_editors(
     hubs: list[SettingsHubDialog] = []
     monkeypatch.setattr(
         SettingsHubDialog,
-        "exec",
-        lambda dialog: hubs.append(dialog) or QDialog.DialogCode.Rejected,
+        "show",
+        lambda dialog: hubs.append(dialog),
     )
 
     for key, editor_type in (
@@ -523,6 +525,9 @@ def test_dashboard_settings_hub_embeds_real_editors(
     ):
         window._open_settings_hub(key)
         hub = hubs[-1]
+        assert not hub.isModal()
+        assert hub.windowModality() is Qt.WindowModality.NonModal
+        assert window.isEnabled()
         assert hub.navigation.currentItem().data(Qt.ItemDataRole.UserRole) == key
         editor = hub.findChild(editor_type)
         assert editor is not None
@@ -537,6 +542,81 @@ def test_dashboard_settings_hub_embeds_real_editors(
         for hub in hubs
         for button in hub.findChildren(QPushButton)
     )
+    window.close()
+
+
+def test_save_and_apply_programs_common_maxpress_on_both_simulated_pumps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        tmp_path / "projects.sqlite3",
+        settings=QSettings(str(tmp_path / "maxpress.ini"), QSettings.Format.IniFormat),
+    )
+    assert window._pump_control is not None
+    applied: list[float] = []
+    messages: list[tuple[str, str]] = []
+    monkeypatch.setattr(window._pump_control, "apply_common_pressure_limit", applied.append)
+    monkeypatch.setattr(
+        window,
+        "_show_information",
+        lambda title, text: messages.append((title, text)),
+    )
+    dialog = window._create_calibration_settings_page()
+    assert isinstance(dialog, CalibrationSettingsDialog)
+    dialog.max_pump.setValue(175.0)
+
+    dialog._buttons.button(QDialogButtonBox.StandardButton.Save).click()
+    for _ in range(100):
+        app.processEvents()
+        if messages:
+            break
+        sleep(0.01)
+
+    assert applied == [175.0]
+    assert window._max_pump.value() == pytest.approx(175.0)
+    assert messages and "mindkét pumpa" in messages[0][1]
+    window.close()
+
+
+def test_hardware_maxpress_apply_requires_explicit_operator_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = application()
+    window = build_simulated_dashboard(tmp_path / "raw.csv", tmp_path / "projects.sqlite3")
+    assert window._pump_control is not None
+    window._run_mode = RunMode.HARDWARE
+    window._devices._hardware_authorized = True
+    confirmations: list[str] = []
+    applied: list[float] = []
+    completed: list[tuple[str, str]] = []
+
+    def confirm(_parent: QWidget, _title: str, text: str, *_args: object) -> object:
+        confirmations.append(text)
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", confirm)
+    monkeypatch.setattr(window._pump_control, "apply_common_pressure_limit", applied.append)
+    monkeypatch.setattr(
+        window,
+        "_show_information",
+        lambda title, text: completed.append((title, text)),
+    )
+    dialog = window._create_calibration_settings_page()
+    assert isinstance(dialog, CalibrationSettingsDialog)
+    dialog.max_pump.setValue(160.0)
+
+    dialog._buttons.button(QDialogButtonBox.StandardButton.Save).click()
+    for _ in range(100):
+        app.processEvents()
+        if completed:
+            break
+        sleep(0.01)
+
+    assert confirmations and "MAXPRESS=160.000 bar" in confirmations[0]
+    assert applied == [160.0]
+    window._run_mode = RunMode.SIMULATION
     window.close()
 
 
@@ -1281,10 +1361,15 @@ def test_text_labels_have_no_theme_background_fill() -> None:
 def test_measurement_pump_startup_dialog_requires_all_values_without_text_confirmation() -> None:
     application()
     dialog = MeasurementPumpStartupDialog(
-        MeasurementPumpPlan(120.0, 0.0, 100.0, 10.0),
-        maximum_jacket_pressure_bar=400.0,
-        maximum_injection_pressure_bar=350.0,
-        minimum_jacket_margin_bar=12.0,
+        MeasurementPumpPlan(
+            120.0,
+            0.0,
+            100.0,
+            10.0,
+            pressure_limit_bar=350.0,
+            minimum_jacket_margin_bar=12.0,
+        ),
+        maximum_pump_pressure_bar=350.0,
     )
 
     assert not dialog.start_button.isEnabled()
@@ -1297,9 +1382,14 @@ def test_measurement_pump_startup_dialog_requires_all_values_without_text_confir
         60.0,
         100.0,
         10.0,
-        jacket_pressure_limit_bar=400.0,
-        injection_pressure_limit_bar=350.0,
+        pressure_limit_bar=350.0,
+        minimum_jacket_margin_bar=12.0,
     )
+    assert dialog.findChild(QDoubleSpinBox, "startup_jacket_pressure_limit") is None
+    assert dialog.findChild(QDoubleSpinBox, "startup_injection_pressure_limit") is None
+    dialog.minimum_margin.setValue(21.0)
+    assert not dialog.start_button.isEnabled()
+    dialog.minimum_margin.setValue(12.0)
     dialog.injection_start_pressure.setValue(101.0)
     assert dialog.start_button.isEnabled()
 
@@ -1477,6 +1567,33 @@ def test_changed_pressure_margin_is_applied_to_simulation_pump_control(
     window._apply_measurement_settings()
 
     assert window._pump_control.minimum_jacket_margin_bar == pytest.approx(7.5)
+    window.close()
+
+
+def test_legacy_pressure_limits_migrate_to_one_conservative_common_limit(
+    tmp_path: Path,
+) -> None:
+    application()
+    settings = QSettings(str(tmp_path / "legacy-limits.ini"), QSettings.Format.IniFormat)
+    settings.setValue("safety/max_jacket", 400.0)
+    settings.setValue("safety/max_injection", 350.0)
+    settings.setValue("safety/max_overshoot", 5.0)
+    settings.setValue("pump_startup/jacket_pressure_limit_bar", 390.0)
+    settings.setValue("pump_startup/injection_pressure_limit_bar", 340.0)
+
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        tmp_path / "projects.sqlite3",
+        settings=settings,
+    )
+
+    assert window._max_pump.value() == pytest.approx(350.0)
+    assert float(settings.value("safety/max_pump")) == pytest.approx(350.0)
+    assert not settings.contains("safety/max_jacket")
+    assert not settings.contains("safety/max_injection")
+    assert not settings.contains("safety/max_overshoot")
+    assert not settings.contains("pump_startup/jacket_pressure_limit_bar")
+    assert not settings.contains("pump_startup/injection_pressure_limit_bar")
     window.close()
 
 
@@ -2214,8 +2331,8 @@ def test_stage_selector_last_item_creates_stage_with_notes(
     assert selector.itemText(selector.count() - 1) == "+ Új szakasz hozzáadása…"
     monkeypatch.setattr(
         StageSettingsDialog,
-        "exec",
-        lambda _dialog: QDialog.DialogCode.Accepted,
+        "show",
+        lambda dialog: dialog.accept(),
     )
     monkeypatch.setattr(
         StageSettingsDialog,
@@ -2240,8 +2357,8 @@ def test_stage_selector_last_item_creates_stage_with_notes(
 
     monkeypatch.setattr(
         StageSettingsDialog,
-        "exec",
-        lambda _dialog: QDialog.DialogCode.Rejected,
+        "show",
+        lambda dialog: dialog.reject(),
     )
     selector.setCurrentIndex(selector.count() - 1)
     assert selector.currentData() == created_id
@@ -2642,6 +2759,7 @@ def test_measurement_start_preflight_accepts_finite_voltage_outside_nominal_span
     settings.setValue("project/last_project_id", project.id)
     settings.setValue("project/last_stage_id", stage.id)
     window = build_simulated_dashboard(tmp_path / "raw.csv", project_path, settings=settings)
+    window._set_developer_mode(True)
     window._devices._daq.inputs["line_pressure"] = -1.188189
     errors: list[str] = []
     monkeypatch.setattr(window, "_show_error", errors.append)
@@ -2673,7 +2791,7 @@ def test_measurement_start_preflight_accepts_finite_voltage_outside_nominal_span
     window.close()
 
 
-def test_simulation_offers_preparation_and_direct_measurement_start(
+def test_simulation_measurement_start_requires_developer_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     application()
@@ -2690,6 +2808,8 @@ def test_simulation_offers_preparation_and_direct_measurement_start(
     settings.setValue("project/last_stage_id", stage.id)
     window = build_simulated_dashboard(tmp_path / "raw.csv", project_path, settings=settings)
     preflight_requests: list[bool] = []
+    errors: list[str] = []
+    monkeypatch.setattr(window, "_show_error", errors.append)
     monkeypatch.setattr(
         window,
         "_start_measurement_preflight",
@@ -2700,10 +2820,18 @@ def test_simulation_offers_preparation_and_direct_measurement_start(
 
     assert window._devices.status.state is ApplicationState.READY
     assert window._prepare_button.isEnabled()
-    assert window._start_button.isEnabled()
+    assert not window._start_button.isEnabled()
     window._prepare()
     window._start()
+    assert preflight_requests == [False]
+    assert errors == ["Szimulációs mérés csak bekapcsolt Developer módban indítható."]
+
+    window._set_developer_mode(True)
+
+    assert window._start_button.isEnabled()
+    window._start()
     assert preflight_requests == [False, True]
+    assert len(errors) == 1
     window.close()
 
 
@@ -2726,8 +2854,8 @@ def test_simulation_preparation_unlocks_measurement_start_only_after_completion(
     assert window._pump_control is not None
     monkeypatch.setattr(
         MeasurementPumpStartupDialog,
-        "exec",
-        lambda _dialog: QDialog.DialogCode.Accepted,
+        "show",
+        lambda dialog: dialog.accept(),
     )
     preparation_calls: list[tuple[MeasurementPumpPlan, PumpControlTiming]] = []
 
@@ -2743,6 +2871,7 @@ def test_simulation_preparation_unlocks_measurement_start_only_after_completion(
     )
 
     window._begin_measurement_after_preflight()
+    assert window.isEnabled()
     for _ in range(100):
         app.processEvents()
         if window._devices.status.measurement is MeasurementState.WAITING_CONFIRMATION:
@@ -2751,6 +2880,8 @@ def test_simulation_preparation_unlocks_measurement_start_only_after_completion(
 
     assert window._devices.status.state is ApplicationState.RUNNING
     assert window._devices.status.measurement is MeasurementState.WAITING_CONFIRMATION
+    assert not window._start_button.isEnabled()
+    window._set_developer_mode(True)
     assert window._start_button.isEnabled()
     assert not window._prepare_button.isEnabled()
     assert len(preparation_calls) == 1
@@ -2974,9 +3105,7 @@ def test_pid_application_status_has_non_overlapping_wrapped_area(tmp_path: Path)
     )
 
     status = window._pid_application_status
-    settings = window.findChild(QGroupBox, "valve_control_settings")
-    assert settings is not None
-    form = settings.layout()
+    form = window._pid_settings_panel.layout()
     assert isinstance(form, QFormLayout)
     _row, role = form.getWidgetPosition(window._pid_application_status_block)
     minimum_lines_height = status.fontMetrics().lineSpacing() * 3
@@ -3104,8 +3233,10 @@ def test_mode_and_pid_changes_are_queued_during_running_measurement(
     assert window._runtime._current_settings().mode is ControlMode.AUTOMATIC
 
     window._kp.setValue(window._kp.value() + 0.5)
-    sleep(0.12)
-    application().processEvents()
+    deadline = monotonic() + 1.0
+    while not queued and monotonic() < deadline:
+        application().processEvents()
+        sleep(0.01)
 
     assert len(queued) == 1
     assert queued[0].proportional_gain == window._kp.value()
@@ -3251,14 +3382,16 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert pump_plan.jacket_buildup_flow_ml_per_hour == 0.0
     assert pump_plan.injection_start_pressure_bar == 88.0
     assert pump_plan.injection_target_flow_ml_per_hour == 10.0
+    window._max_pump.setValue(155.0)
+    window._minimum_margin.setValue(12.0)
     remembered_plan = MeasurementPumpPlan(
         115.0,
         45.0,
         90.0,
         8.0,
         injection_measurement_flow_ml_per_hour=8.0,
-        jacket_pressure_limit_bar=155.0,
-        injection_pressure_limit_bar=135.0,
+        pressure_limit_bar=155.0,
+        minimum_jacket_margin_bar=12.0,
     )
     window._remember_measurement_pump_plan(remembered_plan)
     assert window._default_measurement_pump_plan() == remembered_plan
@@ -3286,9 +3419,15 @@ def test_dashboard_loads_projects_and_stages_from_sqlite(
     assert alarm_banner.isHidden()
     assert alarm_banner.text() == ""
     assert not window._developer_mode
-    assert window._kp.isHidden()
+    assert window._pid_settings_panel.isHidden()
+    window._pid_settings_toggle.click()
+    assert not window._pid_settings_panel.isHidden()
+    assert not window._kp.isHidden()
     window._set_developer_mode(True)
     assert not window._kp.isHidden()
+    window._set_developer_mode(False)
+    assert not window._kp.isHidden()
+    window._set_developer_mode(True)
     assert window._developer_view_action.isVisible()
     assert window._simulation_mode_action.isVisible()
     assert window._simulation_mode_action.isChecked()
@@ -3701,6 +3840,18 @@ def test_dashboard_marks_warning_and_critical_alarms_on_graph(
     )
     window._handle_cycle(ControlCycleResult(inverted_pressure_record, command))
     assert "INJECTION_PRESSURE_ABOVE_JACKET" in str(window._alarm_points[-1]["data"])
+    line_limit_record = replace(
+        record,
+        safety_reasons=(
+            "line pressure limit exceeded: measured=401.000 bar; "
+            "limit=400.000 bar; source=raw",
+        ),
+    )
+    window._handle_cycle(ControlCycleResult(line_limit_record, command))
+    line_alarm = str(window._alarm_points[-1]["data"])
+    assert "LINE_PRESSURE_LIMIT" in line_alarm
+    assert "measured=401.000 bar" in line_alarm
+    assert "limit=400.000 bar" in line_alarm
     window._reset_measurement_dashboard()
     assert window._alarm_points == []
     window.close()

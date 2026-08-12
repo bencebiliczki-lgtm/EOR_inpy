@@ -93,6 +93,10 @@ A mintavételi gyakoriság 1 másodperc és 1 óra között konfigurálható. A 
 - Külön, görgethető mérési áttekintő ablak jelenítse meg részletesen az aktív
   projektet és fázist, az eszközkapcsolatokat, az összes élő mérési értéket, a
   szelepjelet, a kalibrációkat és a biztonsági határértékeket.
+- A dashboardból nyíló beállítási, projekt-, adatkezelési, diagnosztikai és
+  mérés-előkészítési ablakok nem lehetnek modálisak: nyitott állapotukban a
+  dashboard maradjon elérhető. A biztonsági műveletek kezelői elfogadása ettől
+  függetlenül továbbra is kötelező előfeltétel.
 - A vonali nyomás egyben a berendezés belépő nyomása; nem kezelhető külön,
   duplikált érzékelőként vagy adatsorként.
 
@@ -157,10 +161,14 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   az élő hardverkapcsolatot.
 - Hardveres és szimulációs módban az **Előkészítés** gomb külön ablakban
   kérje be mindkét pumpa elérendő
-  kezdőnyomását, saját hardveres nyomáshatárát, a köpeny nyomásfelépítési
-  térfogatáramát, a besajtoló térfogatáramát és a nyomástöbblet stabilitási idejét.
-  A program a dokumentált `MAXPRESS` paranccsal állítsa be a két pumpa saját
-  határát még a `RUN` előtt. A köpenypumpa induljon elsőként, érje el a saját
+  kezdőnyomását, a köpeny nyomásfelépítési térfogatáramát, a besajtoló
+  térfogatáramát, a minimális köpenynyomás-többletet és annak stabilitási idejét.
+  A **Nyomás- és szabályozási korlátok** alatt egyetlen közös pumpanyomás-határ
+  legyen konfigurálható. A **Mentés és alkalmazás** a dokumentált `MAXPRESS`
+  paranccsal azonnal írja ezt mindkét pumpába; fizikai hardvernél ehhez külön
+  kezelői megerősítés kell. Az előkészítés a `RUN` előtt ismételje meg a
+  `MAXPRESS` beállítását. A köpenypumpa induljon
+  elsőként, érje el a saját
   célnyomását és legalább a Beállításokban megadott köpeny–besajtoló többletet,
   majd külön ciklusokban hajtsa végre a `STOP → CONST PRESS → RUN` átállást. A
   köpeny nyomástartásának a beállított ideig stabilnak kell maradnia, és csak
@@ -175,8 +183,8 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   kérheti be újra az előkészítési adatokat, és nem adhat pumpa-
   `STOP`, `FLOW`, `PRESS` vagy `RUN` parancsot. Kizárólag a szelepvezérlést
   és a mért értékek rögzítését indíthatja el.
-  A minimális indítási többlet alapértéke 20 bar, de a Beállításokban
-  bármely pozitív, legalább 0,1 baros értékre módosítható. Az aktuális
+  A minimális indítási többlet alapértéke 20 bar, de a Beállításokban és az
+  előkészítő ablakban bármely pozitív, legalább 0,1 baros értékre módosítható. Az aktuális
   értéket az előellenőrzésnek és mindkét BES-indítási kapunak ugyanúgy kell
   használnia.
   A BES konfigurálása előtt és közvetlenül a BES `RUN` előtt ismét ellenőrizni
@@ -259,7 +267,7 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   Projektbeállítások nem tartalmazhat eszközprofil-szerkesztőt. A globális
   beállítástól eltérő aktív hardverkonfigurációval normál mérés nem indulhat.
 - A manuális hardvervezérlés külön biztonsági profilt használjon: a megcélzott
-  pumpa kapcsolatát, véges saját státuszát és maximális nyomását, illetve a
+  pumpa kapcsolatát, véges saját státuszát és a közös pumpanyomás-határt, illetve a
   szelep 0–100%-os tartományát ellenőrizze. Nem kapcsolódó, ki nem épített
   érzékelő hiánya nem tilthatja a manuális parancsot. A fizikai kimenet
   megerősítése, a STOP/safe-state elsőbbsége és a véges kommunikációs timeout megmarad.
@@ -289,13 +297,15 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   következő vezérlési ciklus beállításaként, az érvényes PID-paramétercsomag pedig
   a háttérszál következő felügyelt ciklushatárán, versenyhelyzet nélkül lépjen
   életbe. Érvénytelen átmeneti mezőérték nem írhatja felül az utolsó érvényes PID-et.
-  A PID-beállítások névvel menthető profilokba rendezhetők.
+  A PID-beállítások névvel menthető profilokba rendezhetők, és a
+  Szelepvezérlés kártyán belül összecsukható panelen, Developer módtól függetlenül
+  elérhetők.
 - Folyamatban lévő mérés alatt csak olyan értékmező maradhat aktív, amelyhez
   tényleges futásidejű alkalmazási út tartozik. Az indítási előkészítés alatt a
   futásidejű mezők is legyenek zárolva; a BES mérési flow szimulációban ne legyen
   szerkeszthető, mert ott nincs hozzá alkalmazható fizikai pumpaművelet.
-- A részletes PID-hangolás és a felügyelt manuális hardvervezérlés csak Developer
-  módban jelenhet meg; a normál kezelői nézet az üzemi műveletekre korlátozódjon.
+- A felügyelt manuális hardvervezérlés csak Developer módban jelenhet meg; a
+  PID-hangolás elérhetősége nem függhet a Developer módtól.
 - Developer módban a háttér-vezérlési ciklus időköze és watchdog-tűrése külön
   beállítható és tartósan mentett legyen. Módosításuk futó mérés közben tilos;
   a watchdog és a ciklushiba miatti safe-state nem kapcsolható ki.
@@ -332,6 +342,9 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   nem használhat. A mérési perzisztencia, a fáziskezelés, az eseménymentés, az
   export és a NAS-szinkron logikája egyezzen meg a hardvermérésével; kizárólag az
   adatforrás és a kötelező szimulációs eredetjelölés térhet el.
+- Szimulációs módban mérést kizárólag bekapcsolt Developer móddal lehessen
+  indítani. A felületi gombtiltás mellett az alkalmazási indítási útvonal is
+  utasítsa el a Developer módon kívüli szimulációs indítást.
 - Developer módban a szimuláció külön hibatesztelő beállítási oldalt kapjon.
   A pumpamodell explicit `LOCAL/REMOTE/CONFIGURED/RUNNING/HOLDING/STOPPED/FAULT`
   állapotokat, időfüggő nyomásrámpát, térfogyást és a PC-től független saját

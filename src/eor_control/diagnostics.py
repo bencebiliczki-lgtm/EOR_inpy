@@ -8,7 +8,7 @@ from enum import StrEnum
 from heapq import heapify, heappop, heappush
 from html import escape
 from pathlib import Path
-from threading import Condition, Lock, Thread
+from threading import Condition, Lock, Thread, current_thread
 from time import monotonic
 from typing import BinaryIO
 from uuid import uuid4
@@ -511,7 +511,13 @@ class DiagnosticLogger:
                     self._close_open_files()
                     last_activity = monotonic()
                     last_flush = last_activity
-                    continue
+                    with self._write_condition:
+                        if self._write_stopping or self._write_queue:
+                            continue
+                        if self._write_thread is current_thread():
+                            self._write_thread = None
+                        self._write_condition.notify_all()
+                    return
                 if coalesced:
                     batch.insert(0, self._coalesced_summary(coalesced))
                 started = monotonic()
@@ -540,7 +546,8 @@ class DiagnosticLogger:
         finally:
             self._close_open_files()
             with self._write_condition:
-                self._write_thread = None
+                if self._write_thread is current_thread():
+                    self._write_thread = None
                 self._write_condition.notify_all()
 
     def flush(self, timeout_seconds: float = 5.0) -> None:

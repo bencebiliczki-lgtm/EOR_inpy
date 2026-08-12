@@ -62,7 +62,7 @@ def loop(
         daq=daq,
         line_calibration=calibration,
         differential_calibration=LinearCalibration(1.0, 5.0, 0.0, 40.0),
-        safety_monitor=SafetyMonitor(SafetyLimits(400.0, 350.0, 50.0)),
+        safety_monitor=SafetyMonitor(SafetyLimits(350.0, 50.0)),
         writer=writer,
         clock=FakeClock(),
     )

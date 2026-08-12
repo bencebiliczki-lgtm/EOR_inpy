@@ -27,8 +27,7 @@ def snapshot(
 def monitor() -> SafetyMonitor:
     return SafetyMonitor(
         SafetyLimits(
-            max_jacket_pressure_bar=400.0,
-            max_injection_pressure_bar=350.0,
+            max_pump_pressure_bar=350.0,
             max_differential_pressure_bar=50.0,
         )
     )
@@ -54,10 +53,27 @@ def test_jacket_pressure_buildup_can_temporarily_ignore_only_margin() -> None:
 
     assert decision.safe
     overpressure = safety_monitor.evaluate(
-        snapshot(401.0, 0.0), enforce_minimum_margin=False
+        snapshot(351.0, 0.0), enforce_minimum_margin=False
     )
     assert not overpressure.safe
-    assert "jacket pressure limit exceeded" in overpressure.reasons
+    assert any(
+        reason.startswith("jacket pump pressure limit exceeded: measured=351.000 bar")
+        and "limit=350.000 bar" in reason
+        for reason in overpressure.reasons
+    )
+
+
+def test_common_pump_pressure_limit_applies_to_injection_pump() -> None:
+    decision = monitor().evaluate(
+        snapshot(360.0, 351.0), enforce_minimum_margin=False
+    )
+
+    assert not decision.safe
+    assert any(
+        reason.startswith("injection pump pressure limit exceeded: measured=351.000 bar")
+        and "limit=350.000 bar" in reason
+        for reason in decision.reasons
+    )
 
 
 def test_injection_pressure_must_never_exceed_jacket_pressure() -> None:
@@ -76,11 +92,11 @@ def test_equal_pump_pressures_are_safe_when_startup_margin_is_not_enforced() -> 
 
 
 def test_configured_margin_may_be_below_twenty_bar() -> None:
-    safety_monitor = SafetyMonitor(SafetyLimits(400.0, 350.0, 50.0, 10.0))
+    safety_monitor = SafetyMonitor(SafetyLimits(350.0, 50.0, 10.0))
 
     assert safety_monitor.evaluate(snapshot(110.0, 100.0)).safe
 
-    decision = SafetyMonitor(SafetyLimits(400.0, 350.0, 50.0, 10.0)).evaluate(
+    decision = SafetyMonitor(SafetyLimits(350.0, 50.0, 10.0)).evaluate(
         snapshot(109.9, 100.0)
     )
     assert not decision.safe
@@ -91,7 +107,10 @@ def test_differential_limit_is_inclusive() -> None:
     decision = monitor().evaluate(snapshot(120.0, 100.0, delta_p=50.0))
 
     assert not decision.safe
-    assert "differential pressure limit reached" in decision.reasons
+    assert decision.reasons == (
+        "differential pressure limit reached: measured=50.000 bar; "
+        "limit=50.000 bar; source=filtered",
+    )
 
 
 def test_line_pressure_limit_is_supervised() -> None:
@@ -109,7 +128,10 @@ def test_line_pressure_limit_is_supervised() -> None:
     decision = monitor().evaluate(unsafe)
 
     assert not decision.safe
-    assert "line pressure limit exceeded" in decision.reasons
+    assert decision.reasons == (
+        "line pressure limit exceeded: measured=401.000 bar; "
+        "limit=400.000 bar; source=filtered",
+    )
 
 
 def test_raw_line_pressure_trips_hard_limit_before_filtered_value() -> None:
@@ -129,7 +151,10 @@ def test_raw_line_pressure_trips_hard_limit_before_filtered_value() -> None:
     decision = monitor().evaluate(unsafe)
 
     assert not decision.safe
-    assert "line pressure limit exceeded" in decision.reasons
+    assert decision.reasons == (
+        "line pressure limit exceeded: measured=401.000 bar; "
+        "limit=400.000 bar; source=raw",
+    )
 
 
 def test_missing_optional_pressure_inputs_do_not_create_safety_fault() -> None:
@@ -214,7 +239,7 @@ def test_reset_without_a_latched_fault_returns_current_safety_state() -> None:
 def test_reconfiguration_does_not_clear_latched_fault() -> None:
     safety_monitor = monitor()
     safety_monitor.evaluate(snapshot(119.0, 100.0))
-    safety_monitor.configure(SafetyLimits(500.0, 500.0, 100.0, 10.0))
+    safety_monitor.configure(SafetyLimits(500.0, 100.0, 10.0))
 
     decision = safety_monitor.evaluate(snapshot(120.0, 100.0))
 
@@ -224,27 +249,4 @@ def test_reconfiguration_does_not_clear_latched_fault() -> None:
 
 def test_invalid_safety_limits_are_rejected() -> None:
     with pytest.raises(ValueError, match="positive and finite"):
-        SafetyLimits(400.0, 350.0, 50.0, 0.0)
-
-
-def test_controlled_pressure_overshoot_limit_is_inclusive() -> None:
-    safety_monitor = monitor()
-
-    decision = safety_monitor.evaluate(
-        snapshot(120.0, 100.0),
-        controlled_pressure_bar=105.0,
-        pressure_target_bar=100.0,
-    )
-
-    assert not decision.safe
-    assert "controlled pressure overshoot limit reached" in decision.reasons
-
-
-def test_controlled_pressure_below_overshoot_limit_is_safe() -> None:
-    decision = monitor().evaluate(
-        snapshot(120.0, 100.0),
-        controlled_pressure_bar=104.999,
-        pressure_target_bar=100.0,
-    )
-
-    assert decision.safe
+        SafetyLimits(350.0, 50.0, 0.0)

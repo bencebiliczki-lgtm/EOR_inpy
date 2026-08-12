@@ -53,9 +53,6 @@ class ControlLoop:
             valve_percent=self._last_output_percent,
             persist=persist,
             control_deadline_missed=control_deadline_missed,
-            pressure_target_bar=(
-                setpoint_bar if mode is ControlMode.AUTOMATIC else None
-            ),
             use_line_pressure_for_control=source is PressureSource.LINE_SENSOR,
         )
         safety = SafetyDecision(
@@ -111,9 +108,6 @@ class ControlLoop:
             active_stage=active_stage,
             valve_percent=self._last_output_percent,
             persist=False,
-            pressure_target_bar=(
-                setpoint_bar if mode is ControlMode.AUTOMATIC else None
-            ),
             use_line_pressure_for_control=source is PressureSource.LINE_SENSOR,
         )
         if record.safety_reasons:

@@ -742,7 +742,7 @@ def test_measurement_flow_uses_common_safety_gate_before_run() -> None:
     assert not control.state(PumpRole.INJECTION).running
 
 
-def test_measurement_start_programs_both_hardware_pressure_limits() -> None:
+def test_measurement_start_programs_common_hardware_pressure_limit_on_both_pumps() -> None:
     control, jacket, injection = service()
 
     control.start_measurement_pumps(
@@ -750,13 +750,21 @@ def test_measurement_start_programs_both_hardware_pressure_limits() -> None:
         jacket_buildup_flow_ml_per_hour=1000.0,
         injection_start_pressure_bar=100.0,
         injection_target_flow_ml_per_hour=1000.0,
-        jacket_pressure_limit_bar=150.0,
-        injection_pressure_limit_bar=130.0,
+        pressure_limit_bar=150.0,
         confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
     )
 
     assert "MAXPRESS=150.0" in jacket.commands
-    assert "MAXPRESS=130.0" in injection.commands
+    assert "MAXPRESS=150.0" in injection.commands
+
+
+def test_common_pressure_limit_apply_enters_remote_and_programs_both_pumps() -> None:
+    control, jacket, injection = service()
+
+    control.apply_common_pressure_limit(175.0)
+
+    assert jacket.commands[-2:] == ["REMOTE", "MAXPRESS=175.0"]
+    assert injection.commands[-2:] == ["REMOTE", "MAXPRESS=175.0"]
 
 
 def test_injection_waits_for_margin_not_final_jacket_target() -> None:
@@ -989,6 +997,28 @@ def test_injection_run_uses_updated_configured_margin() -> None:
 
     assert control.minimum_jacket_margin_bar == pytest.approx(12.0)
     assert injection.commands[-1] == "RUN"
+
+
+def test_preparation_plan_updates_the_minimum_jacket_margin() -> None:
+    control, _, _ = service(
+        jacket_pressure=112.0,
+        injection_pressure=100.0,
+    )
+
+    control.prepare_measurement_pumps(
+        PumpStartupPlan(
+            112.0,
+            60.0,
+            100.0,
+            10.0,
+            minimum_jacket_margin_bar=12.0,
+            margin_stability_seconds=0.0,
+        ),
+        timing=PumpControlTiming(control_interval_seconds=0.001),
+        confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
+    )
+
+    assert control.minimum_jacket_margin_bar == pytest.approx(12.0)
 
 
 def test_manual_pump_safety_does_not_require_other_devices_or_cross_pump_margin() -> None:

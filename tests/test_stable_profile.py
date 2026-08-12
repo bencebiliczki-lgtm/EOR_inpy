@@ -19,7 +19,7 @@ def test_stable_default_profile_schema_is_valid_but_hardware_is_blocked() -> Non
     profile = load_stable_profile(PROFILE_PATH)
     validation = validate_stable_profile(profile)
 
-    assert profile.schema_version == 1
+    assert profile.schema_version == 2
     assert validation.application_can_start
     assert not validation.hardware_measurement_can_start
     assert validation.for_key("safety.valve_safe_output_v") is not None
@@ -51,6 +51,32 @@ def test_migration_applies_only_missing_software_values() -> None:
     assert target["hardware/stale_timeout_seconds"] == 6.0
     assert "recording/interval_seconds" not in applied
     assert "hardware/stale_timeout_seconds" in applied
+
+
+def test_schema_one_pressure_limits_migrate_to_one_conservative_limit(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    payload["schema_version"] = 1
+    payload["safety"].pop("pump_max_pressure_bar")
+    payload["safety"].update(
+        {
+            "jacket_max_pressure_bar": 400.0,
+            "injection_max_pressure_bar": 350.0,
+            "pressure_overshoot_shutdown_bar": 5.0,
+        }
+    )
+    path = tmp_path / "schema-one.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    profile = load_stable_profile(path)
+    safety = profile.section("safety")
+
+    assert profile.schema_version == 2
+    assert safety["pump_max_pressure_bar"] == pytest.approx(350.0)
+    assert "jacket_max_pressure_bar" not in safety
+    assert "injection_max_pressure_bar" not in safety
+    assert "pressure_overshoot_shutdown_bar" not in safety
 
 
 def test_obsolete_safe_output_and_pid_validation_flags_are_not_seeded() -> None:

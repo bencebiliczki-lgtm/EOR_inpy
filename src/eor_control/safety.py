@@ -6,20 +6,16 @@ from eor_control.domain import DataQuality, MeasurementSnapshot, PumpStatus
 
 @dataclass(frozen=True, slots=True)
 class SafetyLimits:
-    max_jacket_pressure_bar: float
-    max_injection_pressure_bar: float
+    max_pump_pressure_bar: float
     max_differential_pressure_bar: float
     minimum_jacket_margin_bar: float = 20.0
-    max_control_overshoot_bar: float = 5.0
     max_line_pressure_bar: float = 400.0
 
     def __post_init__(self) -> None:
         values = (
-            self.max_jacket_pressure_bar,
-            self.max_injection_pressure_bar,
+            self.max_pump_pressure_bar,
             self.max_differential_pressure_bar,
             self.minimum_jacket_margin_bar,
-            self.max_control_overshoot_bar,
             self.max_line_pressure_bar,
         )
         if not all(isfinite(value) and value > 0.0 for value in values):
@@ -47,8 +43,6 @@ class SafetyMonitor:
         *,
         emergency_stop: bool = False,
         control_deadline_missed: bool = False,
-        controlled_pressure_bar: float | None = None,
-        pressure_target_bar: float | None = None,
         enforce_minimum_margin: bool = True,
     ) -> SafetyDecision:
         reasons: list[str] = []
@@ -80,19 +74,15 @@ class SafetyMonitor:
             reasons.append("manual emergency stop")
         if control_deadline_missed:
             reasons.append("control deadline missed")
-        if (controlled_pressure_bar is None) != (pressure_target_bar is None):
-            reasons.append("incomplete pressure target supervision data")
-        elif controlled_pressure_bar is not None and pressure_target_bar is not None:
-            if not isfinite(controlled_pressure_bar) or not isfinite(pressure_target_bar):
-                reasons.append("invalid pressure target supervision data")
-            elif controlled_pressure_bar >= (
-                pressure_target_bar + self._limits.max_control_overshoot_bar
-            ):
-                reasons.append("controlled pressure overshoot limit reached")
-        if snapshot.jacket_pump.pressure_bar > self._limits.max_jacket_pressure_bar:
-            reasons.append("jacket pressure limit exceeded")
-        if snapshot.injection_pump.pressure_bar > self._limits.max_injection_pressure_bar:
-            reasons.append("injection pressure limit exceeded")
+        for pump_name, pressure in (
+            ("jacket", snapshot.jacket_pump.pressure_bar),
+            ("injection", snapshot.injection_pump.pressure_bar),
+        ):
+            if pressure > self._limits.max_pump_pressure_bar:
+                reasons.append(
+                    f"{pump_name} pump pressure limit exceeded: measured={pressure:.3f} bar; "
+                    f"limit={self._limits.max_pump_pressure_bar:.3f} bar"
+                )
         safety_differential_pressure = (
             snapshot.raw_differential_pressure_bar
             if snapshot.raw_differential_pressure_bar is not None
@@ -103,7 +93,17 @@ class SafetyMonitor:
             and safety_differential_pressure
             >= self._limits.max_differential_pressure_bar
         ):
-            reasons.append("differential pressure limit reached")
+            source = (
+                "raw"
+                if snapshot.raw_differential_pressure_bar is not None
+                else "filtered"
+            )
+            reasons.append(
+                "differential pressure limit reached: "
+                f"measured={safety_differential_pressure:.3f} bar; "
+                f"limit={self._limits.max_differential_pressure_bar:.3f} bar; "
+                f"source={source}"
+            )
         safety_line_pressure = (
             snapshot.raw_line_pressure_bar
             if snapshot.raw_line_pressure_bar is not None
@@ -113,7 +113,12 @@ class SafetyMonitor:
             safety_line_pressure is not None
             and safety_line_pressure > self._limits.max_line_pressure_bar
         ):
-            reasons.append("line pressure limit exceeded")
+            source = "raw" if snapshot.raw_line_pressure_bar is not None else "filtered"
+            reasons.append(
+                "line pressure limit exceeded: "
+                f"measured={safety_line_pressure:.3f} bar; "
+                f"limit={self._limits.max_line_pressure_bar:.3f} bar; source={source}"
+            )
         margin = snapshot.jacket_pump.pressure_bar - snapshot.injection_pump.pressure_bar
         if margin < 0.0:
             reasons.append("injection pressure exceeds jacket pressure")

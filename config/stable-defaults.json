@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "profile_name": "AFKI-EOR Stabil alapbeállítások",
   "modified_at_utc": "2026-08-06T00:00:00+00:00",
   "validation_status": "NOT_PHYSICALLY_VALIDATED",
@@ -56,10 +56,8 @@
     "differential_pressure": null
   },
   "safety": {
-    "injection_max_pressure_bar": null,
-    "jacket_max_pressure_bar": null,
+    "pump_max_pressure_bar": null,
     "differential_max_pressure_bar": null,
-    "pressure_overshoot_shutdown_bar": null,
     "jacket_minimum_margin_bar": 20.0,
     "valve_safe_output_v": null,
     "valve_direction_validated": false,

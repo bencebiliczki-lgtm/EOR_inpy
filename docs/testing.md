@@ -82,14 +82,18 @@ A runtime-tesztek igazolják, hogy a vezérlési ciklus az adatrögzítésnél g
 fut, csak az esedékes ciklus ír tartós rekordot, valamint a lassú ciklus watchdogot
 és safe-state-et vált ki. A szünetteszt igazolja, hogy szünetben sem PID-ciklus,
 sem perzisztálás nem fut, miközben a biztonsági hold-felügyelet aktív marad, majd
-a folytatás ugyanabban a runtime-ban helyreáll. A biztonsági tesztek a céltúllövési határ alatti és
-pontosan határértékű esetet is lefedik. A Qt-integrációs teszt valódi háttérszálról
+a folytatás ugyanabban a runtime-ban helyreáll. A biztonsági tesztek a közös
+pumpanyomás-határt, valamint a részletes vonali és differenciálnyomás-riasztásokat
+is lefedik. A Qt-integrációs teszt valódi háttérszálról
 fogad cikluseredményt és ellenőrzi az eszközkapcsolati jelzőket.
 A Qt-teszt ellenőrzi a külön kalibrációs ablak két lapját, a 20 bar alá is
 konfigurálható minimális köpenytöbbletet, valamint a részletes áttekintő projekt-, fázis-, kalibráció- és
 biztonsági kijelzéseit.
 A dashboard UI-teszt ellenőrzi az **Élő mérés** és **Teljes mérés** füleket, a
 beágyazott teljes mérési nézetet és azt, hogy a korábbi menüművelet a fülre vált.
+A beállítási központ és a mérés-előkészítési ablak regressziós tesztje ellenőrzi,
+hogy az ablakok `NonModal` módban nyílnak, a dashboard engedélyezve marad, az
+elfogadás pedig eseményvezérelten folytatja a műveletet.
 A mérési táblázat tesztje ellenőrzi az Excel-fejléccel azonos oszlopokat, a magyar
 helyi időt, az 1000 soros lapozást, valamint a grafikonnal közös fázis- és
 időtartomány-szűrést.
@@ -179,6 +183,9 @@ TX/RX eseményeket és az NI funkció szerinti kategorizálást. A Qt-teszt egye
 pumpakategóriát engedélyez, majd ellenőrzi, hogy a Developer táblában az NI esemény
 nem, a pumpaesemény viszont megjelenik. A felderítési összegzés láthatóságát külön
 teszt ellenőrzi normál és Developer módban.
+A dashboard regressziós tesztje ellenőrzi, hogy szimulációban a mérésindítás
+Developer mód nélkül tiltott, bekapcsolása után engedélyezett, valamint hogy az
+összecsukható PID-panel láthatósága független a Developer kapcsolótól.
 Az aszinkron naplóíró regressziói blokkolt lemezíró mellett igazolják az `emit`
 nem blokkoló jellegét, a korlátos queue-t, a debug események számlált összevonását,
 a kritikus safety esemény megőrzését és az 1000 eseményes kötegelt file-open/flush
@@ -209,7 +216,9 @@ köpenycél és a konfigurált margin kivárását, majd a külön ciklusokra bo
 után indulhat. A teszt ellenőrzi továbbá mindkét dokumentált
 `MAXPRESS` hardverhatár-parancsot és az `ML/HR` pumpaegység explicit beállítását,
 valamint hogy az `1000 ml/h` kezelői célérték `FLOW=1000` parancsként jut el a
-pumpához. Ellenőrzi továbbá a pontos indítási
+pumpához. Külön UI-regresszió igazolja, hogy a **Mentés és alkalmazás** mindkét
+pumpára elküldi a közös `MAXPRESS` értéket, hardvermódban pedig előtte explicit
+kezelői megerősítést kér. Ellenőrzi továbbá a pontos indítási
 megerősítést, a két kezdőnyomás és a tervezett nyomástöbblet kötelező bevitelét,
 a besajtoló kezdőnyomásának kivárását, a cél első elérésekor kiadott azonnali
 STOP-ot, valamint azt, hogy timeout vagy indulási

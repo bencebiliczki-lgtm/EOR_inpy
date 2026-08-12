@@ -7,7 +7,7 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, cast
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 PROFILE_NAME = "AFKI-EOR Stabil alapbeállítások"
 
 
@@ -91,9 +91,24 @@ def migrate_profile(payload: dict[str, object]) -> dict[str, object]:
     version = payload.get("schema_version", 0)
     if version == CURRENT_SCHEMA_VERSION:
         return payload
-    if version != 0:
+    if version not in {0, 1}:
         raise ValueError(f"unsupported stable profile schema version: {version}")
     migrated = dict(payload)
+    if version == 1:
+        safety_value = migrated.get("safety")
+        safety = dict(safety_value) if isinstance(safety_value, Mapping) else {}
+        legacy_limits = tuple(
+            float(value)
+            for value in (
+                safety.pop("jacket_max_pressure_bar", None),
+                safety.pop("injection_max_pressure_bar", None),
+            )
+            if isinstance(value, (int, float)) and isfinite(value) and value > 0.0
+        )
+        if "pump_max_pressure_bar" not in safety and legacy_limits:
+            safety["pump_max_pressure_bar"] = min(legacy_limits)
+        safety.pop("pressure_overshoot_shutdown_bar", None)
+        migrated["safety"] = safety
     migrated["schema_version"] = CURRENT_SCHEMA_VERSION
     migrated.setdefault("profile_name", PROFILE_NAME)
     migrated.setdefault("modified_at_utc", datetime.now(UTC).isoformat())
@@ -278,17 +293,11 @@ def validate_stable_profile(profile: StableProfile) -> StableProfileValidation:
         )
 
     required_physical = {
-        "safety.injection_max_pressure_bar": profile.section("safety").get(
-            "injection_max_pressure_bar"
-        ),
-        "safety.jacket_max_pressure_bar": profile.section("safety").get(
-            "jacket_max_pressure_bar"
+        "safety.pump_max_pressure_bar": profile.section("safety").get(
+            "pump_max_pressure_bar"
         ),
         "safety.differential_max_pressure_bar": profile.section("safety").get(
             "differential_max_pressure_bar"
-        ),
-        "safety.pressure_overshoot_shutdown_bar": profile.section("safety").get(
-            "pressure_overshoot_shutdown_bar"
         ),
         "safety.valve_safe_output_v": profile.section("safety").get(
             "valve_safe_output_v"

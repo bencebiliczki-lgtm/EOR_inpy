@@ -62,6 +62,29 @@ def test_logger_filters_categories_and_appends_file(tmp_path: Path) -> None:
     assert "Magyar idő" in report
 
 
+def test_idle_writer_stops_and_restarts_for_a_later_event(tmp_path: Path) -> None:
+    path = tmp_path / "communication.html"
+    logger = DiagnosticLogger(path, batch_interval_seconds=0.01)
+    logger.configure(enabled=True, categories=DiagnosticCategory)
+    logger.emit(DiagnosticCategory.SYSTEM, "STATE", "first")
+    logger.flush()
+
+    deadline = monotonic() + 2.0
+    while logger.queue_metrics.writer_running and monotonic() < deadline:
+        Event().wait(0.01)
+
+    assert not logger.queue_metrics.writer_running
+
+    logger.emit(DiagnosticCategory.SYSTEM, "STATE", "second")
+    logger.flush()
+
+    report = path.read_text(encoding="utf-8")
+    assert "first" in report
+    assert "second" in report
+    assert logger.queue_metrics.written_events == 2
+    logger.close()
+
+
 def test_events_can_be_read_incrementally_and_memory_cleared(tmp_path: Path) -> None:
     logger = DiagnosticLogger(tmp_path / "communication.html")
     logger.configure(enabled=True, categories=DiagnosticCategory)
