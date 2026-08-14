@@ -11,14 +11,15 @@ Minden élő vagy szimulációs mérési projekt saját mappát kap:
 ```text
 YYYY-MM-DD_000001_Projekt_neve/
 ├── project.sqlite
-├── Projekt_neve.xlsx
 ├── exports/
 └── logs/
 ```
 
+Az `.xlsx` nem része az alap mérési fájlszerkezetnek; csak a kezelő által
+kiválasztott célhelyen, explicit export után jön létre.
+
 A szimuláció mappaneve `_simulation` végződésű, ezért élő és szimulált író nem
-nyithatja meg egyszerre ugyanazt az adatbázist. A CSV csak kézi export és örökölt
-migrációs forrás.
+nyithatja meg egyszerre ugyanazt az adatbázist. A CSV csak örökölt migrációs forrás.
 
 ## Séma
 
@@ -97,7 +98,9 @@ A `query_measurements()` fázis-, kezdő-/záróidő-, oszlop-, lapozás- és
 ugyanabból az adatbázisból kérdezhetők le a teljes projekt és az egyes fázisok
 nézetéhez.
 
-Az Excel minden futáskor új munkafüzet. `sequence` szerint egy lap készül minden
+Az Excel csak explicit kezelői exportkor készül el; fázislezárás és leállítás nem
+hoz létre automatikusan munkafüzetet. Minden export újraépíti a teljes fájlt.
+`sequence` szerint egy lap készül minden
 fázispéldányhoz, pontosan 13 felhasználói oszloppal. A technikai mezők nem kerülnek
 bele. Az idő valódi Excel-dátum, az eltelt idő nap-tört érték `[h]:mm:ss`
 formátummal. Az ideiglenes `.xlsx` fájlt visszaolvassuk és a fejlécet/lapszámot

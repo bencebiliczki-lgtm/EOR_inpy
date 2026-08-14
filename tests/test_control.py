@@ -11,13 +11,36 @@ from eor_control.control import (
     ValveController,
     ValveOscillationError,
 )
-from eor_control.domain import MeasurementSnapshot, PumpStatus
+from eor_control.domain import (
+    AnalogPressureReading,
+    DataQuality,
+    MeasurementSnapshot,
+    PumpStatus,
+)
 from eor_control.safety import SafetyDecision
 
 
 def snapshot(
-    *, injection_pressure: float = 100.0, line_pressure: float = 80.0
+    *,
+    injection_pressure: float = 100.0,
+    line_pressure: float = 80.0,
+    line_quality: DataQuality | None = None,
 ) -> MeasurementSnapshot:
+    reading = None
+    if line_quality is not None:
+        reading = AnalogPressureReading(
+            last_raw_voltage=1.8,
+            median_voltage=1.8,
+            filtered_voltage=1.8,
+            raw_pressure_bar=line_pressure,
+            filtered_pressure_bar=line_pressure,
+            measured_at=datetime.now(UTC),
+            monotonic_seconds=1.0,
+            sample_age_seconds=0.0,
+            quality=line_quality,
+            quality_reason="test quality",
+            sample_count=20,
+        )
     return MeasurementSnapshot(
         recorded_at=datetime.now(UTC),
         monotonic_seconds=1.0,
@@ -26,6 +49,7 @@ def snapshot(
         line_pressure_bar=line_pressure,
         differential_pressure_bar=5.0,
         valve_percent=50.0,
+        line_pressure_reading=reading,
     )
 
 
@@ -87,6 +111,62 @@ def test_automatic_mode_uses_selected_pressure_source() -> None:
 
     assert injection_command.output_percent == pytest.approx(10.0)
     assert line_command.output_percent == pytest.approx(30.0)
+
+
+@pytest.mark.parametrize(
+    "quality",
+    [
+        DataQuality.STALE,
+        DataQuality.INVALID,
+        DataQuality.OUT_OF_RANGE,
+        DataQuality.DISCONNECTED,
+    ],
+)
+def test_line_sensor_pid_rejects_every_non_good_quality(
+    quality: DataQuality,
+) -> None:
+    command = controller().command(
+        snapshot=snapshot(line_quality=quality),
+        safety=SafetyDecision(True, ()),
+        mode=ControlMode.AUTOMATIC,
+        source=PressureSource.LINE_SENSOR,
+        setpoint_bar=110.0,
+        dt_seconds=1.0,
+    )
+
+    assert not command.enabled
+    assert command.output_percent is None
+    assert quality.value in str(command.reason)
+
+
+def test_line_sensor_pid_does_not_apply_a_second_ema() -> None:
+    valve = controller(
+        PidParameters(
+            1.0,
+            0.0,
+            0.0,
+            measurement_filter_alpha=0.1,
+            direction=ControlDirection.DIRECT,
+        )
+    )
+    valve.command(
+        snapshot=snapshot(line_pressure=100.0, line_quality=DataQuality.GOOD),
+        safety=SafetyDecision(True, ()),
+        mode=ControlMode.AUTOMATIC,
+        source=PressureSource.LINE_SENSOR,
+        setpoint_bar=100.0,
+        dt_seconds=1.0,
+    )
+    command = valve.command(
+        snapshot=snapshot(line_pressure=80.0, line_quality=DataQuality.GOOD),
+        safety=SafetyDecision(True, ()),
+        mode=ControlMode.AUTOMATIC,
+        source=PressureSource.LINE_SENSOR,
+        setpoint_bar=100.0,
+        dt_seconds=1.0,
+    )
+
+    assert command.output_percent == pytest.approx(20.0)
 
 
 def test_reverse_direction_inverts_control_action() -> None:
@@ -257,3 +337,27 @@ def test_manual_to_automatic_transfer_starts_from_manual_output() -> None:
 
     assert command.output_percent == pytest.approx(42.0)
     assert command.reason == "bumpless manual-to-automatic transfer"
+
+
+def test_new_measurement_activates_preselected_automatic_mode_without_stale_transition() -> None:
+    valve = controller(PidParameters(1.0, 0.0, 0.0))
+    valve.command(
+        snapshot=snapshot(),
+        safety=SafetyDecision(True, ()),
+        mode=ControlMode.MANUAL,
+        manual_output_percent=42.0,
+    )
+
+    valve.begin_measurement(ControlMode.AUTOMATIC)
+    command = valve.command(
+        snapshot=snapshot(injection_pressure=100.0),
+        safety=SafetyDecision(True, ()),
+        mode=ControlMode.AUTOMATIC,
+        source=PressureSource.INJECTION_PUMP,
+        setpoint_bar=110.0,
+        dt_seconds=0.1,
+    )
+
+    assert command.mode is ControlMode.AUTOMATIC
+    assert command.source is PressureSource.INJECTION_PUMP
+    assert command.reason is None

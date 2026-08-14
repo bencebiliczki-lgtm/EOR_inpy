@@ -62,7 +62,7 @@ def loop(
         daq=daq,
         line_calibration=calibration,
         differential_calibration=LinearCalibration(1.0, 5.0, 0.0, 40.0),
-        safety_monitor=SafetyMonitor(SafetyLimits(350.0, 50.0)),
+        safety_monitor=SafetyMonitor(SafetyLimits(350.0, 350.0, 50.0)),
         writer=writer,
         clock=FakeClock(),
     )
@@ -91,6 +91,7 @@ def test_manual_cycle_records_then_writes_valve_output() -> None:
     assert writer.records == [result.record]
     assert result.record.snapshot.valve_percent == 0.0
     assert actuator.output_percent == 35.0
+    assert result.valve_voltage == pytest.approx(2.4)
 
 
 def test_automatic_cycle_uses_calibrated_line_pressure() -> None:

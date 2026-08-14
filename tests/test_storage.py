@@ -1,8 +1,15 @@
 import csv
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from eor_control.domain import MeasurementRecord, MeasurementSnapshot, PumpStatus
+from eor_control.domain import (
+    AnalogPressureReading,
+    DataQuality,
+    MeasurementRecord,
+    MeasurementSnapshot,
+    PumpStatus,
+)
 from eor_control.storage import CsvMeasurementWriter
 
 
@@ -50,6 +57,43 @@ def test_csv_writer_persists_header_and_measurement(tmp_path: Path) -> None:
     ] == "2,75"
     stage_index = CsvMeasurementWriter.HEADER.index("active_stage")
     assert rows[1][stage_index:] == ["water", "good", "example fault"]
+
+
+def test_csv_writer_preserves_differential_processing_details(tmp_path: Path) -> None:
+    path = tmp_path / "differential.csv"
+    base = record()
+    reading = AnalogPressureReading(
+        1.51,
+        1.50,
+        1.49,
+        5.0,
+        4.9,
+        base.snapshot.recorded_at,
+        base.snapshot.monotonic_seconds,
+        0.02,
+        DataQuality.GOOD,
+        sample_count=20,
+    )
+    detailed = MeasurementRecord(
+        snapshot=replace(
+            base.snapshot,
+            differential_pressure_reading=reading,
+        ),
+        injected_volume_ml=base.injected_volume_ml,
+        active_stage=base.active_stage,
+        jacket_net_volume_ml=base.jacket_net_volume_ml,
+        safety_reasons=base.safety_reasons,
+    )
+
+    with CsvMeasurementWriter(path) as writer:
+        writer.write(detailed)
+
+    row = read_rows(path)[1]
+    header = CsvMeasurementWriter.HEADER
+    assert row[header.index("median_differential_voltage")] == "1,5"
+    assert row[header.index("filtered_differential_voltage")] == "1,49"
+    assert row[header.index("differential_pressure_quality")] == "good"
+    assert row[header.index("differential_pressure_sample_age_seconds")] == "0,02"
 
 
 def test_csv_writer_appends_without_repeating_header(tmp_path: Path) -> None:

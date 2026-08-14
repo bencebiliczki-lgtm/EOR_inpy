@@ -92,6 +92,8 @@ class PumpStartupPlan:
     pressure_limit_bar: float | None = None
     minimum_jacket_margin_bar: float = 20.0
     margin_stability_seconds: float = 2.0
+    jacket_pressure_limit_bar: float | None = None
+    injection_pressure_limit_bar: float | None = None
 
     @property
     def injection_target_flow_ml_per_hour(self) -> float:
@@ -102,6 +104,22 @@ class PumpStartupPlan:
     def effective_measurement_flow_ml_per_hour(self) -> float:
         value = self.injection_measurement_flow_ml_per_hour
         return self.injection_startup_flow_ml_per_hour if value is None else value
+
+    @property
+    def effective_jacket_pressure_limit_bar(self) -> float | None:
+        return (
+            self.pressure_limit_bar
+            if self.jacket_pressure_limit_bar is None
+            else self.jacket_pressure_limit_bar
+        )
+
+    @property
+    def effective_injection_pressure_limit_bar(self) -> float | None:
+        return (
+            self.pressure_limit_bar
+            if self.injection_pressure_limit_bar is None
+            else self.injection_pressure_limit_bar
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,6 +502,8 @@ class PumpControlService:
         injection_start_pressure_bar: float,
         injection_target_flow_ml_per_hour: float,
         pressure_limit_bar: float | None = None,
+        jacket_pressure_limit_bar: float | None = None,
+        injection_pressure_limit_bar: float | None = None,
         minimum_jacket_margin_bar: float | None = None,
         confirmation: str,
         startup_safety_check: Callable[[], tuple[str, ...]] | None = None,
@@ -499,6 +519,8 @@ class PumpControlService:
                 injection_start_pressure_bar=injection_start_pressure_bar,
                 injection_startup_flow_ml_per_hour=injection_target_flow_ml_per_hour,
                 pressure_limit_bar=pressure_limit_bar,
+                jacket_pressure_limit_bar=jacket_pressure_limit_bar,
+                injection_pressure_limit_bar=injection_pressure_limit_bar,
                 minimum_jacket_margin_bar=(
                     self._minimum_margin
                     if minimum_jacket_margin_bar is None
@@ -700,13 +722,13 @@ class PumpControlService:
                     phase = _PreparationPhase.JACKET_PRESSURE_LIMIT
                 command_executed = True
             elif phase is _PreparationPhase.JACKET_PRESSURE_LIMIT:
-                if plan.pressure_limit_bar is not None:
+                if plan.effective_jacket_pressure_limit_bar is not None:
                     pending = self._start_preparation_command(
                         PumpRole.JACKET,
                         PumpCommandKind.SET_PRESSURE_LIMIT,
                         _PreparationPhase.INJECTION_PRESSURE_LIMIT,
                         timing,
-                        value=plan.pressure_limit_bar,
+                        value=plan.effective_jacket_pressure_limit_bar,
                     )
                     command_executed = True
                     if pending is None:
@@ -714,13 +736,13 @@ class PumpControlService:
                 else:
                     phase = _PreparationPhase.INJECTION_PRESSURE_LIMIT
             elif phase is _PreparationPhase.INJECTION_PRESSURE_LIMIT:
-                if plan.pressure_limit_bar is not None:
+                if plan.effective_injection_pressure_limit_bar is not None:
                     pending = self._start_preparation_command(
                         PumpRole.INJECTION,
                         PumpCommandKind.SET_PRESSURE_LIMIT,
                         _PreparationPhase.JACKET_FLOW,
                         timing,
-                        value=plan.pressure_limit_bar,
+                        value=plan.effective_injection_pressure_limit_bar,
                     )
                     command_executed = True
                     if pending is None:
@@ -1137,20 +1159,15 @@ class PumpControlService:
             or plan.minimum_jacket_margin_bar <= 0.0
         ):
             raise ValueError("minimum jacket margin must be positive and finite")
-        if plan.pressure_limit_bar is not None and (
-            not isfinite(plan.pressure_limit_bar) or plan.pressure_limit_bar <= 0.0
-        ):
-            raise ValueError("pump pressure limits must be positive and finite")
-        if (
-            plan.pressure_limit_bar is not None
-            and plan.jacket_target_pressure_bar > plan.pressure_limit_bar
-        ):
-            raise ValueError("jacket target pressure exceeds the common pump pressure limit")
-        if (
-            plan.pressure_limit_bar is not None
-            and plan.injection_start_pressure_bar > plan.pressure_limit_bar
-        ):
-            raise ValueError("injection target pressure exceeds the common pump pressure limit")
+        jacket_limit = plan.effective_jacket_pressure_limit_bar
+        injection_limit = plan.effective_injection_pressure_limit_bar
+        for limit in (jacket_limit, injection_limit):
+            if limit is not None and (not isfinite(limit) or limit <= 0.0):
+                raise ValueError("pump pressure limits must be positive and finite")
+        if jacket_limit is not None and plan.jacket_target_pressure_bar > jacket_limit:
+            raise ValueError("jacket target pressure exceeds the jacket pump pressure limit")
+        if injection_limit is not None and plan.injection_start_pressure_bar > injection_limit:
+            raise ValueError("injection target pressure exceeds the injection pump pressure limit")
 
     def set_pressure_limit(self, role: PumpRole, pressure_bar: float) -> None:
         self._require_authorized()
@@ -1189,6 +1206,29 @@ class PumpControlService:
             if not self._states[role].remote:
                 self.enter_remote(role)
         for role in PumpRole:
+            self.set_pressure_limit(role, pressure_bar)
+
+    def apply_pressure_limits(
+        self,
+        jacket_pressure_bar: float,
+        injection_pressure_bar: float,
+    ) -> None:
+        """Program each stopped pump with its separately configured MAXPRESS limit."""
+        self._require_authorized()
+        limits = {
+            PumpRole.JACKET: jacket_pressure_bar,
+            PumpRole.INJECTION: injection_pressure_bar,
+        }
+        if not all(isfinite(value) and value > 0.0 for value in limits.values()):
+            raise ValueError("pump pressure limits must be positive and finite")
+        for role in PumpRole:
+            self._require_connected(role)
+            if self._states[role].running:
+                raise RuntimeError("both pumps must be stopped before setting pressure limits")
+        for role in PumpRole:
+            if not self._states[role].remote:
+                self.enter_remote(role)
+        for role, pressure_bar in limits.items():
             self.set_pressure_limit(role, pressure_bar)
 
     @staticmethod

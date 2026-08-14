@@ -9,7 +9,7 @@ biztonsági hiba, mert a mérés elsődlegesen a helyi `project.sqlite` fájlba 
 ## Felügyelt pumpaindítás
 
 A mérésindítás nem kerülheti meg a pumpák külön fizikai engedélyezését: a kezelőnek
-mindkét kezdőnyomást, a közös hardveres pumpanyomás-határt és a két indítási
+mindkét kezdőnyomást, a két külön hardveres pumpanyomás-határt és a két indítási
 térfogatáramot tartalmazó pumpaterv
 megjelenítése után explicit, alapértelmezetten elutasított gombos indítási
 megerősítést kell adnia. Begépelendő parancsszöveg nincs. Már a bevitelkor
@@ -21,7 +21,7 @@ túllépése azonnal megszakítja az indítást. A cél-nyomásnál a köpenypum
 állandó nyomástartásra vált. A szükséges nyomástöbblet nélkül a besajtolópumpa nem
 kaphat `RUN` parancsot. Sikeres `RUN` után a nyomástöbblet folyamatos safety
 interlock: elvesztése azonnal leállítja a BES-t, amely csak a hiszterézissel
-megnövelt visszaállási küszöbnél indulhat újra. A közös pumpanyomás-határ, adatminőség-, kapcsolat-,
+megnövelt visszaállási küszöbnél indulhat újra. A pumpánkénti nyomáshatárok, adatminőség-, kapcsolat-,
 vonali- és differenciálnyomás-védelmek változatlanul aktívak. A mérési
 adatrögzítés csak mindkét friss, `GOOD` minőségű kezdőnyomás és a biztonságos
 nyomáskülönbség egyidejű teljesülése után indulhat. A célnyomás elérésének nincs
@@ -104,7 +104,7 @@ hibát vált ki.
 
 A Developer manuális vezérlés nem készít teljes mérési pillanatképet minden
 parancshoz. Pumpa-RUN előtt csak a kiválasztott, hozzáadott pumpa kapcsolatát,
-véges nyomás-/áramlás-/térfogatadatát és a közös pumpanyomás-határt ellenőrzi.
+véges nyomás-/áramlás-/térfogatadatát és a hozzá tartozó pumpanyomás-határt ellenőrzi.
 A manuális szelepírás a megerősítés mellett a véges 0–100%-os tartományt és
 az NI kimenet hardverengedélyét ellenőrzi. Nem hozzáadott vonali vagy
 differenciálnyomás-bemenet nem generál manuális reteszt. A STOP, STOP ALL és

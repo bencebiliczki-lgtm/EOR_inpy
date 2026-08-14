@@ -21,7 +21,7 @@ from typing import Final
 from eor_control import __version__
 from eor_control.domain import DataQuality, MeasurementRecord
 
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 3
 REQUIRED_TABLES: Final = frozenset(
     {"schema_info", "project", "phases", "measurements", "events", "export_history"}
 )
@@ -129,9 +129,19 @@ _MEASUREMENT_COLUMNS: Final = (
     "diagnostic_flags",
     "control_state",
     "raw_line_voltage",
+    "median_line_voltage",
+    "filtered_line_voltage",
     "raw_line_pressure_bar",
+    "line_data_quality",
+    "line_quality_reason",
+    "line_sample_age_s",
     "raw_differential_voltage",
+    "median_differential_voltage",
+    "filtered_differential_voltage",
     "raw_differential_pressure_bar",
+    "differential_data_quality",
+    "differential_quality_reason",
+    "differential_sample_age_s",
     "source_key",
 )
 _QUERYABLE_COLUMNS: Final = frozenset(_MEASUREMENT_COLUMNS)
@@ -236,9 +246,19 @@ def initialize_project_database(
                     diagnostic_flags TEXT NOT NULL,
                     control_state TEXT,
                     raw_line_voltage REAL,
+                    median_line_voltage REAL,
+                    filtered_line_voltage REAL,
                     raw_line_pressure_bar REAL,
+                    line_data_quality TEXT,
+                    line_quality_reason TEXT,
+                    line_sample_age_s REAL,
                     raw_differential_voltage REAL,
+                    median_differential_voltage REAL,
+                    filtered_differential_voltage REAL,
                     raw_differential_pressure_bar REAL,
+                    differential_data_quality TEXT,
+                    differential_quality_reason TEXT,
+                    differential_sample_age_s REAL,
                     source_key TEXT UNIQUE
                 );
                 CREATE TABLE IF NOT EXISTS events (
@@ -282,6 +302,67 @@ def initialize_project_database(
                 """,
                 (SCHEMA_VERSION, now, __version__, SCHEMA_VERSION),
             )
+            version = int(
+                connection.execute(
+                    "SELECT schema_version FROM schema_info WHERE id=1"
+                ).fetchone()[0]
+            )
+            if version == 1:
+                connection.execute(
+                    "ALTER TABLE measurements ADD COLUMN median_line_voltage REAL"
+                )
+                connection.execute(
+                    "ALTER TABLE measurements ADD COLUMN filtered_line_voltage REAL"
+                )
+                connection.execute(
+                    "ALTER TABLE measurements ADD COLUMN line_data_quality TEXT"
+                )
+                connection.execute(
+                    "ALTER TABLE measurements ADD COLUMN line_quality_reason TEXT"
+                )
+                connection.execute(
+                    "ALTER TABLE measurements ADD COLUMN line_sample_age_s REAL"
+                )
+                connection.execute(
+                    "UPDATE measurements SET median_line_voltage=raw_line_voltage, "
+                    "line_data_quality=COALESCE(pressure_data_quality, 'good'), "
+                    "line_quality_reason='', line_sample_age_s=pressure_sample_age_s"
+                )
+                connection.execute(
+                    "UPDATE schema_info SET schema_version=2, "
+                    "last_migration_version=2, app_version=? WHERE id=1",
+                    (__version__,),
+                )
+                version = 2
+            if version == 2:
+                for definition in (
+                    "median_differential_voltage REAL",
+                    "filtered_differential_voltage REAL",
+                    "differential_data_quality TEXT",
+                    "differential_quality_reason TEXT",
+                    "differential_sample_age_s REAL",
+                ):
+                    connection.execute(
+                        f"ALTER TABLE measurements ADD COLUMN {definition}"
+                    )
+                connection.execute(
+                    "UPDATE measurements SET "
+                    "median_differential_voltage=raw_differential_voltage, "
+                    "differential_data_quality="
+                    "COALESCE(pressure_data_quality, 'good'), "
+                    "differential_quality_reason='', "
+                    "differential_sample_age_s=pressure_sample_age_s"
+                )
+                connection.execute(
+                    "UPDATE schema_info SET schema_version=?, "
+                    "last_migration_version=?, app_version=? WHERE id=1",
+                    (SCHEMA_VERSION, SCHEMA_VERSION, __version__),
+                )
+            elif version != SCHEMA_VERSION:
+                raise ProjectDatabaseError(
+                    f"nem tÃ¡mogatott projektsÃ©ma: {version}; "
+                    f"elvÃ¡rt: {SCHEMA_VERSION}"
+                )
             connection.execute(
                 "UPDATE project SET status='interrupted' WHERE status='running'"
             )
@@ -677,9 +758,35 @@ class ProjectSQLiteWriter:
                             json.dumps(record.safety_reasons, ensure_ascii=False),
                             record.active_stage,
                             record.snapshot.raw_line_voltage,
+                            (
+                                None
+                                if record.snapshot.line_pressure_reading is None
+                                else record.snapshot.line_pressure_reading.median_voltage
+                            ),
+                            (
+                                None
+                                if record.snapshot.line_pressure_reading is None
+                                else record.snapshot.line_pressure_reading.filtered_voltage
+                            ),
                             record.snapshot.raw_line_pressure_bar,
+                            record.snapshot.line_pressure_quality.value,
+                            record.snapshot.line_pressure_quality_reason,
+                            record.snapshot.line_pressure_sample_age_seconds,
                             record.snapshot.raw_differential_voltage,
+                            (
+                                None
+                                if record.snapshot.differential_pressure_reading is None
+                                else record.snapshot.differential_pressure_reading.median_voltage
+                            ),
+                            (
+                                None
+                                if record.snapshot.differential_pressure_reading is None
+                                else record.snapshot.differential_pressure_reading.filtered_voltage
+                            ),
                             record.snapshot.raw_differential_pressure_bar,
+                            record.snapshot.differential_pressure_quality.value,
+                            record.snapshot.differential_pressure_quality_reason,
+                            record.snapshot.differential_pressure_sample_age_seconds,
                         )
                         connection.execute(
                             """
@@ -695,11 +802,19 @@ class ProjectSQLiteWriter:
                                 valve_data_quality, jacket_sample_age_s,
                                 injection_sample_age_s, pressure_sample_age_s,
                                 valve_sample_age_s, safety_state, diagnostic_flags,
-                                control_state, raw_line_voltage, raw_line_pressure_bar,
-                                raw_differential_voltage, raw_differential_pressure_bar
+                                control_state, raw_line_voltage, median_line_voltage,
+                                filtered_line_voltage, raw_line_pressure_bar,
+                                line_data_quality, line_quality_reason, line_sample_age_s,
+                                raw_differential_voltage,
+                                median_differential_voltage,
+                                filtered_differential_voltage,
+                                raw_differential_pressure_bar,
+                                differential_data_quality,
+                                differential_quality_reason,
+                                differential_sample_age_s
                             ) VALUES (
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                             )
                             """,
                             values,
@@ -971,12 +1086,17 @@ def write_migration_rows(
                         valve_position_percent, jacket_data_quality,
                         injection_data_quality, pressure_data_quality,
                         valve_data_quality, diagnostic_flags, control_state,
-                        raw_line_voltage, raw_line_pressure_bar,
-                        raw_differential_voltage, raw_differential_pressure_bar,
+                        raw_line_voltage, median_line_voltage,
+                        filtered_line_voltage, raw_line_pressure_bar,
+                        line_data_quality, line_quality_reason, line_sample_age_s,
+                        raw_differential_voltage, median_differential_voltage,
+                        filtered_differential_voltage, raw_differential_pressure_bar,
+                        differential_data_quality, differential_quality_reason,
+                        differential_sample_age_s,
                         source_key
                     ) VALUES (
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?,
-                        ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -1001,9 +1121,19 @@ def write_migration_rows(
                         row.get("quality"),
                         phase_name,
                         row.get("raw_line_voltage"),
+                        row.get("median_line_voltage"),
+                        row.get("filtered_line_voltage"),
                         row.get("raw_line_pressure_bar"),
+                        row.get("line_pressure_quality") or row.get("quality"),
+                        row.get("line_pressure_quality_reason"),
+                        row.get("line_pressure_sample_age_seconds"),
                         row.get("raw_differential_voltage"),
+                        row.get("median_differential_voltage"),
+                        row.get("filtered_differential_voltage"),
                         row.get("raw_differential_pressure_bar"),
+                        row.get("differential_pressure_quality") or row.get("quality"),
+                        row.get("differential_pressure_quality_reason"),
+                        row.get("differential_pressure_sample_age_seconds"),
                         item_source_key,
                     ),
                 )

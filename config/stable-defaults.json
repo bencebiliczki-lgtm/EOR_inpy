@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "profile_name": "AFKI-EOR Stabil alapbeállítások",
   "modified_at_utc": "2026-08-06T00:00:00+00:00",
   "validation_status": "NOT_PHYSICALLY_VALIDATED",
@@ -21,9 +21,33 @@
     "serial_command_timeout_seconds": 2.0,
     "serial_command_retries": 2
   },
-  "ui": {
-    "live_plot_window_minutes": 10,
-    "maximum_visible_plot_points_per_series": 2000
+  "ui": {},
+  "analog_input": {
+    "filter_enabled": true,
+    "samples_per_read": 20,
+    "sample_rate_hz": 1000.0,
+    "median_enabled": true,
+    "ema_alpha": 0.2,
+    "spike_rejection_enabled": true,
+    "spike_limit_voltage": 0.1,
+    "spike_confirmation_samples": 3,
+    "line_electrical_min_voltage": 0.5,
+    "line_electrical_max_voltage": 5.5,
+    "line_physical_min_pressure_bar": -15.0,
+    "line_physical_max_pressure_bar": 420.0,
+    "line_stale_timeout_seconds": 1.0,
+    "differential_median_enabled": true,
+    "differential_ema_alpha": 0.2,
+    "differential_spike_rejection_enabled": true,
+    "differential_spike_limit_voltage": 0.1,
+    "differential_spike_confirmation_samples": 3,
+    "differential_electrical_min_voltage": 0.5,
+    "differential_electrical_max_voltage": 5.5,
+    "differential_physical_min_pressure_bar": -5.0,
+    "differential_physical_max_pressure_bar": 55.0,
+    "differential_stale_timeout_seconds": 1.0,
+    "diagnostic_interval_seconds": 5.0,
+    "physical_validation_status": "NOT_PHYSICALLY_VALIDATED"
   },
   "storage": {
     "local_first": true,
@@ -56,7 +80,8 @@
     "differential_pressure": null
   },
   "safety": {
-    "pump_max_pressure_bar": null,
+    "jacket_max_pressure_bar": null,
+    "injection_max_pressure_bar": null,
     "differential_max_pressure_bar": null,
     "jacket_minimum_margin_bar": 20.0,
     "valve_safe_output_v": null,

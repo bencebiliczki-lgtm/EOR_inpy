@@ -2,9 +2,11 @@ import importlib
 from dataclasses import dataclass
 from math import isfinite
 from threading import Lock
+from time import monotonic
 from typing import Any, Protocol, cast
 
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
+from eor_control.domain import AnalogPressureReading
 
 
 class NidaqBackend(Protocol):
@@ -28,11 +30,18 @@ class NidaqmxBackend:
         "PSEUDODIFFERENTIAL",
     }
 
-    def __init__(self, terminal_configuration: str = "DEFAULT") -> None:
+    def __init__(
+        self,
+        terminal_configuration: str = "DEFAULT",
+        sample_rate_hz: float = 1000.0,
+    ) -> None:
         normalized = terminal_configuration.strip().upper()
         if normalized not in self.TERMINAL_CONFIGURATIONS:
             raise ValueError("unsupported NI terminal configuration")
+        if not isfinite(sample_rate_hz) or not 1.0 <= sample_rate_hz <= 100_000.0:
+            raise ValueError("NI sample rate must be between 1 and 100000 Hz")
         self._terminal_configuration = normalized
+        self._sample_rate_hz = sample_rate_hz
         self._output_task: object | None = None
         self._output_channel: str | None = None
         self._output_lock = Lock()
@@ -69,7 +78,7 @@ class NidaqmxBackend:
                 terminal_config=terminal_configuration,
             )
             task.timing.cfg_samp_clk_timing(
-                1000.0,
+                self._sample_rate_hz,
                 sample_mode=constants.AcquisitionType.FINITE,
                 samps_per_chan=number_of_samples,
             )
@@ -147,11 +156,17 @@ class NidaqmxDataAcquisition:
         backend: NidaqBackend,
         config: NidaqConfig,
         diagnostics: DiagnosticLogger | None = None,
+        diagnostic_interval_seconds: float = 5.0,
     ) -> None:
+        if not isfinite(diagnostic_interval_seconds) or diagnostic_interval_seconds <= 0.0:
+            raise ValueError("NI diagnostic interval must be positive and finite")
         self._backend = backend
         self._config = config
         self._output_authorized = False
         self._diagnostics = diagnostics
+        self._diagnostic_interval_seconds = diagnostic_interval_seconds
+        self._last_input_log_at: dict[str, float] = {}
+        self._last_pressure_quality: dict[str, str] = {}
         self._channels = {
             key: channel
             for key, channel in (
@@ -173,6 +188,17 @@ class NidaqmxDataAcquisition:
     @property
     def physical_output_required(self) -> bool:
         return self._config.valve_output_channel is not None
+
+    @property
+    def terminal_configuration(self) -> str:
+        return str(getattr(self._backend, "_terminal_configuration", "DEFAULT"))
+
+    def physical_channel(self, channel: str) -> str | None:
+        return self._channels.get(channel)
+
+    @property
+    def safe_output_voltage(self) -> float:
+        return self._config.safe_output_voltage
 
     def read_voltage(self, channel: str) -> float:
         return self.read_voltages(channel, 1)[0]
@@ -200,20 +226,54 @@ class NidaqmxDataAcquisition:
                 f"NI channel {channel} returned {len(voltages)} samples; "
                 f"expected {number_of_samples}"
             )
-        if not all(isfinite(voltage) for voltage in voltages):
-            raise ValueError(f"NI channel {channel} returned a non-finite voltage")
         categories = {
             "line_pressure": DiagnosticCategory.NI_LINE,
             "differential_pressure": DiagnosticCategory.NI_DIFFERENTIAL,
         }
         category = categories[channel]
+        now = monotonic()
+        if now - self._last_input_log_at.get(channel, float("-inf")) >= (
+            self._diagnostic_interval_seconds
+        ):
+            self._last_input_log_at[channel] = now
+            self._log(
+                category,
+                "RX",
+                f"{physical_channel} samples={len(voltages)} "
+                f"min={min(voltages):.6f} V max={max(voltages):.6f} V",
+            )
+        return voltages
+
+    def log_pressure_reading(
+        self, channel: str, reading: AnalogPressureReading
+    ) -> None:
+        quality = reading.quality.value
+        quality_changed = self._last_pressure_quality.get(channel) != quality
+        now = monotonic()
+        periodic = now - self._last_input_log_at.get(
+            f"processed:{channel}", float("-inf")
+        ) >= self._diagnostic_interval_seconds
+        if not quality_changed and not periodic:
+            return
+        self._last_pressure_quality[channel] = quality
+        self._last_input_log_at[f"processed:{channel}"] = now
+        category = (
+            DiagnosticCategory.NI_LINE
+            if channel == "line_pressure"
+            else DiagnosticCategory.NI_DIFFERENTIAL
+        )
         self._log(
             category,
-            "RX",
-            f"{physical_channel} samples={len(voltages)} "
-            f"min={min(voltages):.6f} V max={max(voltages):.6f} V",
+            "PRESSURE",
+            f"channel={reading.physical_channel}; "
+            f"terminal={reading.terminal_configuration}; "
+            f"last={reading.last_raw_voltage}; median={reading.median_voltage}; "
+            f"filtered={reading.filtered_voltage}; "
+            f"raw_pressure={reading.raw_pressure_bar}; "
+            f"pressure={reading.filtered_pressure_bar}; "
+            f"age={reading.sample_age_seconds:.6f}s; quality={quality}; "
+            f"reason={reading.quality_reason}",
         )
-        return voltages
 
     def write_voltage(self, channel: str, voltage: float) -> None:
         if channel != "valve_output":
@@ -283,12 +343,20 @@ class AnalogValveActuator:
         self._daq = daq
         self._zero = voltage_at_zero_percent
         self._hundred = voltage_at_hundred_percent
+        self._last_voltage: float | None = None
 
     def write_percent(self, output_percent: float) -> None:
         if not isfinite(output_percent) or not 0.0 <= output_percent <= 100.0:
             raise ValueError("valve output must be a finite percentage from 0 to 100")
         voltage = self._zero + (self._hundred - self._zero) * output_percent / 100.0
         self._daq.write_voltage("valve_output", voltage)
+        self._last_voltage = voltage
 
     def set_safe_state(self) -> None:
         self._daq.set_safe_state()
+        if self._daq.output_authorized:
+            self._last_voltage = self._daq.safe_output_voltage
+
+    @property
+    def last_voltage(self) -> float | None:
+        return self._last_voltage

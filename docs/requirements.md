@@ -29,7 +29,9 @@ A mintavételi gyakoriság 1 másodperc és 1 óra között konfigurálható. A 
 - A projektválasztó képernyő listázza a korábbi projekteket és projektenként az
   utoljára használt mérési fázist, valamint új projekt létrehozását is biztosítja.
 - Az „Aktív projekt” dashboard-kártya dropdownban listázza az aktív projekt mérési
-  szakaszait, és közvetlenül lehetővé teszi az aktív szakasz váltását.
+  szakaszait, és leállított mérésnél közvetlenül lehetővé teszi az aktív
+  szakasz váltását. Futó vagy szüneteltetett mérés alatt a választó legyen
+  letiltva, és az eseménykezelő is utasítsa el a szakaszváltást.
 - A szakasz-dropdown utolsó eleme mindig **„+ Új szakasz hozzáadása…”** legyen.
   Kiválasztása külön ablakot nyisson név/típus, folyadék, célértékek és megjegyzés
   megadásához; megszakításkor az előző aktív szakasz maradjon kiválasztva.
@@ -75,8 +77,32 @@ A mintavételi gyakoriság 1 másodperc és 1 óra között konfigurálható. A 
   `ml/min` átváltást alkalmazni.
 - Az adatrögzítés állapota mutassa az aktív fájlt, méretet, utolsó rögzítési ciklust
   és a NAS-szinkron várólistáját.
-- Az elmúlt 10 perc élő diagramja.
+- Az élő nyomásdiagram a teljes aktuális mérés köpeny-, besajtolási, vonali és
+  differenciálnyomását jelenítse meg; az adatokat ne vágja gördülő időablakra.
+- A nyomás- és térfogatáram-diagram kézi nagyításakor vagy mozgatásakor az
+  automatikus követés álljon le, hogy új mérési pont érkezése ne mozdítsa el a
+  vizsgált korábbi tartományt. Külön kapcsoló állítsa vissza az élő követést.
 - A besajtolási térfogatáram külön, `ml/h` egységű élő diagramja.
+- A vonali nyomás NI-mintacsomagja ugyanazon a validálás → medián → tüskeszűrés →
+  EMA → kalibráció → minőség láncon jusson minden fogyasztóhoz. Legyen elérhető az
+  utolsó nyers, medián és szűrt feszültség, a nyers mediánnyomás, a szűrt nyomás,
+  időbélyeg, mintakor, valamint `GOOD`, `STALE`, `INVALID`, `OUT_OF_RANGE` vagy
+  `DISCONNECTED` minőség indoklással.
+- Az elektromos hibahatár és a fizikai hihetőségi tartomány a kalibrációs
+  végpontoktól független, tartós hardverbeállítás legyen. A 0,5–5,5 V és
+  −15–420 bar értékek csak fizikailag még nem validált induló alapértékek.
+- Vonali PID-forrás csak `GOOD` mintát használhat. Más minőség reteszelt safe-state
+  eseményt adjon; pumpanyomás-forrásnál ugyanez ne legyen PID-forráshiba. A vonali
+  jel szűrését a PID nem ismételheti meg.
+- A differenciálnyomás-mérő a vonali érzékelővel azonos nyers/medián/szűrt
+  adatmodellt, minőségállapotokat, diagnosztikát és tartósan konfigurálható
+  szűrőparamétereket használjon. Konfigurált differenciálnyomás-csatorna nem
+  `GOOD` minősége biztonsági reteszelést váltson ki; érvénytelen jelből nem szabad
+  hamis differenciálnyomás-túllépést képezni. A −5–55 bar alapértelmezett fizikai
+  hihetőségi tartomány fizikailag még nem validált kiinduló érték.
+- A szelep élő, manuális és nyugalmi kijelzése a százalékos parancs mellett az
+  alkalmazott analóg feszültséget is mutassa; SAFE állapotban a konfigurált
+  biztonságos feszültség jelenjen meg.
 - A teljes rögzített mérés a dashboard középső területének külön füle legyen; ne
   külön felugró ablakban jelenjen meg.
 - A teljes mérés diagramja legyen mérési fázisra szűrhető, és külön idővonalon
@@ -163,9 +189,9 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   kérje be mindkét pumpa elérendő
   kezdőnyomását, a köpeny nyomásfelépítési térfogatáramát, a besajtoló
   térfogatáramát, a minimális köpenynyomás-többletet és annak stabilitási idejét.
-  A **Nyomás- és szabályozási korlátok** alatt egyetlen közös pumpanyomás-határ
-  legyen konfigurálható. A **Mentés és alkalmazás** a dokumentált `MAXPRESS`
-  paranccsal azonnal írja ezt mindkét pumpába; fizikai hardvernél ehhez külön
+  A **Nyomás- és szabályozási korlátok** alatt a köpeny- és a besajtolópumpa
+  nyomáshatára külön legyen konfigurálható. A **Mentés és alkalmazás** a dokumentált
+  `MAXPRESS` paranccsal azonnal írja a megfelelő értéket a két pumpába; fizikai hardvernél ehhez külön
   kezelői megerősítés kell. Az előkészítés a `RUN` előtt ismételje meg a
   `MAXPRESS` beállítását. A köpenypumpa induljon
   elsőként, érje el a saját
@@ -267,10 +293,13 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   Projektbeállítások nem tartalmazhat eszközprofil-szerkesztőt. A globális
   beállítástól eltérő aktív hardverkonfigurációval normál mérés nem indulhat.
 - A manuális hardvervezérlés külön biztonsági profilt használjon: a megcélzott
-  pumpa kapcsolatát, véges saját státuszát és a közös pumpanyomás-határt, illetve a
+  pumpa kapcsolatát, véges saját státuszát és a hozzá tartozó pumpanyomás-határt, illetve a
   szelep 0–100%-os tartományát ellenőrizze. Nem kapcsolódó, ki nem épített
   érzékelő hiánya nem tilthatja a manuális parancsot. A fizikai kimenet
   megerősítése, a STOP/safe-state elsőbbsége és a véges kommunikációs timeout megmarad.
+- A manuális vezérlőablak a kezelőszerveket és a szerkeszthető parancssort
+  külön füleken jelenítse meg. A pumpa-térfogatáram bevitele a teljes
+  alkalmazással egyezően `ml/h` egységet használjon; `ml/min` felirat nem jelenhet meg.
 - Developer közvetlen eszközkezelésben minden hozzáadott eszköz a többi eszköz
   kapcsolati eredményétől és a globális hardvermódtól függetlenül legyen
   kezelhető. A csak szelepet tartalmazó profil is megnyithassa ezt a felületet;
@@ -294,9 +323,13 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   nyomásszabályozás alapértelmezett hatásiránya `REVERSE`: a célérték alatti
   nyomás záró, a célérték feletti nyomás nyitó beavatkozást kér.
 - A vezérlési mód és a PID paraméterei futó mérés közben is módosíthatók. A mód a
+  mérés első vezérlési ciklusától az indításkor kiválasztott érték legyen; az
+  automata mód aktiválásához ne legyen szükség újbóli kiválasztásra. A mód a
   következő vezérlési ciklus beállításaként, az érvényes PID-paramétercsomag pedig
-  a háttérszál következő felügyelt ciklushatárán, versenyhelyzet nélkül lépjen
-  életbe. Érvénytelen átmeneti mezőérték nem írhatja felül az utolsó érvényes PID-et.
+  kizárólag a külön **PID beállítások alkalmazása** gomb megnyomása után, a háttérszál
+  következő felügyelt ciklushatárán, versenyhelyzet nélkül lépjen életbe. A mezők
+  szerkesztése és a profil kiválasztása önmagában nem módosíthatja az aktív PID-et.
+  Érvénytelen átmeneti mezőérték nem írhatja felül az utolsó érvényes PID-et.
   A PID-beállítások névvel menthető profilokba rendezhetők, és a
   Szelepvezérlés kártyán belül összecsukható panelen, Developer módtól függetlenül
   elérhetők.
@@ -352,27 +385,25 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   pumpaválasz-késés, valamint pumpa-STALE, kapcsolatvesztés, üres cilinder,
   motorhiba, túlnyomás, NI spike/fagyás/kiesés és szelepberagadás/fordított irány
   injektálható. Minden injektálás kerüljön a diagnosztikai naplóba.
-- Az éles nyers fájl neve `_live_raw.csv` végződést kapjon; automatikus
-  előzménybetöltés és NAS-szinkron csak ilyen, egyértelműen jelölt fájlt használhat.
-- Minden mérési fázis külön nyers CSV-fájlba kerüljön; fázisváltás nem írhatja az
-  új fázis rekordjait az előző fázis fájljába.
-- A teljes mérés nézet a külön fázisfájlokat csak megjelenítéskor egyesítheti
-  memóriában. Összesített nyers CSV nem készülhet.
-- A felhasználói CSV-export mindig egy kiválasztott mérési fázisra vonatkozzon.
-  Projektenként egy Excel-munkafüzet készüljön, amelyben minden lezárt mérési
-  szakasz saját, a szakasz nevét viselő munkalapot kap. A munkalapon legyenek
-  szűrhető mérési oszlopok és beágyazott nyomás-/szelepdiagram.
-- Az Excel adott szakaszlapja csak a szakasz lezárásakor, háttérben készülhet el
-  vagy frissülhet; futó fázisból kézi Excel-export nem indítható. Az elkészült
-  projekt-munkafüzetet az
-  engedélyezett NAS-szinkron ugyanúgy tartós várólistán kezelje.
+- A mérés nyers rekordjainak kizárólagos elsődleges tárolója a projektenkénti
+  `project.sqlite`; új nyers vagy felhasználói CSV-fájl nem készülhet.
+- A fázisok elkülönítését az adatbázis fázisazonosítója biztosítsa. Azonos
+  fázisnév ismétlődése nem keverheti az adatokat.
+- Excel-munkafüzet csak explicit kezelői export után készülhet; fázislezárás,
+  mérésleállítás és alkalmazásbezárás nem indíthat automatikus Excel-exportot.
+- Az export UI mutassa a projektet és a mérés hardveres/szimulációs eredetét,
+  majd natív fájlválasztóval hozzon létre egy projektmunkafüzetet. Ebben minden
+  adatbázis-fázispéldány külön, sorszámozott munkalapot kapjon a megbeszélt 13
+  felhasználói oszloppal és a kapcsolódó Excel-struktúrával.
+- Az elkészült projekt-munkafüzetet az engedélyezett NAS-szinkron ugyanúgy
+  tartós várólistán kezelje.
 - A NAS-ra írás ne blokkolja az adatgyűjtést; hálózati hiba esetén helyi várólista szükséges.
 - A központi Beállítások ablakban legyen NAS-célválasztás, háttérben futó
   kapcsolat-/írhatósági próba, várólistastátusz és olvasható fájlrendszernézet.
   A Windows-hitelesítést kell használni; jelszó nem kerülhet az alkalmazás
   konfigurációjába.
-- A nyers és felhasználói magyar CSV pontosvesszős, tizedesvesszős formátumot használ;
-  a felhasználói exportnál más elválasztó és tizedespont is választható.
+- A régi CSV-k csak visszafelé kompatibilis, nem törlő migrációs forrásként
+  maradjanak olvashatók.
 - Az export célútvonalát natív fájlválasztóval kell megadni, nem szerkeszthető
   szöveges útvonalmezővel.
 - Az export nem helyettesíti a belső nyers adatforrást.

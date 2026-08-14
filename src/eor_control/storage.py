@@ -71,12 +71,32 @@ class CsvMeasurementWriter:
         "quality",
         "safety_reasons",
     )
-    HEADER = (
+    V4_HEADER = (
         *V3_HEADER[:10],
         "raw_line_voltage",
         *V3_HEADER[10:12],
         "raw_differential_voltage",
         *V3_HEADER[12:],
+    )
+    V5_HEADER = (
+        *V4_HEADER[:11],
+        "median_line_voltage",
+        "filtered_line_voltage",
+        *V4_HEADER[11:13],
+        "line_pressure_quality",
+        "line_pressure_quality_reason",
+        "line_pressure_sample_age_seconds",
+        *V4_HEADER[13:],
+    )
+    HEADER = (
+        *V5_HEADER[:19],
+        "median_differential_voltage",
+        "filtered_differential_voltage",
+        *V5_HEADER[19:21],
+        "differential_pressure_quality",
+        "differential_pressure_quality_reason",
+        "differential_pressure_sample_age_seconds",
+        *V5_HEADER[21:],
     )
 
     def __init__(self, path: Path) -> None:
@@ -114,7 +134,13 @@ class CsvMeasurementWriter:
                 for row in rows
             ]
             header = tuple(rows[0])
-        if header not in (cls.LEGACY_HEADER, cls.V2_HEADER, cls.V3_HEADER):
+        if header not in (
+            cls.LEGACY_HEADER,
+            cls.V2_HEADER,
+            cls.V3_HEADER,
+            cls.V4_HEADER,
+            cls.V5_HEADER,
+        ):
             raise ValueError("a meglévő mérési CSV fejléce nem támogatott")
         backup_version = (
             "v1"
@@ -122,6 +148,10 @@ class CsvMeasurementWriter:
             else "v2"
             if header == cls.V2_HEADER
             else "v3"
+            if header == cls.V3_HEADER
+            else "v4"
+            if header == cls.V4_HEADER
+            else "v5"
         )
         legacy_index = {name: index for index, name in enumerate(header)}
         converted = [list(cls.HEADER)]
@@ -141,8 +171,30 @@ class CsvMeasurementWriter:
                         if name == "raw_line_pressure_bar"
                         else row[legacy_index["differential_pressure_bar"]]
                         if name == "raw_differential_pressure_bar"
+                        else row[legacy_index["raw_line_voltage"]]
+                        if name == "median_line_voltage"
+                        and "raw_line_voltage" in legacy_index
+                        else row[legacy_index["quality"]]
+                        if name == "line_pressure_quality"
+                        else row[legacy_index["raw_differential_voltage"]]
+                        if name == "median_differential_voltage"
+                        and "raw_differential_voltage" in legacy_index
+                        else row[legacy_index["quality"]]
+                        if name == "differential_pressure_quality"
                         else ""
-                        if name in {"raw_line_voltage", "raw_differential_voltage"}
+                        if name
+                        in {
+                            "raw_line_voltage",
+                            "median_line_voltage",
+                            "filtered_line_voltage",
+                            "line_pressure_quality_reason",
+                            "line_pressure_sample_age_seconds",
+                            "raw_differential_voltage",
+                            "median_differential_voltage",
+                            "filtered_differential_voltage",
+                            "differential_pressure_quality_reason",
+                            "differential_pressure_sample_age_seconds",
+                        }
                         else row[legacy_index[name]]
                     )
                     for name in cls.HEADER
@@ -163,6 +215,8 @@ class CsvMeasurementWriter:
 
     def write(self, record: MeasurementRecord) -> None:
         snapshot = record.snapshot
+        line = snapshot.line_pressure_reading
+        differential = snapshot.differential_pressure_reading
         self._writer.writerow(
             (
                 snapshot.recorded_at.isoformat(),
@@ -176,11 +230,25 @@ class CsvMeasurementWriter:
                 self._hu(snapshot.injection_pump.remaining_volume_ml),
                 self._hu(record.injection_net_volume_ml),
                 self._hu(snapshot.raw_line_voltage),
+                self._hu(None if line is None else line.median_voltage),
+                self._hu(None if line is None else line.filtered_voltage),
                 self._hu(snapshot.raw_line_pressure_bar),
                 self._hu(snapshot.line_pressure_bar),
+                snapshot.line_pressure_quality.value,
+                snapshot.line_pressure_quality_reason,
+                self._hu(snapshot.line_pressure_sample_age_seconds),
                 self._hu(snapshot.raw_differential_voltage),
+                self._hu(
+                    None if differential is None else differential.median_voltage
+                ),
+                self._hu(
+                    None if differential is None else differential.filtered_voltage
+                ),
                 self._hu(snapshot.raw_differential_pressure_bar),
                 self._hu(snapshot.differential_pressure_bar),
+                snapshot.differential_pressure_quality.value,
+                snapshot.differential_pressure_quality_reason,
+                self._hu(snapshot.differential_pressure_sample_age_seconds),
                 self._hu(snapshot.valve_percent),
                 record.active_stage,
                 snapshot.quality.value,

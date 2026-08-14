@@ -26,6 +26,16 @@ class LinearCalibration:
         ratio = (voltage - self.voltage_min) / (self.voltage_max - self.voltage_min)
         return self.value_min + ratio * (self.value_max - self.value_min)
 
+    @property
+    def slope(self) -> float:
+        return (self.value_max - self.value_min) / (
+            self.voltage_max - self.voltage_min
+        )
+
+    @property
+    def offset(self) -> float:
+        return self.value_min - self.slope * self.voltage_min
+
     def is_inside_nominal_range(self, voltage: float) -> bool:
         """Return diagnostic calibration-span membership without rejecting data."""
         return isfinite(voltage) and self.voltage_min <= voltage <= self.voltage_max

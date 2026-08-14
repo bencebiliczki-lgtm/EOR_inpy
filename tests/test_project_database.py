@@ -136,6 +136,96 @@ def test_wal_reader_works_while_writer_is_active(tmp_path: Path) -> None:
     writer.close()
 
 
+def test_schema_v1_is_migrated_without_losing_measurements(tmp_path: Path) -> None:
+    path = tmp_path / "project.sqlite"
+    initialize_project_database(
+        path, project_id=1, project_name="P", created_at=datetime.now(UTC)
+    )
+    writer = ProjectSQLiteWriter(path)
+    writer.write(record("A"))
+    writer.close()
+    connection = sqlite3.connect(path)
+    try:
+        for column in (
+            "median_line_voltage",
+            "filtered_line_voltage",
+            "line_data_quality",
+            "line_quality_reason",
+            "line_sample_age_s",
+            "median_differential_voltage",
+            "filtered_differential_voltage",
+            "differential_data_quality",
+            "differential_quality_reason",
+            "differential_sample_age_s",
+        ):
+            connection.execute(f"ALTER TABLE measurements DROP COLUMN {column}")
+        connection.execute(
+            "UPDATE schema_info SET schema_version=1, last_migration_version=1"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    initialize_project_database(
+        path, project_id=1, project_name="P", created_at=datetime.now(UTC)
+    )
+    migrated = query_measurements(
+        path,
+        MeasurementQuery(
+            columns=("line_pressure_bar", "median_line_voltage", "line_data_quality")
+        ),
+    ).rows
+
+    assert migrated == ((101.75, None, "good"),)
+
+
+def test_schema_v2_adds_differential_traceability_without_data_loss(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "project.sqlite"
+    initialize_project_database(
+        path, project_id=1, project_name="P", created_at=datetime.now(UTC)
+    )
+    writer = ProjectSQLiteWriter(path)
+    writer.write(record("A"))
+    writer.close()
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "UPDATE measurements SET raw_differential_voltage=1.5"
+        )
+        for column in (
+            "median_differential_voltage",
+            "filtered_differential_voltage",
+            "differential_data_quality",
+            "differential_quality_reason",
+            "differential_sample_age_s",
+        ):
+            connection.execute(f"ALTER TABLE measurements DROP COLUMN {column}")
+        connection.execute(
+            "UPDATE schema_info SET schema_version=2, last_migration_version=2"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    initialize_project_database(
+        path, project_id=1, project_name="P", created_at=datetime.now(UTC)
+    )
+    migrated = query_measurements(
+        path,
+        MeasurementQuery(
+            columns=(
+                "differential_pressure_bar",
+                "median_differential_voltage",
+                "differential_data_quality",
+            )
+        ),
+    ).rows
+
+    assert migrated == ((2.5, 1.5, "good"),)
+
+
 def test_phase_time_query_uses_declared_index(tmp_path: Path) -> None:
     writer = ProjectMeasurementWriter(tmp_path)
     path = writer.select_project(1, "P")

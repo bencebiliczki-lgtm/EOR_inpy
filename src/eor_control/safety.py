@@ -6,14 +6,16 @@ from eor_control.domain import DataQuality, MeasurementSnapshot, PumpStatus
 
 @dataclass(frozen=True, slots=True)
 class SafetyLimits:
-    max_pump_pressure_bar: float
+    max_jacket_pressure_bar: float
+    max_injection_pressure_bar: float
     max_differential_pressure_bar: float
     minimum_jacket_margin_bar: float = 20.0
     max_line_pressure_bar: float = 400.0
 
     def __post_init__(self) -> None:
         values = (
-            self.max_pump_pressure_bar,
+            self.max_jacket_pressure_bar,
+            self.max_injection_pressure_bar,
             self.max_differential_pressure_bar,
             self.minimum_jacket_margin_bar,
             self.max_line_pressure_bar,
@@ -44,6 +46,8 @@ class SafetyMonitor:
         emergency_stop: bool = False,
         control_deadline_missed: bool = False,
         enforce_minimum_margin: bool = True,
+        require_good_line_pressure: bool = False,
+        require_good_differential_pressure: bool = False,
     ) -> SafetyDecision:
         reasons: list[str] = []
         if snapshot.quality is not DataQuality.GOOD:
@@ -74,14 +78,38 @@ class SafetyMonitor:
             reasons.append("manual emergency stop")
         if control_deadline_missed:
             reasons.append("control deadline missed")
-        for pump_name, pressure in (
-            ("jacket", snapshot.jacket_pump.pressure_bar),
-            ("injection", snapshot.injection_pump.pressure_bar),
+        if require_good_line_pressure and snapshot.line_pressure_quality is not DataQuality.GOOD:
+            detail = snapshot.line_pressure_quality_reason
+            reasons.append(
+                f"line pressure source quality is {snapshot.line_pressure_quality.value}"
+                + (f": {detail}" if detail else "")
+            )
+        if (
+            require_good_differential_pressure
+            and snapshot.differential_pressure_quality is not DataQuality.GOOD
         ):
-            if pressure > self._limits.max_pump_pressure_bar:
+            detail = snapshot.differential_pressure_quality_reason
+            reasons.append(
+                "differential pressure quality is "
+                f"{snapshot.differential_pressure_quality.value}"
+                + (f": {detail}" if detail else "")
+            )
+        for pump_name, pressure, limit in (
+            (
+                "jacket",
+                snapshot.jacket_pump.pressure_bar,
+                self._limits.max_jacket_pressure_bar,
+            ),
+            (
+                "injection",
+                snapshot.injection_pump.pressure_bar,
+                self._limits.max_injection_pressure_bar,
+            ),
+        ):
+            if pressure > limit:
                 reasons.append(
                     f"{pump_name} pump pressure limit exceeded: measured={pressure:.3f} bar; "
-                    f"limit={self._limits.max_pump_pressure_bar:.3f} bar"
+                    f"limit={limit:.3f} bar"
                 )
         safety_differential_pressure = (
             snapshot.raw_differential_pressure_bar
@@ -90,6 +118,7 @@ class SafetyMonitor:
         )
         if (
             safety_differential_pressure is not None
+            and snapshot.differential_pressure_quality is DataQuality.GOOD
             and safety_differential_pressure
             >= self._limits.max_differential_pressure_bar
         ):
@@ -111,6 +140,7 @@ class SafetyMonitor:
         )
         if (
             safety_line_pressure is not None
+            and snapshot.line_pressure_quality is DataQuality.GOOD
             and safety_line_pressure > self._limits.max_line_pressure_bar
         ):
             source = "raw" if snapshot.raw_line_pressure_bar is not None else "filtered"
@@ -141,12 +171,14 @@ class SafetyMonitor:
         *,
         operator_acknowledged: bool,
         enforce_minimum_margin: bool = True,
+        require_good_differential_pressure: bool = False,
     ) -> SafetyDecision:
         """Clear a latched fault only after acknowledgement and safe precondition checks."""
         if not self._latched_reasons:
             return self.evaluate(
                 snapshot,
                 enforce_minimum_margin=enforce_minimum_margin,
+                require_good_differential_pressure=require_good_differential_pressure,
             )
         if not operator_acknowledged:
             return SafetyDecision(False, self._latched_reasons, bool(self._latched_reasons))
@@ -156,6 +188,7 @@ class SafetyMonitor:
         decision = self.evaluate(
             snapshot,
             enforce_minimum_margin=enforce_minimum_margin,
+            require_good_differential_pressure=require_good_differential_pressure,
         )
         if decision.safe:
             return decision

@@ -742,7 +742,7 @@ def test_measurement_flow_uses_common_safety_gate_before_run() -> None:
     assert not control.state(PumpRole.INJECTION).running
 
 
-def test_measurement_start_programs_common_hardware_pressure_limit_on_both_pumps() -> None:
+def test_measurement_start_programs_each_hardware_pressure_limit() -> None:
     control, jacket, injection = service()
 
     control.start_measurement_pumps(
@@ -750,11 +750,12 @@ def test_measurement_start_programs_common_hardware_pressure_limit_on_both_pumps
         jacket_buildup_flow_ml_per_hour=1000.0,
         injection_start_pressure_bar=100.0,
         injection_target_flow_ml_per_hour=1000.0,
-        pressure_limit_bar=150.0,
+        jacket_pressure_limit_bar=160.0,
+        injection_pressure_limit_bar=150.0,
         confirmation=PumpControlService.START_MEASUREMENT_CONFIRMATION,
     )
 
-    assert "MAXPRESS=150.0" in jacket.commands
+    assert "MAXPRESS=160.0" in jacket.commands
     assert "MAXPRESS=150.0" in injection.commands
 
 
@@ -765,6 +766,15 @@ def test_common_pressure_limit_apply_enters_remote_and_programs_both_pumps() -> 
 
     assert jacket.commands[-2:] == ["REMOTE", "MAXPRESS=175.0"]
     assert injection.commands[-2:] == ["REMOTE", "MAXPRESS=175.0"]
+
+
+def test_separate_pressure_limits_program_each_pump_with_its_own_value() -> None:
+    control, jacket, injection = service()
+
+    control.apply_pressure_limits(190.0, 165.0)
+
+    assert jacket.commands[-2:] == ["REMOTE", "MAXPRESS=190.0"]
+    assert injection.commands[-2:] == ["REMOTE", "MAXPRESS=165.0"]
 
 
 def test_injection_waits_for_margin_not_final_jacket_target() -> None:

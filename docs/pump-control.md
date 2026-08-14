@@ -13,7 +13,7 @@ vészleállítót és a pumpák saját nyomásvédelmét.
    eszközök csak olvasási kapcsolati ellenőrzését. Szimulációs módban ez a
    lépés nem szükséges.
 3. Megnyomja az **Előkészítés** gombot.
-4. Ellenőrzi és elfogadja a kezdőnyomásokat, a közös pumpanyomás-határt, az
+4. Ellenőrzi és elfogadja a kezdőnyomásokat, a két külön pumpanyomás-határt, az
    előkészítési flow-kat, a minimális köpenynyomás-többletet és a stabilitási időt.
 5. A rendszer automatikusan felépíti a nyomást, majd **ELŐKÉSZÍTVE**
    állapotban vár. Ekkor a BES pumpa STOP állapotú, a KÖP a megadott
@@ -426,7 +426,7 @@ A pumpaparancsoknál és a vezérlési ciklusban ellenőrzött fontosabb feltét
 
 - érvényes, friss nyomástelemetria;
 - mindkét pumpa kapcsolata;
-- a KÖP és BES közös maximális nyomása;
+- a KÖP és BES külön maximális nyomása;
 - vonali és differenciálnyomás határa;
 - a BES nyomása nem lehet nagyobb a KÖP nyomásánál;
 - a BES `RUN` előtt a konfigurált minimális KÖP–BES nyomáskülönbség;
@@ -435,7 +435,7 @@ A pumpaparancsoknál és a vezérlési ciklusban ellenőrzött fontosabb feltét
 - kézi vészleállítás.
 
 A szoftveres nyomáshatárok mellett az előkészítés még a `RUN` előtt
-mindkét pumpán ugyanazt a közös `MAXPRESS` határt állítja be. Ezt helyszíni
+mindkét pumpán a hozzá külön beállított `MAXPRESS` határt állítja be. Ezeket helyszíni
 validációval kell összevetni a teljes hidraulikus rendszer leggyengébb elemének
 határával.
 
@@ -471,7 +471,8 @@ fenntartott hardverkapcsolat `READY` állapotban megmarad.
 | `pump_startup/injection_start_pressure_bar` | BES kezdőnyomás |
 | `pump_startup/injection_startup_flow_ml_per_hour` | BES előkészítési flow |
 | `pump_startup/injection_measurement_flow_ml_per_hour` | Korábbi kompatibilitási kulcs; a mérésindítás nem alkalmazza |
-| `safety/max_pump` | Mindkét pumpára alkalmazott közös `MAXPRESS` |
+| `safety/max_jacket` | Köpenypumpára alkalmazott `MAXPRESS` |
+| `safety/max_injection` | Besajtolópumpára alkalmazott `MAXPRESS` |
 | `safety/minimum_margin` | Előkészítéskor szerkeszthető minimális KÖP–BES többlet |
 | `pump_startup/margin_stability_seconds` | Stabilitási idő |
 | `developer/pump_pressure_poll_seconds` | Nyomáspolling |

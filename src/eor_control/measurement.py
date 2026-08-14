@@ -7,6 +7,7 @@ from typing import cast
 from eor_control.calibration import LinearCalibration
 from eor_control.devices import Clock, DataAcquisition, Pump
 from eor_control.domain import (
+    AnalogPressureReading,
     DataQuality,
     MeasurementRecord,
     MeasurementSnapshot,
@@ -62,13 +63,12 @@ class MeasurementService:
         self._persistence_enabled = persistence_enabled
         self._analog_filter_config = analog_filter_config or AnalogFilterConfig()
         self._analog_filters = {
-            "line_pressure": self._make_analog_filter(
-                self._analog_filter_config.line_spike_limit_voltage
-            ),
+            "line_pressure": self._make_analog_filter("line_pressure"),
             "differential_pressure": self._make_analog_filter(
-                self._analog_filter_config.differential_spike_limit_voltage
+                "differential_pressure"
             ),
         }
+        self._latest_pressure_readings: dict[str, AnalogPressureReading] = {}
         self._initial_jacket_volume_ml: float | None = None
         self._initial_injection_volume_ml: float | None = None
 
@@ -101,12 +101,21 @@ class MeasurementService:
         for key, channel, calibration in inputs:
             if channel is None:
                 continue
-            try:
-                voltage = self._daq.read_voltage(channel)
-                values[key] = calibration.convert(voltage)
-            except Exception as error:
-                errors[key] = str(error)
+            reading = self._read_optional_pressure(
+                channel,
+                calibration,
+                f"{key.replace('_', ' ')} input",
+                key,
+            )
+            if reading is not None and reading.filtered_pressure_bar is not None:
+                values[key] = reading.filtered_pressure_bar
+                self._latest_pressure_readings[key] = reading
+            if reading is not None and reading.quality is not DataQuality.GOOD:
+                errors[key] = reading.quality_reason or reading.quality.value
         return values, errors
+
+    def latest_pressure_readings(self) -> dict[str, AnalogPressureReading]:
+        return dict(self._latest_pressure_readings)
 
     def sample_once(
         self,
@@ -125,17 +134,13 @@ class MeasurementService:
         if self._initial_injection_volume_ml is None:
             self._initial_injection_volume_ml = injection.remaining_volume_ml
 
-        line_pressure, raw_line_pressure, raw_line_voltage = self._read_optional_pressure(
+        line_reading = self._read_optional_pressure(
             self._channels.line_pressure,
             self._line_calibration,
             "line pressure input",
             "line_pressure",
         )
-        (
-            differential_pressure,
-            raw_differential_pressure,
-            raw_differential_voltage,
-        ) = self._read_optional_pressure(
+        differential_reading = self._read_optional_pressure(
             self._channels.differential_pressure,
             self._differential_calibration,
             "differential pressure input",
@@ -147,23 +152,43 @@ class MeasurementService:
             monotonic_seconds=self._clock.monotonic(),
             jacket_pump=jacket,
             injection_pump=injection,
-            line_pressure_bar=line_pressure,
-            differential_pressure_bar=differential_pressure,
+            line_pressure_bar=(
+                None if line_reading is None else line_reading.filtered_pressure_bar
+            ),
+            differential_pressure_bar=(
+                None
+                if differential_reading is None
+                else differential_reading.filtered_pressure_bar
+            ),
             valve_percent=valve_percent,
             quality=self._combined_quality(jacket_quality, injection_quality),
-            raw_line_pressure_bar=raw_line_pressure,
-            raw_differential_pressure_bar=raw_differential_pressure,
-            raw_line_voltage=raw_line_voltage,
-            raw_differential_voltage=raw_differential_voltage,
+            raw_line_pressure_bar=(
+                None if line_reading is None else line_reading.raw_pressure_bar
+            ),
+            raw_differential_pressure_bar=(
+                None
+                if differential_reading is None
+                else differential_reading.raw_pressure_bar
+            ),
+            raw_line_voltage=(
+                None if line_reading is None else line_reading.last_raw_voltage
+            ),
+            raw_differential_voltage=(
+                None
+                if differential_reading is None
+                else differential_reading.last_raw_voltage
+            ),
+            line_pressure_reading=line_reading,
+            differential_pressure_reading=differential_reading,
         )
-        if use_line_pressure_for_control and snapshot.line_pressure_bar is None:
-            raise ValueError(
-                "line pressure control source is selected but the sensor is not configured"
-            )
         decision = self._safety_monitor.evaluate(
             snapshot,
             control_deadline_missed=control_deadline_missed,
             enforce_minimum_margin=enforce_minimum_margin,
+            require_good_line_pressure=use_line_pressure_for_control,
+            require_good_differential_pressure=(
+                self._channels.differential_pressure is not None
+            ),
         )
         record = MeasurementRecord(
             snapshot=snapshot,
@@ -188,36 +213,156 @@ class MeasurementService:
         calibration: LinearCalibration,
         label: str,
         filter_key: str,
-    ) -> tuple[float | None, float | None, float | None]:
+    ) -> AnalogPressureReading | None:
         if channel is None:
-            return None, None, None
+            return None
         config = self._analog_filter_config
-        read_many = getattr(self._daq, "read_voltages", None)
-        samples = (
-            read_many(channel, config.samples_per_read)
-            if config.enabled and callable(read_many)
-            else [self._daq.read_voltage(channel)]
-        )
-        filtered = self._analog_filters[filter_key].process(samples)
+        started = self._clock.monotonic()
         try:
-            return (
-                calibration.convert(filtered.filtered_voltage),
-                calibration.convert(filtered.raw_voltage),
-                filtered.raw_voltage,
+            read_many = getattr(self._daq, "read_voltages", None)
+            samples = (
+                read_many(channel, config.samples_per_read)
+                if config.enabled and callable(read_many)
+                else [self._daq.read_voltage(channel)]
             )
-        except ValueError as error:
-            raise ValueError(f"{label}: {error}") from error
+            filtered = self._analog_filters[filter_key].process(samples)
+            raw_pressure = calibration.convert(filtered.median_voltage)
+            filtered_pressure = calibration.convert(filtered.filtered_voltage)
+        except Exception as error:
+            quality = (
+                DataQuality.INVALID
+                if isinstance(error, ValueError)
+                else DataQuality.DISCONNECTED
+            )
+            reading = AnalogPressureReading(
+                None,
+                None,
+                None,
+                None,
+                None,
+                self._clock.utc_now(),
+                self._clock.monotonic(),
+                max(0.0, self._clock.monotonic() - started),
+                quality,
+                f"{label}: {type(error).__name__}: {error}",
+                physical_channel=self._physical_channel(channel),
+                terminal_configuration=self._terminal_configuration(),
+            )
+            self._latest_pressure_readings[filter_key] = reading
+            self._log_pressure_reading(filter_key, reading)
+            return reading
+        measured_at = self._clock.utc_now()
+        measured_monotonic = self._clock.monotonic()
+        age = max(0.0, measured_monotonic - started)
+        quality = DataQuality.GOOD
+        reason = ""
+        if filter_key == "line_pressure":
+            if any(
+                voltage < config.line_electrical_min_voltage
+                or voltage > config.line_electrical_max_voltage
+                for voltage in samples
+            ):
+                quality = DataQuality.OUT_OF_RANGE
+                reason = "line voltage is outside configured electrical limits"
+            elif not (
+                config.line_physical_min_pressure_bar
+                <= raw_pressure
+                <= config.line_physical_max_pressure_bar
+            ):
+                quality = DataQuality.OUT_OF_RANGE
+                reason = "line pressure is outside configured physical limits"
+            elif age > config.line_stale_timeout_seconds:
+                quality = DataQuality.STALE
+                reason = "line pressure sample is older than the configured timeout"
+        elif any(
+            voltage < config.differential_electrical_min_voltage
+            or voltage > config.differential_electrical_max_voltage
+            for voltage in samples
+        ):
+            quality = DataQuality.OUT_OF_RANGE
+            reason = "differential voltage is outside configured electrical limits"
+        elif not (
+            config.differential_physical_min_pressure_bar
+            <= raw_pressure
+            <= config.differential_physical_max_pressure_bar
+        ):
+            quality = DataQuality.OUT_OF_RANGE
+            reason = "differential pressure is outside configured physical limits"
+        elif age > config.differential_stale_timeout_seconds:
+            quality = DataQuality.STALE
+            reason = "differential pressure sample is older than the configured timeout"
+        reading = AnalogPressureReading(
+            filtered.last_raw_voltage,
+            filtered.median_voltage,
+            filtered.filtered_voltage,
+            raw_pressure,
+            filtered_pressure,
+            measured_at,
+            measured_monotonic,
+            age,
+            quality,
+            reason,
+            len(samples),
+            min(samples),
+            max(samples),
+            self._physical_channel(channel),
+            self._terminal_configuration(),
+        )
+        self._latest_pressure_readings[filter_key] = reading
+        self._log_pressure_reading(filter_key, reading)
+        return reading
 
-    def _make_analog_filter(self, spike_limit_voltage: float) -> AnalogSignalFilter:
+    def _log_pressure_reading(
+        self, filter_key: str, reading: AnalogPressureReading
+    ) -> None:
+        logger = getattr(self._daq, "log_pressure_reading", None)
+        if callable(logger):
+            logger(filter_key, reading)
+
+    def _physical_channel(self, channel: str) -> str:
+        resolver = getattr(self._daq, "physical_channel", None)
+        if callable(resolver):
+            return str(resolver(channel) or channel)
+        return channel
+
+    def _terminal_configuration(self) -> str:
+        return str(getattr(self._daq, "terminal_configuration", "SIMULATION"))
+
+    def _make_analog_filter(self, filter_key: str) -> AnalogSignalFilter:
         config = self._analog_filter_config
+        differential = filter_key == "differential_pressure"
         return AnalogSignalFilter(
-            alpha=config.ema_alpha if config.enabled else 1.0,
-            median_enabled=config.median_enabled if config.enabled else False,
+            alpha=(
+                config.differential_ema_alpha if differential else config.ema_alpha
+            )
+            if config.enabled
+            else 1.0,
+            median_enabled=(
+                config.differential_median_enabled
+                if differential
+                else config.median_enabled
+            )
+            if config.enabled
+            else False,
             spike_rejection_enabled=(
-                config.spike_rejection_enabled if config.enabled else False
+                (
+                    config.differential_spike_rejection_enabled
+                    if differential
+                    else config.spike_rejection_enabled
+                )
+                if config.enabled
+                else False
             ),
-            spike_limit_voltage=spike_limit_voltage,
-            spike_confirmation_samples=config.spike_confirmation_samples,
+            spike_limit_voltage=(
+                config.differential_spike_limit_voltage
+                if differential
+                else config.line_spike_limit_voltage
+            ),
+            spike_confirmation_samples=(
+                config.differential_spike_confirmation_samples
+                if differential
+                else config.spike_confirmation_samples
+            ),
         )
 
     @staticmethod
@@ -297,6 +442,9 @@ class MeasurementService:
             snapshot,
             operator_acknowledged=True,
             enforce_minimum_margin=False,
+            require_good_differential_pressure=(
+                self._channels.differential_pressure is not None
+            ),
         )
 
     def close(self) -> None:

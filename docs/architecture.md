@@ -42,11 +42,26 @@ A hardver I/O, adatmentés és NAS-művelet nem futhat a Qt főszálán. A szab�
 
 A `MeasurementService` egy konfigurálható, 1 másodperc és 1 óra közötti ciklusban
 olvassa a két pumpát és a két kalibrált analóg csatornát. Minden pillanatképet előbb
-biztonságilag kiértékel, majd projektenként és mérési fázisonként elkülönített
-append-only nyers CSV-fájlba ír. Interlock vagy
+biztonságilag kiértékel, majd a projekt SQLite-adatbázisába ír. Interlock vagy
 eszközhiba esetén mindkét pumpán szimulált STOP-ot, a DAQ-on pedig biztonságos
 állapotot kér. A ciklust a `BackgroundControlRunner` külön munkaszálon futtatja;
 Qt főszálból közvetlenül nem fut.
+
+A vonali nyomás teljes adatútja egyetlen feldolgozási lánc: véges NI-mintacsomag,
+végesérték-ellenőrzés, medián, tüskeszűrés, EMA, lineáris kalibráció és
+adatminőség-képzés. A pillanatkép együtt őrzi az utolsó nyers, a medián és az EMA-val
+szűrt feszültséget, a mediánból számított nyers nyomást, a szűrt nyomást, UTC- és
+monoton időreferenciát, mintakort, valamint a minőséget és annak okát. A dashboard,
+a PID, a biztonsági felügyelet, a napló és a tárolás ugyanebből az eredményből dolgozik.
+Vonali PID-forrásnál kizárólag `GOOD` adat használható, és a PID saját mérési EMA-ja
+hatásosan 1,0; pumpanyomás-forrásnál a nem megfelelő vonali jel nem jelent PID-forrás
+hibát, de az érvényes vonali túlnyomás továbbra is biztonsági esemény.
+A differenciálnyomás-csatorna ugyanezt az adatmodellt és feldolgozási sorrendet
+használja, saját medián-, EMA-, tüske-, elektromos, fizikai és STALE-paraméterekkel.
+Mivel ez a csatorna biztonsági határérték forrása, konfigurált érzékelőnél minden
+nem `GOOD` minőség reteszelt safe-state-et kér. A szelepvezérlési eredmény a
+százalék mellett az aktuátorra ténylegesen alkalmazott vagy SAFE feszültséget is
+továbbítja a kezelőfelületnek.
 
 ## Projektfájlok, export és NAS
 
@@ -59,14 +74,10 @@ Régi telepítésnél, ha még nincs globális profil, az első aktív projekt e
 `devices` profilja egyszer globális beállítássá migrálódik.
 
 A `ProjectMeasurementWriter` az aktív projekt azonosítójából és Windows-biztos
-nevéből és dátumából `projects/<év>/<dátum>_<azonosító>_<név>` könyvtárat képez.
-Minden éles fázis saját `<projektnév>_<fázisnév>_live_raw.csv` fájlt kap. Projekt- vagy
-fázisváltáskor az író lezárja az előző fájlt, így a fázisok adatai nem keveredhetnek.
-A nyers CSV UTF-8, append-only, minden teljes
-sor után flush és `fsync` történik.
-Ugyanitt hordozható `project.json`, `config_snapshot.json` és
-`calibration_snapshot.json` készül. A nyers CSV pontosvesszős és tizedesvesszős;
-a beolvasó a korábbi vesszős fájlokat is támogatja.
+nevéből és dátumából `projects/<év>/<dátum>_<azonosító>_<név>` könyvtárat képez,
+és abban kizárólagos nyers adatforrásként `project.sqlite` fájlt használ. A
+fázisokat növekvő adatbázis-azonosító különíti el. A korábbi CSV-formátumokat a
+nem törlő örökölt migráció továbbra is támogatja.
 A V2 nyers CSV külön `jacket_net_volume_ml` és `injection_net_volume_ml` oszlopot
 tartalmaz. A nettó érték mindkét pumpánál az indításkori és aktuális maradék
 térfogat különbsége, ezért negatív is lehet. Régi V1 fájl írásra történő
@@ -82,23 +93,20 @@ szűretlen jel.
 
 A szimulációs összeállítás engedélyezett `MeasurementService`-t és
 `ProjectMeasurementWriter`-t használ, ezért ugyanazt az összeomlástűrő mentési,
-Excel-export és NAS-szinkronfolyamatot kapja, mint a hardvermérés. A két eredet nem
-keveredik: a szimulációs fájl `_simulation_live_raw.csv` végződésű, külön
-`project_simulation.json`, `config_snapshot_simulation.json` és
-`calibration_snapshot_simulation.json` készül `measurement_kind=simulation`
-jelöléssel. A hardveres fájl és pillanatkép továbbra is `live` jelölésű. A dashboard
+kézi Excel-export és NAS-szinkronfolyamatot kapja, mint a hardvermérés. A két eredet
+nem keveredik: a szimuláció külön `_simulation` mappát és az adatbázisban
+`measurement_kind=simulation` jelölést kap. A dashboard
 mindkét módhoz ugyanazon writer-gyárat és projektkiválasztási útvonalat használja;
 ebben az adatkezelési rétegben a mód csak az eredetjelölést határozza meg.
 
-A felhasználói CSV-export választható elválasztót és tizedesvesszőt támogat. A
-`ProjectMeasurementWriter` rekordot tartalmazó fázis lezárásakor egyszeri
-visszahívást ad. Az Excel-export ebből, a vezérlési runtime leállása után külön
-háttérszálon készít adat- és diagramlapot, ezért nem terheli a fizikai I/O
-időzítését. Projektenként egy `<projektnév>.xlsx` munkafüzet készül. A lezárt
-fázis saját, szűrhető munkalapja a hozzá tartozó nyers CSV-ből épül fel, és a
-nyomás-/szelepdiagram ugyanazon a munkalapon jelenik meg. Új fázis lezárásakor új
-munkalap kerül a munkafüzetbe; ismételt fázis lezárásakor csak annak meglévő
-munkalapja épül újra a teljes fázis-CSV-ből. Az atomi fájlcsere megóvja a korábbi
+A felhasználói export kizárólag a projektszintű SQLite adatbázisból épít Excelt.
+Az UI jelzi a projekt mérési eredetét, és natív fájlválasztóval indítja a kézi
+exportot. Fázislezáráskor, mérésleállításkor és alkalmazásbezáráskor nem készül
+automatikusan `.xlsx`; a nyers rekordok továbbra is csak az adatbázisba kerülnek.
+Projektenként egy választott célú munkafüzet készül. Minden fázis saját,
+szűrhető munkalapja az adatbázisból épül fel, és a
+nyomás-/szelepdiagram ugyanazon a munkalapon jelenik meg. Minden kézi export a
+teljes munkafüzetet újraépíti az adatbázisból. Az atomi fájlcsere megóvja a korábbi
 projekt-munkafüzetet egy sikertelen mentéstől. A kész munkafüzet engedélyezett NAS
 esetén szinkronizálási sorba kerül. A `NasSyncQueue` tartós SQLite várólistája
 alkalmazás- és hálózati hiba után is megmarad. A
@@ -173,9 +181,12 @@ A szimulátoros dashboard az SQLite repositoryból választ projektet és aktív
 szakaszt; szakasz nélkül mérés nem indítható. A felületről projekt hozható létre,
 szakasz adható hozzá vagy nevezhető át, továbbá futás közben is módosíthatók a PID
 erősítések, a hatásirány és a kimeneti korlátok. A PID újrakonfigurálása az aktuális
-kimenetről inicializálja az integrált tagot. A UI 100 ms-os egyszeri időzítővel
-összevonja az egy szerkesztési művelethez tartozó mezőváltozásokat, majd validált
-`PidParameters` csomagot ad a `BackgroundControlRunner` váróhelyére. A runner ezt
+kimenetről inicializálja az integrált tagot. A mérésindítás a combobox aktuális
+szelepvezérlési módját egyetlen beállítás-pillanatképben rögzíti, és ezt a módot a
+vezérlő első ciklusa előtt aktiválja. A későbbi módváltások továbbra is a runtime
+következő ciklusában lépnek életbe. A mezőváltozások csak nem alkalmazott
+piszkozatot képeznek; a UI kizárólag a külön alkalmazási gomb megnyomásakor ad
+validált `PidParameters` csomagot a `BackgroundControlRunner` váróhelyére. A runner ezt
 a következő vezérlési ciklus elején, ugyanazon cikluszáron belül alkalmazza; a Qt
 főszál nem vár hardver-I/O-ra. Érvénytelen átmeneti értéknél a korábbi PID marad
 aktív. A PID-paraméterekhez nem tartozik külön fizikai validáltsági jelző;
@@ -188,6 +199,9 @@ kártyán jelenik meg. Ez a runtime, az INI-ben mentett utolsó szakasz és a
 fázisonkénti CSV-író közös kiválasztási forrása; nincs külön, eltérő állapotú
 összefoglaló mező. Projekt vagy szakasz hiányában a dropdown letiltva, magyarázó
 üresállapot-szöveggel jelenik meg.
+Futó és szüneteltetett mérés alatt a dropdown mindig letiltott. A
+`_stage_changed` eseménykezelő második védelmi rétegként visszaállítja az utolsó
+érvényes szakaszt, ezért programozott indexváltás sem módosítja a futó mérést.
 A szakaszlista utolsó, nem szakaszazonosítót tartalmazó eleme az új szakasz
 létrehozási művelete. Kiválasztásakor a combo előbb visszaáll az utolsó valódi
 szakaszra, majd megnyitja a `StageSettingsDialog` ablakot. Elfogadáskor a teljes
@@ -200,9 +214,9 @@ lineáris kalibrációt és a `SafetyLimits` értékeit, majd a `MeasurementServ
 alkalmazási rétegen keresztül alkalmazza őket. Futó mérés közben az ablak tiltott.
 A köpenynyomás minimális többletének alapértéke 20 bar, az UI-ban pozitív,
 0,1 bar vagy nagyobb értékre konfigurálható, és az előkészítő ablakban is
-módosítható. A két korábbi pumpahatár helyett egy közös `MAXPRESS` érték van;
+módosítható. A köpeny- és a besajtolópumpához külön `MAXPRESS` érték tartozik;
 a **Mentés és alkalmazás** aszinkron, felügyelt parancsútvonalon REMOTE módba
-kapcsolja a leállított pumpákat, majd mindkettőbe beírja. Hardvermódban a
+kapcsolja a leállított pumpákat, majd mindegyikbe a saját értékét írja. Hardvermódban a
 parancs külön kezelői megerősítést igényel. Az előkészítési állapotgép a
 `RUN` előtt biztonsági okból megismétli ugyanezt. Biztonsági
 újrakonfigurálás nem törli a monitor reteszelt okait; azok csak a riasztás
@@ -600,13 +614,14 @@ helyreállítja a Remote módot és újrapróbálja a parancsot. A pumpastátusz
 engedélyezett NI-bemenetek külön
 hibahatárral olvashatók, ezért egy nem hozzáadott érzékelő nem jelenik meg
 kapcsolathibaként. Pumpa-RUN előtt a `ManualSafetyMonitor` csak a megcélzott pumpa
-kapcsolatát, véges saját adatait és a közös pumpanyomás-határt ellenőrzi. A kézi
+kapcsolatát, véges saját adatait és a hozzá tartozó pumpanyomás-határt ellenőrzi. A kézi
 szelepjel a `ControlLoop.write_manual_output()` útvonalán, 0–100%-os
 tartományellenőrzéssel jut az aktuátorra. A STOP, safe-state és leválasztás
 mindig külön-külön megkísérelhető. A manuális ablak minden bezárási útvonala
 leállítja az időzített telemetriát, kivárja az aktív DASNET-műveletet, majd minden
 pumpán megkísérli a STOP-ot és a soros kliens lezárását.
-Az ablak megjeleníti a saját várakozó manuális parancssorát. A még el nem indult
+Az ablak külön **Manuális vezérlés** és **Parancssor** füleket használ. A
+Parancssor fül megjeleníti a saját várakozó manuális parancssorát. A még el nem indult
 normál parancsok átrendezhetők vagy törölhetők; a futó parancs, valamint a
 prioritásos biztonsági `STOP` és safe-state művelet nem szerkeszthető és nem
 törölhető.

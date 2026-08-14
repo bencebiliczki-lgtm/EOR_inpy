@@ -182,6 +182,8 @@ def read_measurement_table(path: Path) -> MeasurementTable:
         CsvMeasurementWriter.LEGACY_HEADER,
         CsvMeasurementWriter.V2_HEADER,
         CsvMeasurementWriter.V3_HEADER,
+        CsvMeasurementWriter.V4_HEADER,
+        CsvMeasurementWriter.V5_HEADER,
     ):
         legacy_index = {name: index for index, name in enumerate(header)}
         converted_rows: list[list[str]] = [list(CsvMeasurementWriter.HEADER)]
@@ -199,8 +201,30 @@ def read_measurement_table(path: Path) -> MeasurementTable:
                         if name == "raw_line_pressure_bar"
                         else row[legacy_index["differential_pressure_bar"]]
                         if name == "raw_differential_pressure_bar"
+                        else row[legacy_index["raw_line_voltage"]]
+                        if name == "median_line_voltage"
+                        and "raw_line_voltage" in legacy_index
+                        else row[legacy_index["quality"]]
+                        if name == "line_pressure_quality"
+                        else row[legacy_index["raw_differential_voltage"]]
+                        if name == "median_differential_voltage"
+                        and "raw_differential_voltage" in legacy_index
+                        else row[legacy_index["quality"]]
+                        if name == "differential_pressure_quality"
                         else ""
-                        if name in {"raw_line_voltage", "raw_differential_voltage"}
+                        if name
+                        in {
+                            "raw_line_voltage",
+                            "median_line_voltage",
+                            "filtered_line_voltage",
+                            "line_pressure_quality_reason",
+                            "line_pressure_sample_age_seconds",
+                            "raw_differential_voltage",
+                            "median_differential_voltage",
+                            "filtered_differential_voltage",
+                            "differential_pressure_quality_reason",
+                            "differential_pressure_sample_age_seconds",
+                        }
                         else row[legacy_index[name]]
                     )
                     for name in CsvMeasurementWriter.HEADER
@@ -236,7 +260,10 @@ def read_measurement_tables(paths: Iterable[Path]) -> MeasurementTable:
 
 
 def _read_project_measurement_table(
-    path: Path, *, max_points: int | None = 20_000
+    path: Path,
+    *,
+    max_points: int | None = 20_000,
+    phase_id: int | None = None,
 ) -> MeasurementTable:
     """Compatibility view for UI models, bounded by database-side downsampling."""
     columns = (
@@ -251,11 +278,21 @@ def _read_project_measurement_table(
         "injection_remaining_volume_ml",
         "injection_injected_volume_ml",
         "raw_line_voltage",
+        "median_line_voltage",
+        "filtered_line_voltage",
         "raw_line_pressure_bar",
         "line_pressure_bar",
+        "line_data_quality",
+        "line_quality_reason",
+        "line_sample_age_s",
         "raw_differential_voltage",
+        "median_differential_voltage",
+        "filtered_differential_voltage",
         "raw_differential_pressure_bar",
         "differential_pressure_bar",
+        "differential_data_quality",
+        "differential_quality_reason",
+        "differential_sample_age_s",
         "valve_position_percent",
         "control_state",
         "pressure_data_quality",
@@ -263,7 +300,7 @@ def _read_project_measurement_table(
     )
     queried = query_measurements(
         path,
-        MeasurementQuery(columns=columns, max_points=max_points),
+        MeasurementQuery(phase_id=phase_id, columns=columns, max_points=max_points),
     )
 
     def text(value: object) -> str:
@@ -293,11 +330,21 @@ def _read_project_measurement_table(
                 text(values["injection_remaining_volume_ml"]),
                 text(values["injection_injected_volume_ml"]),
                 text(values["raw_line_voltage"]),
+                text(values["median_line_voltage"]),
+                text(values["filtered_line_voltage"]),
                 text(values["raw_line_pressure_bar"]),
                 text(values["line_pressure_bar"]),
+                text(values["line_data_quality"]),
+                text(values["line_quality_reason"]),
+                text(values["line_sample_age_s"]),
                 text(values["raw_differential_voltage"]),
+                text(values["median_differential_voltage"]),
+                text(values["filtered_differential_voltage"]),
                 text(values["raw_differential_pressure_bar"]),
                 text(values["differential_pressure_bar"]),
+                text(values["differential_data_quality"]),
+                text(values["differential_quality_reason"]),
+                text(values["differential_sample_age_s"]),
                 text(values["valve_position_percent"]),
                 text(values["control_state"]),
                 text(values["pressure_data_quality"]),
@@ -313,11 +360,12 @@ def export_measurement_csv(
     *,
     decimal_comma: bool = True,
     delimiter: str = ";",
+    phase_id: int | None = None,
 ) -> None:
     if delimiter not in {",", ";", "\t"}:
         raise ValueError("a CSV elválasztó csak vessző, pontosvessző vagy tabulátor lehet")
     table = (
-        _read_project_measurement_table(source, max_points=None)
+        _read_project_measurement_table(source, max_points=None, phase_id=phase_id)
         if source.name == "project.sqlite"
         else read_measurement_table(source)
     )
@@ -387,7 +435,15 @@ def migrate_legacy_measurement_csvs(
             row_invalid = False
             for name in table.header[1:]:
                 value = row[index[name]].strip()
-                if name in {"active_stage", "quality", "safety_reasons"}:
+                if name in {
+                    "active_stage",
+                    "quality",
+                    "safety_reasons",
+                    "line_pressure_quality",
+                    "line_pressure_quality_reason",
+                    "differential_pressure_quality",
+                    "differential_pressure_quality_reason",
+                }:
                     payload[name] = value
                 elif value:
                     try:
@@ -616,6 +672,7 @@ def export_measurement_excel(
     del stage_name  # Kept in the signature while existing UI calls transition.
     try:
         from openpyxl import Workbook
+        from openpyxl.chart import LineChart, Reference
         from openpyxl.reader.excel import load_workbook
         from openpyxl.styles import Font, PatternFill  # type: ignore[import-untyped]
     except ImportError as error:
@@ -681,6 +738,28 @@ def export_measurement_excel(
             cell.number_format = "yyyy-mm-dd hh:mm:ss.000"
         for cell in sheet["B"][1:]:
             cell.number_format = "[h]:mm:ss"
+        if rows.rows:
+            chart = LineChart()
+            chart.title = f"{phase.name} — nyomás- és szelepdiagram"
+            chart.y_axis.title = "bar / %"
+            chart.x_axis.title = "Indítás óta eltelt idő"
+            chart.set_categories(
+                Reference(sheet, min_col=2, min_row=2, max_row=sheet.max_row)
+            )
+            for column in (3, 7, 11, 12, 13):
+                chart.add_data(
+                    Reference(
+                        sheet,
+                        min_col=column,
+                        max_col=column,
+                        min_row=1,
+                        max_row=sheet.max_row,
+                    ),
+                    titles_from_data=True,
+                )
+            chart.height = 10
+            chart.width = 24
+            sheet.add_chart(chart, "O2")
     if not phases:
         sheet = workbook.create_sheet("Nincs mérési adat")
         sheet.append(EXCEL_MEASUREMENT_HEADERS)

@@ -10,7 +10,6 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from math import isfinite
 from pathlib import Path
-from queue import Empty, Queue
 from threading import Event, Thread
 from time import monotonic
 from typing import cast
@@ -102,12 +101,10 @@ from eor_control.data_management import (
     NasConnectionTestResult,
     NasSyncQueue,
     ProjectMeasurementWriter,
-    export_measurement_csv,
     export_measurement_excel,
     measurement_stage_segments,
     measurement_stages,
     numeric_series,
-    project_excel_path,
     read_measurement_events,
     read_measurement_tables,
     safe_filename,
@@ -130,7 +127,13 @@ from eor_control.diagnostics import (
     DiagnosticLogger,
     LogRetentionSettings,
 )
-from eor_control.domain import DataQuality, MeasurementRecord, PumpStatus
+from eor_control.domain import (
+    AnalogPressureReading,
+    DataQuality,
+    MeasurementRecord,
+    MeasurementSnapshot,
+    PumpStatus,
+)
 from eor_control.hardware import (
     ConnectionTestRegistry,
     ConnectionTestResult,
@@ -1357,9 +1360,8 @@ class RuntimeBridge(QObject):
     pump_startup_failed = Signal(str)
     flow_change_completed = Signal(float)
     flow_change_failed = Signal(str)
-    pressure_limit_apply_completed = Signal(float)
+    pressure_limit_apply_completed = Signal(float, float)
     pressure_limit_apply_failed = Signal(str)
-    stage_export_batch_finished = Signal()
     hardware_status_completed = Signal(object)
     hardware_status_failed = Signal(object)
 
@@ -1532,11 +1534,152 @@ class DeviceSettingsDialog(ResizableDialog):
             self._stored("ni_terminal_configuration", "DEFAULT")
         )
         self.terminal_configuration.setCurrentIndex(max(0, terminal_index))
+        self._terminal_configuration_warning = QLabel()
+        self._terminal_configuration_warning.setWordWrap(True)
+        self._terminal_configuration_warning.setStyleSheet(
+            "color:#9a6700;font-weight:700"
+        )
+        self.terminal_configuration.currentIndexChanged.connect(
+            self._refresh_terminal_configuration_warning
+        )
+        self._refresh_terminal_configuration_warning()
         self.pump_cabling_notes = QLineEdit(self._stored("pump_cabling_notes", ""))
         self.ni_wiring_notes = QLineEdit(self._stored("ni_wiring_notes", ""))
         self.safe_voltage = self._voltage_field("safe_output_voltage", 1.0)
         self.zero_voltage = self._voltage_field("valve_zero_percent_voltage", 1.0)
         self.hundred_voltage = self._voltage_field("valve_hundred_percent_voltage", 5.0)
+        self.analog_filter_enabled = QCheckBox("Analóg szűrés engedélyezve")
+        self.analog_filter_enabled.setChecked(self._stored_bool("analog_filter_enabled", True))
+        self.analog_samples_per_read = self._integer_field(
+            "analog_samples_per_read", 20, 1, 100
+        )
+        self.analog_sample_rate_hz = QDoubleSpinBox()
+        self.analog_sample_rate_hz.setRange(1.0, 100_000.0)
+        self.analog_sample_rate_hz.setValue(self._stored_float("analog_sample_rate_hz", 1000.0))
+        self.analog_sample_rate_hz.setSuffix(" Hz")
+        self.line_median_enabled = QCheckBox("Mediánszűrés engedélyezve")
+        self.line_median_enabled.setChecked(self._stored_bool("line_median_enabled", True))
+        self.line_ema_alpha = QDoubleSpinBox()
+        self.line_ema_alpha.setRange(0.01, 1.0)
+        self.line_ema_alpha.setDecimals(3)
+        self.line_ema_alpha.setValue(self._stored_float("line_ema_alpha", 0.2))
+        self.line_spike_rejection_enabled = QCheckBox("Tüskeszűrés engedélyezve")
+        self.line_spike_rejection_enabled.setChecked(
+            self._stored_bool("line_spike_rejection_enabled", True)
+        )
+        self.line_spike_limit_voltage = QDoubleSpinBox()
+        self.line_spike_limit_voltage.setRange(0.0001, 10.0)
+        self.line_spike_limit_voltage.setDecimals(4)
+        self.line_spike_limit_voltage.setSuffix(" V")
+        self.line_spike_limit_voltage.setValue(
+            self._stored_float("line_spike_limit_voltage", 0.1)
+        )
+        self.line_spike_confirmation_samples = self._integer_field(
+            "line_spike_confirmation_samples", 3, 1, 100
+        )
+        self.line_electrical_min_voltage = QDoubleSpinBox()
+        self.line_electrical_max_voltage = QDoubleSpinBox()
+        for electrical_field, key, default in (
+            (self.line_electrical_min_voltage, "line_electrical_min_voltage", 0.5),
+            (self.line_electrical_max_voltage, "line_electrical_max_voltage", 5.5),
+        ):
+            electrical_field.setRange(-10.0, 10.0)
+            electrical_field.setDecimals(4)
+            electrical_field.setSuffix(" V")
+            electrical_field.setValue(self._stored_float(key, default))
+        self.line_physical_min_pressure_bar = QDoubleSpinBox()
+        self.line_physical_max_pressure_bar = QDoubleSpinBox()
+        for pressure_field, key, default in (
+            (self.line_physical_min_pressure_bar, "line_physical_min_pressure_bar", -15.0),
+            (self.line_physical_max_pressure_bar, "line_physical_max_pressure_bar", 420.0),
+        ):
+            pressure_field.setRange(-1000.0, 1000.0)
+            pressure_field.setDecimals(3)
+            pressure_field.setSuffix(" bar")
+            pressure_field.setValue(self._stored_float(key, default))
+        self.line_stale_timeout_seconds = QDoubleSpinBox()
+        self.line_stale_timeout_seconds.setRange(0.01, 60.0)
+        self.line_stale_timeout_seconds.setDecimals(3)
+        self.line_stale_timeout_seconds.setSuffix(" s")
+        self.line_stale_timeout_seconds.setValue(
+            self._stored_float("line_stale_timeout_seconds", 1.0)
+        )
+        self.differential_median_enabled = QCheckBox("Differenciális mediánszűrés")
+        self.differential_median_enabled.setChecked(
+            self._stored_bool("differential_median_enabled", True)
+        )
+        self.differential_ema_alpha = QDoubleSpinBox()
+        self.differential_ema_alpha.setRange(0.01, 1.0)
+        self.differential_ema_alpha.setDecimals(3)
+        self.differential_ema_alpha.setValue(
+            self._stored_float("differential_ema_alpha", 0.2)
+        )
+        self.differential_spike_rejection_enabled = QCheckBox(
+            "Differenciális tüskeszűrés"
+        )
+        self.differential_spike_rejection_enabled.setChecked(
+            self._stored_bool("differential_spike_rejection_enabled", True)
+        )
+        self.differential_spike_limit_voltage = QDoubleSpinBox()
+        self.differential_spike_limit_voltage.setRange(0.0001, 10.0)
+        self.differential_spike_limit_voltage.setDecimals(4)
+        self.differential_spike_limit_voltage.setSuffix(" V")
+        self.differential_spike_limit_voltage.setValue(
+            self._stored_float("differential_spike_limit_voltage", 0.1)
+        )
+        self.differential_spike_confirmation_samples = self._integer_field(
+            "differential_spike_confirmation_samples", 3, 1, 100
+        )
+        self.differential_electrical_min_voltage = QDoubleSpinBox()
+        self.differential_electrical_max_voltage = QDoubleSpinBox()
+        for differential_field, key, default in (
+            (
+                self.differential_electrical_min_voltage,
+                "differential_electrical_min_voltage",
+                0.5,
+            ),
+            (
+                self.differential_electrical_max_voltage,
+                "differential_electrical_max_voltage",
+                5.5,
+            ),
+        ):
+            differential_field.setRange(-10.0, 10.0)
+            differential_field.setDecimals(4)
+            differential_field.setSuffix(" V")
+            differential_field.setValue(self._stored_float(key, default))
+        self.differential_physical_min_pressure_bar = QDoubleSpinBox()
+        self.differential_physical_max_pressure_bar = QDoubleSpinBox()
+        for differential_field, key, default in (
+            (
+                self.differential_physical_min_pressure_bar,
+                "differential_physical_min_pressure_bar",
+                -5.0,
+            ),
+            (
+                self.differential_physical_max_pressure_bar,
+                "differential_physical_max_pressure_bar",
+                55.0,
+            ),
+        ):
+            differential_field.setRange(-1000.0, 1000.0)
+            differential_field.setDecimals(3)
+            differential_field.setSuffix(" bar")
+            differential_field.setValue(self._stored_float(key, default))
+        self.differential_stale_timeout_seconds = QDoubleSpinBox()
+        self.differential_stale_timeout_seconds.setRange(0.01, 60.0)
+        self.differential_stale_timeout_seconds.setDecimals(3)
+        self.differential_stale_timeout_seconds.setSuffix(" s")
+        self.differential_stale_timeout_seconds.setValue(
+            self._stored_float("differential_stale_timeout_seconds", 1.0)
+        )
+        self.analog_diagnostic_interval_seconds = QDoubleSpinBox()
+        self.analog_diagnostic_interval_seconds.setRange(0.1, 3600.0)
+        self.analog_diagnostic_interval_seconds.setDecimals(1)
+        self.analog_diagnostic_interval_seconds.setSuffix(" s")
+        self.analog_diagnostic_interval_seconds.setValue(
+            self._stored_float("analog_diagnostic_interval_seconds", 5.0)
+        )
         pump_box = QGroupBox("Pumpák csatlakoztatása")
         pump_form = QFormLayout(pump_box)
         pump_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
@@ -1568,12 +1711,76 @@ class DeviceSettingsDialog(ResizableDialog):
             ("Aktív eszköz", self.valve_enabled),
             ("Szelepvezérlés kimenete", self.valve_channel),
             ("Bemenetek bekötési módja", self.terminal_configuration),
+            ("Bekötési mód ellenőrzése", self._terminal_configuration_warning),
             ("Bekötési megjegyzés", self.ni_wiring_notes),
             ("Biztonságos szelepjel", self.safe_voltage),
             ("Szelep 0%-os jele", self.zero_voltage),
             ("Szelep 100%-os jele", self.hundred_voltage),
         ):
             self._add_responsive_form_row(ni_form, label, ni_widget)
+
+        filter_box = QGroupBox("Analóg jelfeldolgozás — szerviz")
+        filter_form = QFormLayout(filter_box)
+        filter_note = QLabel(
+            "A 0,5–5,5 V és −15–420 bar kiinduló hibahatárok fizikailag még nem "
+            "validáltak a vonali érzékelőhöz. A differenciális érzékelő −5–55 bar "
+            "kiinduló tartománya szintén helyszíni jóváhagyást igényel."
+        )
+        filter_note.setWordWrap(True)
+        filter_form.addRow(filter_note)
+        filter_fields: tuple[tuple[str, QWidget], ...] = (
+            ("Szűrés", self.analog_filter_enabled),
+            ("Minták olvasásonként", self.analog_samples_per_read),
+            ("Mintavételi frekvencia", self.analog_sample_rate_hz),
+            ("Vonali medián", self.line_median_enabled),
+            ("Vonali EMA alfa", self.line_ema_alpha),
+            ("Vonali tüskeszűrés", self.line_spike_rejection_enabled),
+            ("Tüskehatár", self.line_spike_limit_voltage),
+            ("Tüske megerősítési minták", self.line_spike_confirmation_samples),
+            ("Elektromos minimum", self.line_electrical_min_voltage),
+            ("Elektromos maximum", self.line_electrical_max_voltage),
+            ("Fizikai minimum", self.line_physical_min_pressure_bar),
+            ("Fizikai maximum", self.line_physical_max_pressure_bar),
+            ("STALE időhatár", self.line_stale_timeout_seconds),
+            ("Differenciális medián", self.differential_median_enabled),
+            ("Differenciális EMA alfa", self.differential_ema_alpha),
+            (
+                "Differenciális tüskeszűrés",
+                self.differential_spike_rejection_enabled,
+            ),
+            (
+                "Differenciális tüskehatár",
+                self.differential_spike_limit_voltage,
+            ),
+            (
+                "Differenciális megerősítési minták",
+                self.differential_spike_confirmation_samples,
+            ),
+            (
+                "Differenciális elektromos minimum",
+                self.differential_electrical_min_voltage,
+            ),
+            (
+                "Differenciális elektromos maximum",
+                self.differential_electrical_max_voltage,
+            ),
+            (
+                "Differenciális fizikai minimum",
+                self.differential_physical_min_pressure_bar,
+            ),
+            (
+                "Differenciális fizikai maximum",
+                self.differential_physical_max_pressure_bar,
+            ),
+            (
+                "Differenciális STALE időhatár",
+                self.differential_stale_timeout_seconds,
+            ),
+            ("Diagnosztikai napló időköze", self.analog_diagnostic_interval_seconds),
+        )
+        for label, filter_widget in filter_fields:
+            self._add_responsive_form_row(filter_form, label, filter_widget)
+        filter_box.setVisible(developer_mode)
 
         self.device_tabs = QTabWidget()
         self.device_tabs.setObjectName("device_settings_tabs")
@@ -1584,6 +1791,7 @@ class DeviceSettingsDialog(ResizableDialog):
         ni_tab = QWidget()
         ni_tab_layout = QVBoxLayout(ni_tab)
         ni_tab_layout.addWidget(ni_box)
+        ni_tab_layout.addWidget(filter_box)
         ni_tab_layout.addStretch()
         self.device_tabs.addTab(pump_tab, "Pumpák")
         self.device_tabs.addTab(ni_tab, "NI mérés és szelep")
@@ -1748,6 +1956,18 @@ class DeviceSettingsDialog(ResizableDialog):
 
     def _stored(self, key: str, default: str) -> str:
         return str(self._settings.value(f"hardware/{key}", default))
+
+    def _refresh_terminal_configuration_warning(self, *_args: object) -> None:
+        if self.terminal_configuration.currentData() == "DEFAULT":
+            self._terminal_configuration_warning.setText(
+                "FIGYELEM: DEFAULT módban a fizikai bekötés nincs explicit validálva. "
+                "A helyszínen az NI bekötés alapján válassz módot."
+            )
+        else:
+            self._terminal_configuration_warning.setText(
+                f"Kiválasztva: {self.terminal_configuration.currentData()} — helyszíni "
+                "bekötési ellenőrzés továbbra is szükséges."
+            )
 
     def _stored_int(self, key: str, default: int) -> int:
         try:
@@ -2135,6 +2355,50 @@ class DeviceSettingsDialog(ResizableDialog):
             line_pressure_enabled=self.line_enabled.isChecked(),
             differential_pressure_enabled=self.delta_enabled.isChecked(),
             valve_output_enabled=self.valve_enabled.isChecked(),
+            analog_filter_enabled=self.analog_filter_enabled.isChecked(),
+            analog_samples_per_read=self.analog_samples_per_read.value(),
+            analog_sample_rate_hz=self.analog_sample_rate_hz.value(),
+            line_median_enabled=self.line_median_enabled.isChecked(),
+            line_ema_alpha=self.line_ema_alpha.value(),
+            line_spike_rejection_enabled=self.line_spike_rejection_enabled.isChecked(),
+            line_spike_limit_voltage=self.line_spike_limit_voltage.value(),
+            line_spike_confirmation_samples=self.line_spike_confirmation_samples.value(),
+            line_electrical_min_voltage=self.line_electrical_min_voltage.value(),
+            line_electrical_max_voltage=self.line_electrical_max_voltage.value(),
+            line_physical_min_pressure_bar=self.line_physical_min_pressure_bar.value(),
+            line_physical_max_pressure_bar=self.line_physical_max_pressure_bar.value(),
+            line_stale_timeout_seconds=self.line_stale_timeout_seconds.value(),
+            differential_median_enabled=(
+                self.differential_median_enabled.isChecked()
+            ),
+            differential_ema_alpha=self.differential_ema_alpha.value(),
+            differential_spike_rejection_enabled=(
+                self.differential_spike_rejection_enabled.isChecked()
+            ),
+            differential_spike_limit_voltage=(
+                self.differential_spike_limit_voltage.value()
+            ),
+            differential_spike_confirmation_samples=(
+                self.differential_spike_confirmation_samples.value()
+            ),
+            differential_electrical_min_voltage=(
+                self.differential_electrical_min_voltage.value()
+            ),
+            differential_electrical_max_voltage=(
+                self.differential_electrical_max_voltage.value()
+            ),
+            differential_physical_min_pressure_bar=(
+                self.differential_physical_min_pressure_bar.value()
+            ),
+            differential_physical_max_pressure_bar=(
+                self.differential_physical_max_pressure_bar.value()
+            ),
+            differential_stale_timeout_seconds=(
+                self.differential_stale_timeout_seconds.value()
+            ),
+            analog_diagnostic_interval_seconds=(
+                self.analog_diagnostic_interval_seconds.value()
+            ),
         )
 
     def _start_test(self) -> None:
@@ -2833,6 +3097,7 @@ class ManualTelemetryResult:
     pump_errors: dict[PumpRole, str]
     pressure_values: dict[str, float]
     pressure_errors: dict[str, str]
+    pressure_details: dict[str, AnalogPressureReading]
 
 
 @dataclass(frozen=True, slots=True)
@@ -2908,7 +3173,12 @@ class PumpControlDialog(ResizableDialog):
         self._operation_status.setWordWrap(True)
         self._operation_status.setStyleSheet("color:#66788a;font-weight:700")
         layout.addWidget(self._operation_status)
-        layout.addWidget(self._command_queue_panel())
+
+        self._manual_tabs = QTabWidget()
+        self._manual_tabs.setObjectName("manual_control_tabs")
+        control_page = QWidget()
+        control_page.setObjectName("manual_device_control_page")
+        control_layout = QVBoxLayout(control_page)
         pumps = QGridLayout()
         for column, role in enumerate(PumpRole):
             panel = self._pump_panel(role)
@@ -2916,12 +3186,12 @@ class PumpControlDialog(ResizableDialog):
             if role not in self._enabled_pumps:
                 panel.setTitle(panel.title() + " — NINCS HOZZÁADVA")
             pumps.addWidget(panel, 0, column)
-        layout.addLayout(pumps)
+        control_layout.addLayout(pumps)
         valve_panel = self._valve_panel()
         valve_panel.setEnabled(self._valve_enabled)
         if not self._valve_enabled:
             valve_panel.setTitle(valve_panel.title() + " — NINCS HOZZÁADVA")
-        layout.addWidget(valve_panel)
+        control_layout.addWidget(valve_panel)
         telemetry = QGroupBox("Eszközönkénti kapcsolat és élő adatok")
         telemetry_form = QFormLayout(telemetry)
         self._line_pressure_status = QLabel("— bar")
@@ -2933,10 +3203,19 @@ class PumpControlDialog(ResizableDialog):
         telemetry_form.addRow("Differenciálnyomás", self._differential_pressure_status)
         telemetry_form.addRow("Szelep kimenete", self._valve_status)
         telemetry_form.addRow("Biztonsági állapot", self._safety_status)
-        layout.addWidget(telemetry)
+        control_layout.addWidget(telemetry)
         stop_all = self._button("MINDKÉT PUMPA STOP", self._stop_all)
         stop_all.setStyleSheet("background:#b00020;color:white;font-weight:800;padding:10px")
-        layout.addWidget(stop_all)
+        control_layout.addWidget(stop_all)
+        control_layout.addStretch(1)
+
+        queue_page = QWidget()
+        queue_page.setObjectName("manual_command_queue_page")
+        queue_layout = QVBoxLayout(queue_page)
+        queue_layout.addWidget(self._command_queue_panel())
+        self._manual_tabs.addTab(control_page, "Manuális vezérlés")
+        self._manual_tabs.addTab(queue_page, "Parancssor")
+        layout.addWidget(self._manual_tabs, 1)
         close = QPushButton("Bezárás")
         close.clicked.connect(self._request_close)
         layout.addWidget(close)
@@ -3051,13 +3330,17 @@ class PumpControlDialog(ResizableDialog):
         status.setWordWrap(True)
         self._status_labels[role] = status
         mode = QComboBox()
-        mode.addItem("Állandó térfogatáram (ml/min)", PumpOperatingMode.CONSTANT_FLOW)
+        mode.addItem("Állandó térfogatáram (ml/h)", PumpOperatingMode.CONSTANT_FLOW)
         mode.addItem("Állandó nyomás (bar)", PumpOperatingMode.CONSTANT_PRESSURE)
         self._modes[role] = mode
         target = QDoubleSpinBox()
         target.setRange(0.0, 10000.0)
         target.setDecimals(5)
         target.setValue(1.0)
+        target.setSuffix(" ml/h")
+        mode.currentIndexChanged.connect(
+            lambda _index, role=role: self._update_manual_target_unit(role)
+        )
         self._targets[role] = target
         form.addRow("Állapot", status)
         form.addRow("Üzemmód", mode)
@@ -3069,6 +3352,12 @@ class PumpControlDialog(ResizableDialog):
         form.addRow(self._button("STOP", lambda: self._stop(role)))
         form.addRow(self._button("CLEAR", lambda: self._clear(role)))
         return box
+
+    def _update_manual_target_unit(self, role: PumpRole) -> None:
+        mode = PumpOperatingMode(self._modes[role].currentData())
+        self._targets[role].setSuffix(
+            " ml/h" if mode is PumpOperatingMode.CONSTANT_FLOW else " bar"
+        )
 
     def _valve_panel(self) -> QGroupBox:
         box = QGroupBox("Szelep kézi vezérlése")
@@ -3261,6 +3550,7 @@ class PumpControlDialog(ResizableDialog):
                     pump_errors,
                     pressure_values,
                     pressure_errors,
+                    self._control_loop.latest_pressure_readings(),
                 )
             )
 
@@ -3284,21 +3574,23 @@ class PumpControlDialog(ResizableDialog):
                     self._status_labels[role].setText(
                         "NINCS KAPCSOLAT — " + result.pump_errors.get(role, "ismeretlen hiba")
                     )
-            line_pressure = result.pressure_values.get("line_pressure")
-            differential_pressure = result.pressure_values.get("differential_pressure")
+            line_detail = result.pressure_details.get("line_pressure")
+            differential_detail = result.pressure_details.get(
+                "differential_pressure"
+            )
             self._line_pressure_status.setText(
                 "NINCS HOZZÁADVA"
                 if "line_pressure" not in self._enabled_pressure_inputs
-                else f"KAPCSOLÓDVA | {line_pressure:.3f} bar"
-                if line_pressure is not None
+                else self._format_analog_pressure_detail(line_detail)
+                if line_detail is not None
                 else "NINCS KAPCSOLAT — "
                 + result.pressure_errors.get("line_pressure", "ismeretlen hiba")
             )
             self._differential_pressure_status.setText(
                 "NINCS HOZZÁADVA"
                 if "differential_pressure" not in self._enabled_pressure_inputs
-                else f"KAPCSOLÓDVA | {differential_pressure:.3f} bar"
-                if differential_pressure is not None
+                else self._format_analog_pressure_detail(differential_detail)
+                if differential_detail is not None
                 else "NINCS KAPCSOLAT — "
                 + result.pressure_errors.get("differential_pressure", "ismeretlen hiba")
             )
@@ -3330,6 +3622,42 @@ class PumpControlDialog(ResizableDialog):
         elif isinstance(result, MeasurementRecord):
             self._update_live_values(result)
         self._run_next_command()
+
+    @staticmethod
+    def _format_analog_pressure_detail(reading: AnalogPressureReading | None) -> str:
+        if reading is None:
+            return "NINCS KAPCSOLAT"
+
+        def value(number: float | None, unit: str) -> str:
+            return "—" if number is None else f"{number:.4f} {unit}"
+
+        return (
+            f"{reading.quality.value.upper()} | "
+            f"nyers: {value(reading.last_raw_voltage, 'V')} | "
+            f"medián: {value(reading.median_voltage, 'V')} | "
+            f"szűrt: {value(reading.filtered_voltage, 'V')}\n"
+            f"nyers nyomás: {value(reading.raw_pressure_bar, 'bar')} | "
+            f"szűrt nyomás: {value(reading.filtered_pressure_bar, 'bar')} | "
+            f"kor: {reading.sample_age_seconds:.3f} s | "
+            f"csatorna: {reading.physical_channel or '—'} | "
+            f"kapcsolás: {reading.terminal_configuration or '—'}"
+            + (f" | ok: {reading.quality_reason}" if reading.quality_reason else "")
+        )
+
+    def _format_analog_valve_percent(self, output_percent: float) -> str:
+        actuator = getattr(self._control_loop, "_actuator", None)
+        zero = getattr(
+            actuator,
+            "_zero",
+            getattr(actuator, "voltage_at_zero_percent", 1.0),
+        )
+        hundred = getattr(
+            actuator,
+            "_hundred",
+            getattr(actuator, "voltage_at_hundred_percent", 5.0),
+        )
+        voltage = float(zero) + (float(hundred) - float(zero)) * output_percent / 100.0
+        return f"{output_percent:.1f} % | {voltage:.3f} V"
 
     def _telemetry_failed(self, message: str) -> None:
         self._telemetry_active = False
@@ -3439,7 +3767,9 @@ class PumpControlDialog(ResizableDialog):
             if snapshot.differential_pressure_bar is None
             else f"{snapshot.differential_pressure_bar:.3f} bar"
         )
-        self._valve_status.setText(f"{snapshot.valve_percent:.1f} %")
+        self._valve_status.setText(
+            self._format_analog_valve_percent(snapshot.valve_percent)
+        )
         if record.safety_reasons:
             self._safety_status.setText("RETESZELVE — " + "; ".join(record.safety_reasons))
             self._safety_status.setStyleSheet("color:#b00020;font-weight:700")
@@ -4700,6 +5030,7 @@ class DataManagementDialog(ResizableDialog):
         source_path: Path,
         project_name: str,
         phase_name: str,
+        measurement_kind: str,
         data_root: Path,
         synchronizer: BackgroundNasSynchronizer,
         settings: QSettings,
@@ -4709,47 +5040,42 @@ class DataManagementDialog(ResizableDialog):
         self._source_path = source_path
         self._project_name = project_name
         self._phase_name = phase_name
-        self._export_name = f"{project_name}_{phase_name}"
+        self._measurement_kind = measurement_kind
         self._data_root = data_root
         self._synchronizer = synchronizer
         self._settings = settings
         self._bridge = DataManagementBridge(self)
         self._bridge.completed.connect(self._operation_completed)
         self._bridge.failed.connect(self._operation_failed)
-        self.setWindowTitle("Adatkezelés és export")
-        self.resize(650, 360)
+        self.setWindowTitle("Projektadatok exportálása")
+        self.resize(700, 440)
         layout = QVBoxLayout(self)
 
-        source_box = QGroupBox("Aktív mérési fázis nyers adatai")
+        source_box = QGroupBox("Exportforrás")
         source_layout = QFormLayout(source_box)
         source_layout.addRow("Projekt", QLabel(project_name))
-        source_layout.addRow("Mérési fázis", QLabel(phase_name))
+        source_layout.addRow(
+            "Mérési eredet",
+            QLabel("HARDVER / éles mérés" if measurement_kind == "live" else "SZIMULÁCIÓ"),
+        )
         source_path_label = QLabel(str(source_path))
         source_path_label.setWordWrap(True)
-        source_layout.addRow("Helyi fájl", source_path_label)
+        source_layout.addRow("Projekt-adatbázis", source_path_label)
         layout.addWidget(source_box)
 
-        export_box = QGroupBox("Felhasználói export")
+        export_box = QGroupBox("Projekt Excel-exportja")
         export_layout = QGridLayout(export_box)
-        self.decimal_comma = QCheckBox("Tizedesvessző")
-        self.decimal_comma.setChecked(True)
-        self.delimiter = QComboBox()
-        self.delimiter.addItem("Pontosvessző (;) ", ";")
-        self.delimiter.addItem("Vessző (,)", ",")
-        self.delimiter.addItem("Tabulátor", "\t")
-        csv_button = QPushButton("CSV exportálása…")
-        csv_button.clicked.connect(self._export_csv)
-        export_layout.addWidget(self.decimal_comma, 0, 0)
-        export_layout.addWidget(input_field_label("Oszlopelválasztó", self.delimiter), 0, 1)
-        export_layout.addWidget(self.delimiter, 0, 2)
-        export_layout.addWidget(csv_button, 1, 0, 1, 2)
+        excel_button = QPushButton("Excel exportálása…")
+        excel_button.setObjectName("export_project_excel")
+        excel_button.clicked.connect(self._export_excel)
+        export_layout.addWidget(excel_button, 0, 0)
         excel_notice = QLabel(
-            "A projekt Excel-munkafüzetében a mérési szakasz saját munkalapja "
-            "a szakasz lezárásakor automatikusan készül el vagy frissül, így "
-            "futó szakaszból nem jön létre félkész Excel."
+            "A nyers mérési adatok kizárólag a projekt SQLite-adatbázisában "
+            "maradnak. Az Excel-fájl csak ennek a gombnak a megnyomásakor készül "
+            "el, és a projekt minden mérési fázisát külön munkalapra rendezi."
         )
         excel_notice.setWordWrap(True)
-        export_layout.addWidget(excel_notice, 2, 0, 1, 3)
+        export_layout.addWidget(excel_notice, 1, 0)
         layout.addWidget(export_box)
 
         nas_notice = QLabel(
@@ -4774,27 +5100,38 @@ class DataManagementDialog(ResizableDialog):
 
         Thread(target=execute, name="eor-data-operation", daemon=True).start()
 
-    def _export_csv(self) -> None:
+    def _export_excel(self) -> None:
         export_directory = Path(
             str(self._settings.value("export/last_directory", str(self._source_path.parent)))
         )
-        default = str(export_directory / f"{safe_filename(self._export_name)}_export.csv")
+        default = str(export_directory / f"{safe_filename(self._project_name)}.xlsx")
         destination, _ = QFileDialog.getSaveFileName(
-            self, "CSV export", default, "CSV fájl (*.csv)"
+            self, "Excel export", default, "Excel-munkafüzet (*.xlsx)"
         )
         if not destination:
             return
-        self._settings.setValue("export/last_directory", str(Path(destination).parent))
+        destination_path = Path(destination)
+        if destination_path.suffix.casefold() != ".xlsx":
+            destination_path = destination_path.with_suffix(".xlsx")
+        self._settings.setValue("export/last_directory", str(destination_path.parent))
         self._settings.sync()
-        delimiter = str(self.delimiter.currentData())
+
+        def export() -> None:
+            export_measurement_excel(self._source_path, destination_path)
+            try:
+                relative = destination_path.relative_to(self._data_root)
+            except ValueError:
+                return
+            nas_relative = (
+                Path(*relative.parts[1:])
+                if relative.parts and relative.parts[0] == "projects"
+                else relative
+            )
+            self._synchronizer.enqueue(destination_path, nas_relative)
+
         self._run_background(
-            lambda: export_measurement_csv(
-                self._source_path,
-                Path(destination),
-                decimal_comma=self.decimal_comma.isChecked(),
-                delimiter=delimiter,
-            ),
-            f"CSV export elkészült: {destination}",
+            export,
+            f"Excel export elkészült: {destination_path}",
         )
 
     def _operation_completed(self, message: str) -> None:
@@ -5334,7 +5671,9 @@ class CalibrationSettingsDialog(ResizableDialog):
         self.delta_voltage_max = self._value_spinbox(5.0, -10.0, 10.0, " V")
         self.delta_value_min = self._value_spinbox(0.0, -1000.0, 1000.0, " bar")
         self.delta_value_max = self._value_spinbox(40.0, -1000.0, 1000.0, " bar")
-        for title, fields in (
+        self.line_calibration_preview = QLabel()
+        self.delta_calibration_preview = QLabel()
+        for title, fields, preview in (
             (
                 "Vonali nyomásérzékelő",
                 (
@@ -5343,6 +5682,7 @@ class CalibrationSettingsDialog(ResizableDialog):
                     ("Minimum nyomásérték", self.line_value_min),
                     ("Maximum nyomásérték", self.line_value_max),
                 ),
+                self.line_calibration_preview,
             ),
             (
                 "Differenciálnyomás-érzékelő",
@@ -5352,6 +5692,7 @@ class CalibrationSettingsDialog(ResizableDialog):
                     ("Minimum nyomásérték", self.delta_value_min),
                     ("Maximum nyomásérték", self.delta_value_max),
                 ),
+                self.delta_calibration_preview,
             ),
         ):
             box = QGroupBox(title)
@@ -5361,7 +5702,12 @@ class CalibrationSettingsDialog(ResizableDialog):
             form.setVerticalSpacing(8)
             for label, field in fields:
                 form.addRow(input_field_label(label, field), field)
+                field.valueChanged.connect(self._refresh_calibration_preview)
+            preview.setWordWrap(True)
+            preview.setStyleSheet("color:#52677a;font-weight:700")
+            form.addRow("Előnézet", preview)
             calibration_layout.addWidget(box)
+        self._refresh_calibration_preview()
         calibration_layout.addStretch()
         tabs.addTab(calibration_page, "Érzékelők kalibrációja")
 
@@ -5372,12 +5718,39 @@ class CalibrationSettingsDialog(ResizableDialog):
         safety_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         safety_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         safety_form.setVerticalSpacing(8)
-        self.max_pump = self._value_spinbox(350.0, 0.1, 1000.0, " bar")
+        self.max_jacket = self._value_spinbox(350.0, 0.1, 1000.0, " bar")
+        self.max_injection = self._value_spinbox(350.0, 0.1, 1000.0, " bar")
         self.max_line = self._value_spinbox(400.0, 0.1, 1000.0, " bar")
         self.max_delta = self._value_spinbox(50.0, 0.1, 1000.0, " bar")
         self.minimum_margin = self._value_spinbox(20.0, 0.1, 1000.0, " bar")
+        maxpress_help = (
+            "Hardvermódban a Mentés és alkalmazás a két értéket a megfelelő "
+            "ISCO pumpa MAXPRESS tulajdonságába írja."
+        )
+        self.max_jacket.setToolTip(maxpress_help)
+        self.max_injection.setToolTip(maxpress_help)
+        safety_form.addRow(
+            input_field_label(
+                "Köpenypumpa hardveres nyomáshatára (MAXPRESS)",
+                self.max_jacket,
+            ),
+            self.max_jacket,
+        )
+        safety_form.addRow(
+            input_field_label(
+                "Besajtolópumpa hardveres nyomáshatára (MAXPRESS)",
+                self.max_injection,
+            ),
+            self.max_injection,
+        )
+        self.max_pump_notice = QLabel(f"FIGYELEM: {maxpress_help}")
+        self.max_pump_notice.setObjectName("max_pump_maxpress_notice")
+        self.max_pump_notice.setWordWrap(True)
+        self.max_pump_notice.setStyleSheet(
+            "padding:6px;color:#8a5a00;font-weight:700"
+        )
+        safety_form.addRow(self.max_pump_notice)
         for label, field in (
-            ("Pumpák közös nyomáshatára (MAXPRESS)", self.max_pump),
             ("Vonali nyomás maximuma", self.max_line),
             ("Differenciálnyomás maximuma", self.max_delta),
             ("Indítási köpenynyomás minimális többlete", self.minimum_margin),
@@ -5385,7 +5758,7 @@ class CalibrationSettingsDialog(ResizableDialog):
             safety_form.addRow(input_field_label(label, field), field)
         safety_layout.addWidget(safety_box)
         safety_note = QLabel(
-            "A Mentés és alkalmazás a közös MAXPRESS értéket mindkét "
+            "A Mentés és alkalmazás a külön MAXPRESS értékeket a megfelelő "
             "pumpába azonnal beírja; hardvermódban ehhez külön megerősítést kér. "
             "Az előkészítés a RUN előtt biztonsági okból megismétli. "
             "A minimális köpenynyomás-többlet kizárólag a besajtolópumpa "
@@ -5436,7 +5809,8 @@ class CalibrationSettingsDialog(ResizableDialog):
             self.delta_voltage_max,
             self.delta_value_min,
             self.delta_value_max,
-            self.max_pump,
+            self.max_jacket,
+            self.max_injection,
             self.max_delta,
             self.max_line,
             self.minimum_margin,
@@ -5451,6 +5825,23 @@ class CalibrationSettingsDialog(ResizableDialog):
             QMessageBox.critical(self, "Érvénytelen beállítás", str(error))
             return
         self.accept()
+
+    def _refresh_calibration_preview(self) -> None:
+        for label, values in (
+            (self.line_calibration_preview, self.line_values()),
+            (self.delta_calibration_preview, self.delta_values()),
+        ):
+            try:
+                calibration = LinearCalibration(*values)
+            except ValueError as error:
+                label.setText(f"ÉRVÉNYTELEN — {error}")
+                label.setStyleSheet("color:#b00020;font-weight:700")
+            else:
+                label.setText(
+                    f"p = {calibration.slope:.6g} · U + "
+                    f"{calibration.offset:.6g} bar | még nincs alkalmazva"
+                )
+                label.setStyleSheet("color:#52677a;font-weight:700")
 
     def line_values(self) -> list[float]:
         return [
@@ -5470,7 +5861,8 @@ class CalibrationSettingsDialog(ResizableDialog):
 
     def safety_values(self) -> tuple[float, ...]:
         return (
-            self.max_pump.value(),
+            self.max_jacket.value(),
+            self.max_injection.value(),
             self.max_delta.value(),
             self.minimum_margin.value(),
             self.max_line.value(),
@@ -5527,7 +5919,8 @@ class MeasurementOverviewDialog(ResizableDialog):
             (
                 ("line_calibration", "Vonali érzékelő kalibrációja"),
                 ("delta_calibration", "Differenciálérzékelő kalibrációja"),
-                ("max_pump", "Pumpák közös nyomáshatára"),
+                ("max_jacket", "Köpenypumpa nyomáshatára"),
+                ("max_injection", "Besajtolópumpa nyomáshatára"),
                 ("max_line", "Vonali nyomás maximuma"),
                 ("max_delta", "Differenciálnyomás maximuma"),
                 ("minimum_margin", "Minimális köpenynyomás-többlet"),
@@ -5604,11 +5997,13 @@ class MeasurementPumpStartupDialog(ResizableDialog):
         self,
         defaults: MeasurementPumpPlan,
         *,
-        maximum_pump_pressure_bar: float,
+        maximum_jacket_pressure_bar: float,
+        maximum_injection_pressure_bar: float,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._pressure_limit_bar = maximum_pump_pressure_bar
+        self._jacket_pressure_limit_bar = maximum_jacket_pressure_bar
+        self._injection_pressure_limit_bar = maximum_injection_pressure_bar
         self.setWindowTitle("Pumpák előkészítése")
         self.resize(620, 390)
         layout = QVBoxLayout(self)
@@ -5620,8 +6015,9 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             "kezdőértékek felé. A köpeny a célján STOP után nyomástartásra vált. "
             "Ha a különbség a minimum alá esik, a BES leáll, majd megfelelő "
             "nyomáselőnynél automatikusan újraindul. "
-            f"A Beállításokban megadott közös {maximum_pump_pressure_bar:.3f} bar "
-            "MAXPRESS határt a program RUN előtt mindkét pumpába beírja. A "
+            "A Beállításokban megadott MAXPRESS határokat a program RUN előtt "
+            f"külön beírja (köpeny: {maximum_jacket_pressure_bar:.3f} bar; "
+            f"besajtoló: {maximum_injection_pressure_bar:.3f} bar). A "
             "mérési ciklus csak mindkét kezdőnyomás elérése után indul. A "
             "célnyomás elérésének nincs időkorlátja."
         )
@@ -5631,7 +6027,7 @@ class MeasurementPumpStartupDialog(ResizableDialog):
         form = QFormLayout()
         self.jacket_target_pressure = QDoubleSpinBox()
         self.jacket_target_pressure.setObjectName("startup_jacket_target_pressure")
-        self.jacket_target_pressure.setRange(0.0, maximum_pump_pressure_bar)
+        self.jacket_target_pressure.setRange(0.0, maximum_jacket_pressure_bar)
         self.jacket_target_pressure.setDecimals(3)
         self.jacket_target_pressure.setSuffix(" bar")
         self.jacket_target_pressure.setValue(defaults.jacket_target_pressure_bar)
@@ -5645,7 +6041,7 @@ class MeasurementPumpStartupDialog(ResizableDialog):
 
         self.injection_start_pressure = QDoubleSpinBox()
         self.injection_start_pressure.setObjectName("startup_injection_start_pressure")
-        self.injection_start_pressure.setRange(0.0, maximum_pump_pressure_bar)
+        self.injection_start_pressure.setRange(0.0, maximum_injection_pressure_bar)
         self.injection_start_pressure.setDecimals(3)
         self.injection_start_pressure.setSuffix(" bar")
         self.injection_start_pressure.setValue(defaults.injection_start_pressure_bar)
@@ -5659,7 +6055,10 @@ class MeasurementPumpStartupDialog(ResizableDialog):
 
         self.minimum_margin = QDoubleSpinBox()
         self.minimum_margin.setObjectName("startup_minimum_jacket_margin")
-        self.minimum_margin.setRange(0.1, maximum_pump_pressure_bar)
+        self.minimum_margin.setRange(
+            0.1,
+            max(maximum_jacket_pressure_bar, maximum_injection_pressure_bar),
+        )
         self.minimum_margin.setDecimals(3)
         self.minimum_margin.setSuffix(" bar")
         self.minimum_margin.setValue(defaults.minimum_jacket_margin_bar)
@@ -5719,7 +6118,8 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             jacket_buildup_flow_ml_per_hour=self.jacket_buildup_flow.value(),
             injection_start_pressure_bar=self.injection_start_pressure.value(),
             injection_startup_flow_ml_per_hour=self.injection_flow.value(),
-            pressure_limit_bar=self._pressure_limit_bar,
+            jacket_pressure_limit_bar=self._jacket_pressure_limit_bar,
+            injection_pressure_limit_bar=self._injection_pressure_limit_bar,
             minimum_jacket_margin_bar=self.minimum_margin.value(),
             margin_stability_seconds=self.margin_stability.value(),
         )
@@ -5745,9 +6145,12 @@ class MeasurementPumpStartupDialog(ResizableDialog):
             and plan.jacket_buildup_flow_ml_per_hour > 0.0
             and plan.injection_start_pressure_bar > 0.0
             and plan.injection_target_flow_ml_per_hour > 0.0
-            and plan.pressure_limit_bar is not None
-            and plan.jacket_target_pressure_bar <= plan.pressure_limit_bar
-            and plan.injection_start_pressure_bar <= plan.pressure_limit_bar
+            and plan.effective_jacket_pressure_limit_bar is not None
+            and plan.effective_injection_pressure_limit_bar is not None
+            and plan.jacket_target_pressure_bar
+            <= plan.effective_jacket_pressure_limit_bar
+            and plan.injection_start_pressure_bar
+            <= plan.effective_injection_pressure_limit_bar
             and margin_ok
         )
 
@@ -6138,11 +6541,7 @@ class DashboardWindow(QMainWindow):
         self._projects = projects
         self._data_directory = data_directory
         self._measurement_writer = measurement_writer
-        self._measurement_writer.set_phase_completed_callback(self._queue_completed_stage_export)
         self._nas_sync = nas_sync
-        self._pending_stage_exports: Queue[tuple[Path, str]] = Queue()
-        self._stage_export_active = False
-        self._stage_export_thread: Thread | None = None
         self._run_mode = RunMode.SIMULATION
         self._preferred_run_mode = self._stored_run_mode()
         self._startup_mode_restore_started = False
@@ -6204,15 +6603,15 @@ class DashboardWindow(QMainWindow):
             self._diagnostics.cleanup_logs_async()
         self._restore_nas_settings()
         self.setWindowIcon(application_icon())
-        maximum_plot_points = int(
-            str(self._user_settings.value("ui/maximum_visible_plot_points_per_series", 2000))
-        )
-        maximum_plot_points = min(100_000, max(100, maximum_plot_points))
-        self._times: deque[float] = deque(maxlen=maximum_plot_points)
-        self._jacket_pressures: deque[float] = deque(maxlen=maximum_plot_points)
-        self._injection_pressures: deque[float] = deque(maxlen=maximum_plot_points)
-        self._injection_flows: deque[float] = deque(maxlen=maximum_plot_points)
-        self._line_pressures: deque[float] = deque(maxlen=maximum_plot_points)
+        # Keep the complete current run available for live inspection. The raw
+        # measurement remains persisted separately; pyqtgraph downsamples only
+        # the rendered representation when many points are visible.
+        self._times: deque[float] = deque()
+        self._jacket_pressures: deque[float] = deque()
+        self._injection_pressures: deque[float] = deque()
+        self._injection_flows: deque[float] = deque()
+        self._line_pressures: deque[float] = deque()
+        self._differential_pressures: deque[float] = deque()
         self._alarm_points: list[dict[str, object]] = []
         self._runtime_bridge = RuntimeBridge(self)
         self._runtime_bridge.cycle_completed.connect(self._handle_cycle)
@@ -6233,7 +6632,6 @@ class DashboardWindow(QMainWindow):
             self._pressure_limit_apply_failed
         )
         self._runtime_bridge.pump_startup_failed.connect(self._measurement_pump_startup_failed)
-        self._runtime_bridge.stage_export_batch_finished.connect(self._stage_export_batch_finished)
         self._runtime_bridge.hardware_status_completed.connect(self._hardware_status_completed)
         self._runtime_bridge.hardware_status_failed.connect(self._hardware_status_failed)
         self._runtime = self._make_runtime(control_loop)
@@ -6251,6 +6649,10 @@ class DashboardWindow(QMainWindow):
             self._tray_icon.show()
         self._restore_theme()
         self._restore_control_settings()
+        self._apply_pid_button.setEnabled(False)
+        self._pid_application_status.setText(
+            "A PID-paraméterek csak az Alkalmaz gomb megnyomásakor változnak."
+        )
         self._project_selector_required = not self._restore_project_selection()
         self._project_selector_prompted = False
         if (
@@ -6404,7 +6806,8 @@ class DashboardWindow(QMainWindow):
         self._delta_voltage_max = self._measurement_settings.delta_voltage_max
         self._delta_value_min = self._measurement_settings.delta_value_min
         self._delta_value_max = self._measurement_settings.delta_value_max
-        self._max_pump = self._measurement_settings.max_pump
+        self._max_jacket = self._measurement_settings.max_jacket
+        self._max_injection = self._measurement_settings.max_injection
         self._max_delta = self._measurement_settings.max_delta
         self._max_line = self._measurement_settings.max_line
         self._minimum_margin = self._measurement_settings.minimum_margin
@@ -6467,6 +6870,7 @@ class DashboardWindow(QMainWindow):
         profile_actions_layout.addWidget(self._delete_pid_profile_button)
         self._apply_pid_button = QPushButton("PID beállítások alkalmazása")
         self._apply_pid_button.clicked.connect(self._apply_pid)
+        self._apply_pid_button.setEnabled(False)
         self._pid_application_status_block = QWidget()
         self._pid_application_status_block.setObjectName("pid_application_status_block")
         self._pid_application_status_block.setMinimumWidth(0)
@@ -6480,7 +6884,7 @@ class DashboardWindow(QMainWindow):
         self._pid_application_status_title = QLabel("PID alkalmazási állapot")
         self._pid_application_status_title.setWordWrap(True)
         self._pid_application_status = QTextEdit(
-            "A PID-paraméterek mérés közben automatikusan frissülnek."
+            "A PID-paraméterek csak az Alkalmaz gomb megnyomásakor változnak."
         )
         self._pid_application_status.setReadOnly(True)
         self._pid_application_status.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -6499,10 +6903,6 @@ class DashboardWindow(QMainWindow):
         self._pid_application_status.setSizePolicy(pid_status_policy)
         pid_status_layout.addWidget(self._pid_application_status_title)
         pid_status_layout.addWidget(self._pid_application_status)
-        self._pid_live_update_timer = QTimer(self)
-        self._pid_live_update_timer.setSingleShot(True)
-        self._pid_live_update_timer.setInterval(100)
-        self._pid_live_update_timer.timeout.connect(self._apply_live_pid_update)
         form.addRow("Mód", self._mode)
         form.addRow("Nyomásforrás", self._source)
         form.addRow("Kézi kimenet", self._manual_output)
@@ -6572,7 +6972,6 @@ class DashboardWindow(QMainWindow):
                 label.setWordWrap(True)
         for widget in (
             self._mode,
-            self._source,
             self._manual_output,
             self._setpoint,
             self._recording_interval,
@@ -6835,7 +7234,7 @@ class DashboardWindow(QMainWindow):
 
     def _create_measurement_tabs_component(self) -> QTabWidget:
 
-        self._plot = pg.PlotWidget(title="Elmúlt 10 perc nyomásai")
+        self._plot = pg.PlotWidget(title="Aktuális mérés nyomásai")
         self._plot.setObjectName("live_measurement_plot")
         self._plot.setMinimumWidth(0)
         self._plot.setLabel("left", "Nyomás", units="bar")
@@ -6850,6 +7249,9 @@ class DashboardWindow(QMainWindow):
             pen="#c62828", name="Besajtolás [bar]"
         )
         self._line_curve = self._plot.plot(pen="#2e7d32", name="Vonali [bar]")
+        self._differential_curve = self._plot.plot(
+            pen="#8e24aa", name="Differenciálnyomás [bar]"
+        )
         self._alarm_scatter = pg.ScatterPlotItem(
             size=12,
             symbol="o",
@@ -6859,7 +7261,7 @@ class DashboardWindow(QMainWindow):
         )
         self._alarm_scatter.sigHovered.connect(self._alarm_points_hovered)
         self._plot.addItem(self._alarm_scatter)
-        self._flow_plot = pg.PlotWidget(title="Elmúlt 10 perc besajtolási üteme")
+        self._flow_plot = pg.PlotWidget(title="Aktuális mérés besajtolási üteme")
         self._flow_plot.setObjectName("live_injection_flow_plot")
         self._flow_plot.setMinimumWidth(0)
         self._flow_plot.setLabel("left", "Térfogatáram", units="mL/h")
@@ -6871,6 +7273,30 @@ class DashboardWindow(QMainWindow):
         self._flow_curve = self._flow_plot.plot(
             pen=pg.mkPen("#8e24aa", width=2),
             name="Besajtolási térfogatáram [mL/h]",
+        )
+        for curve in (
+            self._jacket_curve,
+            self._injection_curve,
+            self._line_curve,
+            self._differential_curve,
+            self._flow_curve,
+        ):
+            curve.setDownsampling(auto=True, method="peak")
+            curve.setClipToView(True)
+        self._follow_live_plot_button = QPushButton("Legfrissebb adatok követése")
+        self._follow_live_plot_button.setObjectName("follow_live_measurement_plot")
+        self._follow_live_plot_button.setCheckable(True)
+        self._follow_live_plot_button.setChecked(True)
+        self._follow_live_plot_button.setToolTip(
+            "Bekapcsolva a diagram a teljes aktuális mérést mutatja az új pontig. "
+            "Kézi nagyítás vagy mozgatás kikapcsolja, így a nézet nem ugrik el."
+        )
+        self._follow_live_plot_button.toggled.connect(self._live_plot_follow_toggled)
+        self._plot.getViewBox().sigRangeChangedManually.connect(
+            self._disable_live_plot_follow
+        )
+        self._flow_plot.getViewBox().sigRangeChangedManually.connect(
+            self._disable_live_plot_follow
         )
         chart_splitter = QSplitter(Qt.Orientation.Vertical)
         chart_splitter.setObjectName("live_chart_splitter")
@@ -6887,6 +7313,9 @@ class DashboardWindow(QMainWindow):
         )
         live_measurement_layout = QVBoxLayout(live_measurement_page)
         live_measurement_layout.setContentsMargins(0, 0, 0, 0)
+        live_measurement_layout.addWidget(
+            self._follow_live_plot_button, alignment=Qt.AlignmentFlag.AlignRight
+        )
         live_measurement_layout.addWidget(chart_splitter)
         self._history_view = MeasurementHistoryView(parent=self)
         self._measurement_tabs = QTabWidget()
@@ -7455,8 +7884,9 @@ class DashboardWindow(QMainWindow):
                 answer = QMessageBox.question(
                     self,
                     "MAXPRESS alkalmazása",
-                    f"A program mindkét pumpát REMOTE módba kapcsolja, majd "
-                    f"elküldi a MAXPRESS={dialog.max_pump.value():.3f} bar parancsot.\n\n"
+                    "A program mindkét pumpát REMOTE módba kapcsolja, majd elküldi:\n"
+                    f"Köpeny MAXPRESS={dialog.max_jacket.value():.3f} bar\n"
+                    f"Besajtoló MAXPRESS={dialog.max_injection.value():.3f} bar\n\n"
                     "Megerősíted, hogy mindkét pumpa le van állítva, és a megadott "
                     "nyomáshatár biztonságos?",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -7470,9 +7900,20 @@ class DashboardWindow(QMainWindow):
                 QTimer.singleShot(0, dialog.show)
                 return
             self._save_user_settings()
+            self._user_settings.setValue(
+                "calibration/updated_at_utc", datetime.now(UTC).isoformat()
+            )
+            self._user_settings.setValue(
+                "calibration/status", "saved_unvalidated"
+            )
+            self._user_settings.sync()
             if self._overview_dialog is not None:
                 self._overview_dialog.refresh()
-            self._apply_common_pressure_limit(dialog, self._max_pump.value())
+            self._apply_pressure_limits(
+                dialog,
+                self._max_jacket.value(),
+                self._max_injection.value(),
+            )
             QTimer.singleShot(0, dialog.show)
 
         def restore() -> None:
@@ -7650,7 +8091,6 @@ class DashboardWindow(QMainWindow):
             self._data_directory,
             self._nas_sync,
             measurement_kind=("live" if mode is RunMode.HARDWARE else "simulation"),
-            phase_completed=self._queue_completed_stage_export,
         )
 
     def _select_project_for_writer(
@@ -7683,75 +8123,6 @@ class DashboardWindow(QMainWindow):
             self._projects.update_project_path(project.id, path)
         return path
 
-    def _queue_completed_stage_export(self, source_path: Path, stage_name: str) -> None:
-        """Receive stage completion from either the UI or the control thread."""
-        self._pending_stage_exports.put((source_path, stage_name))
-        self._diagnostics.emit(
-            DiagnosticCategory.SYSTEM,
-            "EXPORT",
-            f"completed stage queued for Excel export: {stage_name}; {source_path}",
-        )
-
-    def _start_pending_stage_exports(self) -> None:
-        if (
-            self._stage_export_active
-            or self._runtime.running
-            or self._pending_stage_exports.empty()
-        ):
-            return
-        self._stage_export_active = True
-
-        def execute() -> None:
-            pending: dict[Path, str] = {}
-            try:
-                while True:
-                    try:
-                        source_path, stage_name = self._pending_stage_exports.get_nowait()
-                    except Empty:
-                        break
-                    pending[source_path] = stage_name
-                for source_path, stage_name in pending.items():
-                    destination = project_excel_path(source_path, stage_name)
-                    try:
-                        export_measurement_excel(
-                            source_path,
-                            destination,
-                            stage_name=stage_name,
-                        )
-                        relative = destination.relative_to(self._data_directory)
-                        nas_relative = (
-                            Path(*relative.parts[1:])
-                            if relative.parts and relative.parts[0] == "projects"
-                            else relative
-                        )
-                        self._nas_sync.enqueue(destination, nas_relative)
-                    except Exception as error:
-                        self._diagnostics.emit(
-                            DiagnosticCategory.SYSTEM,
-                            "EXPORT",
-                            f"Excel export failed for stage {stage_name}: {error}",
-                            level="ERROR",
-                        )
-                    else:
-                        self._diagnostics.emit(
-                            DiagnosticCategory.SYSTEM,
-                            "EXPORT",
-                            f"Excel export completed for stage {stage_name}: {destination}",
-                        )
-            finally:
-                self._runtime_bridge.stage_export_batch_finished.emit()
-
-        self._stage_export_thread = Thread(
-            target=execute,
-            name="eor-stage-excel-export",
-            daemon=True,
-        )
-        self._stage_export_thread.start()
-
-    def _stage_export_batch_finished(self) -> None:
-        self._stage_export_active = False
-        self._start_pending_stage_exports()
-
     def _open_data_management(self) -> None:
         source_path = self._current_project_file()
         if source_path is None:
@@ -7764,6 +8135,7 @@ class DashboardWindow(QMainWindow):
             source_path=source_path,
             project_name=self._project.currentText(),
             phase_name=self._stage.currentText(),
+            measurement_kind=("live" if self._run_mode is RunMode.HARDWARE else "simulation"),
             data_root=self._data_directory,
             synchronizer=self._nas_sync,
             settings=self._user_settings,
@@ -7788,6 +8160,20 @@ class DashboardWindow(QMainWindow):
     def _measurement_tab_changed(self, index: int) -> None:
         if self._measurement_tabs.widget(index) is self._history_view:
             self._refresh_measurement_history()
+
+    def _disable_live_plot_follow(self, *_args: object) -> None:
+        self._follow_live_plot_button.setChecked(False)
+
+    def _live_plot_follow_toggled(self, enabled: bool) -> None:
+        if enabled:
+            self._show_complete_live_plot_range()
+
+    def _show_complete_live_plot_range(self) -> None:
+        if self._measurement_time_origin is None or not self._times:
+            return
+        latest = max(1.0, self._times[-1] - self._measurement_time_origin)
+        self._plot.setXRange(0.0, latest, padding=0.0)
+        self._flow_plot.setXRange(0.0, latest, padding=0.0)
 
     def _open_calibration_settings(self) -> None:
         self._open_settings_hub("calibration")
@@ -7847,7 +8233,8 @@ class DashboardWindow(QMainWindow):
             "delta_calibration": (
                 f"{delta[0]:g}–{delta[1]:g} V → {delta[2]:.3f}–{delta[3]:.3f} bar"
             ),
-            "max_pump": f"{self._max_pump.value():.3f} bar",
+            "max_jacket": f"{self._max_jacket.value():.3f} bar",
+            "max_injection": f"{self._max_injection.value():.3f} bar",
             "max_line": f"{self._max_line.value():.3f} bar",
             "max_delta": f"{self._max_delta.value():.3f} bar",
             "minimum_margin": f"{self._minimum_margin.value():.3f} bar",
@@ -8010,26 +8397,54 @@ class DashboardWindow(QMainWindow):
             if delta_enabled and snapshot.differential_pressure_bar is not None
             else "Nincs hozzáadva"
         )
-        self._set_connection_status(
-            "line_daq",
-            "KAPCSOLÓDVA — ÉLŐ" if line_enabled else "NINCS HOZZÁADVA",
-            True if line_enabled else None,
-        )
-        self._set_connection_status(
-            "delta_daq",
-            "KAPCSOLÓDVA — ÉLŐ" if delta_enabled else "NINCS HOZZÁADVA",
-            True if delta_enabled else None,
-        )
+        if line_enabled:
+            self._set_line_pressure_connection(snapshot)
+        else:
+            self._set_connection_status("line_daq", "NINCS HOZZÁADVA", None)
+        if delta_enabled:
+            self._set_differential_pressure_connection(snapshot)
+        else:
+            self._set_connection_status("delta_daq", "NINCS HOZZÁADVA", None)
         self._set_connection_status(
             "valve",
             "KAPCSOLÓDVA — SAFE" if valve_enabled else "NINCS HOZZÁADVA",
             True if valve_enabled else None,
         )
-        self._valve_label.setText("SAFE — mérés nem fut" if valve_enabled else "Nincs hozzáadva")
+        self._valve_label.setText(
+            self._format_valve_output(None, self._safe_valve_voltage())
+            if valve_enabled
+            else "Nincs hozzáadva"
+        )
         margin = snapshot.jacket_pump.pressure_bar - snapshot.injection_pump.pressure_bar
         self._pressure_margin_label.setText(format_dashboard_pressure(margin))
         self._pressure_margin_label.setStyleSheet(
             "background:transparent;font-size:20px;font-weight:700;color:#66788a"
+        )
+
+    def _set_line_pressure_connection(self, snapshot: MeasurementSnapshot) -> None:
+        quality = snapshot.line_pressure_quality
+        age = snapshot.line_pressure_sample_age_seconds
+        age_text = "" if age is None else f" | kor: {age:.3f} s"
+        reason = snapshot.line_pressure_quality_reason
+        reason_text = "" if not reason else f" | {reason}"
+        self._set_connection_status(
+            "line_daq",
+            f"{quality.value.upper()}{age_text}{reason_text}",
+            quality is DataQuality.GOOD,
+        )
+
+    def _set_differential_pressure_connection(
+        self, snapshot: MeasurementSnapshot
+    ) -> None:
+        quality = snapshot.differential_pressure_quality
+        age = snapshot.differential_pressure_sample_age_seconds
+        age_text = "" if age is None else f" | kor: {age:.3f} s"
+        reason = snapshot.differential_pressure_quality_reason
+        reason_text = "" if not reason else f" | {reason}"
+        self._set_connection_status(
+            "delta_daq",
+            f"{quality.value.upper()}{age_text}{reason_text}",
+            quality is DataQuality.GOOD,
         )
 
     def _open_logging_settings(self) -> None:
@@ -8111,8 +8526,8 @@ class DashboardWindow(QMainWindow):
     def _configure_control_tooltips(self) -> None:
         self._stage_control_tooltip = (
             "Az aktív mérési szakaszt választja ki. Leállított mérésnél a "
-            "következő mérés szakasza változik. Futás közbeni váltás új "
-            "szakaszfájlt nyit, és az előző szakaszt lezárja, majd exportálja."
+            "következő mérés szakasza változik. Futó vagy szüneteltetett "
+            "mérés közben a szakasz nem módosítható."
         )
         tooltips: tuple[tuple[QWidget, str], ...] = (
             (
@@ -8160,83 +8575,82 @@ class DashboardWindow(QMainWindow):
             ),
             (
                 self._pid_profile,
-                "Mentett PID-profilt választ. A profil kiválasztása betölti és "
-                "azonnal alkalmazza a tárolt Kp, Ki, Kd, hatásirány, kimeneti "
-                "határok és nyomásforrás értékeit. Az Egyéni beállítások nem tölt "
-                "be profilt.",
+                "Mentett PID-profilt választ. A profil kiválasztása betölti a tárolt "
+                "értékeket; azok csak a PID beállítások alkalmazása gombbal lépnek "
+                "életbe. Az Egyéni beállítások nem tölt be profilt.",
             ),
             (
                 self._kp,
                 "Arányos erősítés: a pillanatnyi nyomáshiba közvetlen hatása a "
                 "szelepkimenetre. Nagyobb érték erősebb reakciót okoz. Futó "
-                "mérésnél automatikusan, a következő vezérlési ciklusban lép életbe.",
+                "mérésnél az Alkalmaz gomb után, a következő ciklusban lép életbe.",
             ),
             (
                 self._ki,
                 "Integráló erősítés: a tartós nyomáshibát időben összegzi. Nagyobb "
                 "érték gyorsabban szünteti meg a maradó hibát, de lengést okozhat. "
-                "Futó mérésnél automatikusan frissül.",
+                "Az új érték az Alkalmaz gomb megnyomása után lép életbe.",
             ),
             (
                 self._kd,
                 "Deriváló erősítés: a nyomás változási sebességére reagál, és "
                 "csillapíthatja a gyors változásokat. Zajos jelre érzékeny. Futó "
-                "mérésnél automatikusan frissül.",
+                "mérésnél is csak az Alkalmaz gomb után frissül.",
             ),
             (
                 self._direction,
                 "A PID hatásiránya. Fordított módban a nagyobb szelepnyitás "
                 "csökkenti a nyomást; ez a rendszer alapértelmezett fizikai "
-                "modellje. Futó mérésnél automatikusan frissül; hardveren az irány "
+                "modellje. Az Alkalmaz gombbal frissül; hardveren az irány "
                 "fizikai validálása továbbra is kötelező.",
             ),
             (
                 self._output_min,
                 "A PID által kiadható legkisebb szelepérték. A PID nem vezérel e "
-                "százalék alá. Futó mérésnél automatikusan frissül; a módosítás "
+                "százalék alá. Az Alkalmaz gombbal frissül; a módosítás "
                 "korlátozhatja a szabályozási tartományt.",
             ),
             (
                 self._output_max,
                 "A PID által kiadható legnagyobb szelepérték. A PID nem vezérel e "
-                "százalék fölé. Futó mérésnél automatikusan frissül; a módosítás "
+                "százalék fölé. Az Alkalmaz gombbal frissül; a módosítás "
                 "korlátozhatja a szabályozási tartományt.",
             ),
             (
                 self._pid_deadband,
                 "Nyomásholtsáv a célérték körül. Ezen belül a PID megtartja az "
                 "előző szelepkimenetet. Nagyobb érték kevesebb mozgást, de nagyobb "
-                "megengedett eltérést eredményez. Futó mérésnél automatikusan frissül.",
+                "megengedett eltérést eredményez. Az Alkalmaz gombbal frissül.",
             ),
             (
                 self._pid_output_rate,
                 "A szelepkimenet megengedett legnagyobb változási sebessége. "
                 "Kisebb érték lassabb és kíméletesebb szelepmozgást ad. Futó "
-                "mérésnél automatikusan frissül.",
+                "mérésnél is csak az Alkalmaz gomb után frissül.",
             ),
             (
                 self._pid_filter_alpha,
                 "A PID nyomásszűrőjének súlya. 1,0 esetén nincs simítás; kisebb "
                 "érték erősebben simít, de késlelteti a reakciót. Futó mérésnél "
-                "automatikusan frissül.",
+                "is csak az Alkalmaz gomb után frissül.",
             ),
             (
                 self._pid_reversal_interval,
                 "Két ellentétes irányú szelepkorrekció közötti minimális idő. "
                 "Növelése csökkenti a gyors irányváltásokat. Futó mérésnél "
-                "automatikusan frissül.",
+                "is csak az Alkalmaz gomb után frissül.",
             ),
             (
                 self._pid_reversal_deadband,
                 "Az ennél kisebb ellenirányú szelepkorrekciót a vezérlés elnyomja. "
                 "Növelése mérsékli az apró oda-vissza mozgásokat. Futó mérésnél "
-                "automatikusan frissül.",
+                "is csak az Alkalmaz gomb után frissül.",
             ),
             (
                 self._pid_max_reversals,
                 "Tíz másodpercen belül megengedett maximális szelepkorrekció-"
                 "irányváltások száma. Túllépése VALVE_OSCILLATION hibát és SAFE "
-                "állapotot vált ki. Futó mérésnél automatikusan frissül.",
+                "állapotot vált ki. Az új érték az Alkalmaz gombbal frissül.",
             ),
         )
         for field, tooltip in tooltips:
@@ -8606,9 +9020,13 @@ class DashboardWindow(QMainWindow):
             raise
 
         daq = NidaqmxDataAcquisition(
-            NidaqmxBackend(hardware.ni_terminal_configuration),
+            NidaqmxBackend(
+                hardware.ni_terminal_configuration,
+                hardware.analog_sample_rate_hz,
+            ),
             hardware.ni_config(),
             self._diagnostics,
+            hardware.analog_diagnostic_interval_seconds,
         )
         if hardware.valve_output_enabled:
             daq.authorize_output(NidaqmxDataAcquisition.HARDWARE_CONFIRMATION)
@@ -8626,7 +9044,8 @@ class DashboardWindow(QMainWindow):
             differential_calibration=LinearCalibration(*self._delta_calibration_values()),
             safety_monitor=SafetyMonitor(
                 SafetyLimits(
-                    self._max_pump.value(),
+                    self._max_jacket.value(),
+                    self._max_injection.value(),
                     self._max_delta.value(),
                     self._minimum_margin.value(),
                     self._max_line.value(),
@@ -8639,6 +9058,7 @@ class DashboardWindow(QMainWindow):
                     "differential_pressure" if hardware.differential_pressure_enabled else None
                 ),
             ),
+            analog_filter_config=hardware.analog_filter_config(),
             persistence_enabled=False,
         )
         direct_loop = ControlLoop(
@@ -8654,7 +9074,11 @@ class DashboardWindow(QMainWindow):
             manual_safety_check=lambda role, status: (
                 ManualSafetyMonitor.evaluate_pump(
                     status,
-                    maximum_pressure_bar=self._max_pump.value(),
+                    maximum_pressure_bar=(
+                        self._max_jacket.value()
+                        if role is PumpRole.JACKET
+                        else self._max_injection.value()
+                    ),
                 ).reasons
             ),
             enforce_injection_margin=False,
@@ -8932,9 +9356,13 @@ class DashboardWindow(QMainWindow):
             jacket.disconnect()
             raise
         daq = NidaqmxDataAcquisition(
-            NidaqmxBackend(configuration.ni_terminal_configuration),
+            NidaqmxBackend(
+                configuration.ni_terminal_configuration,
+                configuration.analog_sample_rate_hz,
+            ),
             configuration.ni_config(),
             self._diagnostics,
+            configuration.analog_diagnostic_interval_seconds,
         )
         actuator = AnalogValveActuator(
             daq,
@@ -8951,7 +9379,8 @@ class DashboardWindow(QMainWindow):
             differential_calibration=LinearCalibration(*self._delta_calibration_values()),
             safety_monitor=SafetyMonitor(
                 SafetyLimits(
-                    self._max_pump.value(),
+                    self._max_jacket.value(),
+                    self._max_injection.value(),
                     self._max_delta.value(),
                     self._minimum_margin.value(),
                     self._max_line.value(),
@@ -8964,6 +9393,7 @@ class DashboardWindow(QMainWindow):
                     "differential_pressure" if configuration.differential_pressure_enabled else None
                 ),
             ),
+            analog_filter_config=configuration.analog_filter_config(),
         )
         controller = ValveController(PidController(self._pid_parameters()))
         new_loop = ControlLoop(measurement=measurement, controller=controller, actuator=actuator)
@@ -8988,7 +9418,11 @@ class DashboardWindow(QMainWindow):
             manual_safety_check=lambda role, status: (
                 ManualSafetyMonitor.evaluate_pump(
                     status,
-                    maximum_pressure_bar=self._max_pump.value(),
+                    maximum_pressure_bar=(
+                        self._max_jacket.value()
+                        if role is PumpRole.JACKET
+                        else self._max_injection.value()
+                    ),
                 ).reasons
             ),
             enforce_injection_margin=True,
@@ -9093,7 +9527,8 @@ class DashboardWindow(QMainWindow):
             differential_calibration=LinearCalibration(*self._delta_calibration_values()),
             safety_monitor=SafetyMonitor(
                 SafetyLimits(
-                    self._max_pump.value(),
+                    self._max_jacket.value(),
+                    self._max_injection.value(),
                     self._max_delta.value(),
                     self._minimum_margin.value(),
                     self._max_line.value(),
@@ -9205,20 +9640,12 @@ class DashboardWindow(QMainWindow):
                 if index >= 0:
                     combo.setCurrentIndex(index)
 
-        if self._user_settings.value("safety/max_pump") is None:
-            legacy_limits: list[float] = []
-            for legacy_key in ("safety/max_jacket", "safety/max_injection"):
-                try:
-                    value = float(str(self._user_settings.value(legacy_key, "")))
-                except (TypeError, ValueError):
-                    continue
-                if isfinite(value) and value > 0.0:
-                    legacy_limits.append(value)
-            if legacy_limits:
-                self._user_settings.setValue("safety/max_pump", min(legacy_limits))
+        common_limit = self._user_settings.value("safety/max_pump")
+        for key in ("safety/max_jacket", "safety/max_injection"):
+            if self._user_settings.value(key) is None and common_limit is not None:
+                self._user_settings.setValue(key, common_limit)
         for obsolete_key in (
-            "safety/max_jacket",
-            "safety/max_injection",
+            "safety/max_pump",
             "safety/max_overshoot",
             "pump_startup/jacket_pressure_limit_bar",
             "pump_startup/injection_pressure_limit_bar",
@@ -9248,7 +9675,8 @@ class DashboardWindow(QMainWindow):
             (self._delta_voltage_max, "calibration/delta_voltage_max"),
             (self._delta_value_min, "calibration/delta_value_min"),
             (self._delta_value_max, "calibration/delta_value_max"),
-            (self._max_pump, "safety/max_pump"),
+            (self._max_jacket, "safety/max_jacket"),
+            (self._max_injection, "safety/max_injection"),
             (self._max_delta, "safety/max_delta"),
             (self._max_line, "safety/max_line"),
             (self._minimum_margin, "safety/minimum_margin"),
@@ -9318,7 +9746,8 @@ class DashboardWindow(QMainWindow):
             "calibration/delta_voltage_max": self._delta_voltage_max.value(),
             "calibration/delta_value_min": self._delta_value_min.value(),
             "calibration/delta_value_max": self._delta_value_max.value(),
-            "safety/max_pump": self._max_pump.value(),
+            "safety/max_jacket": self._max_jacket.value(),
+            "safety/max_injection": self._max_injection.value(),
             "safety/max_delta": self._max_delta.value(),
             "safety/max_line": self._max_line.value(),
             "safety/minimum_margin": self._minimum_margin.value(),
@@ -9487,12 +9916,20 @@ class DashboardWindow(QMainWindow):
             self._stage.setCurrentIndex(0)
         self._stage.insertSeparator(self._stage.count())
         self._stage.addItem("+ Új szakasz hozzáadása…", ADD_STAGE_ACTION_DATA)
-        self._stage.setEnabled(True)
+        self._stage.setEnabled(self._devices.status.state is not ApplicationState.RUNNING)
         self._stage.blockSignals(False)
         self._stage_changed()
 
     def _stage_changed(self, *_args: object) -> None:
         stage_id = self._stage.currentData()
+        if self._devices.status.state is ApplicationState.RUNNING:
+            previous_index = self._stage.findData(self._last_selected_stage_id)
+            if previous_index >= 0 and self._stage.currentIndex() != previous_index:
+                self._stage.blockSignals(True)
+                self._stage.setCurrentIndex(previous_index)
+                self._stage.blockSignals(False)
+            self._stage.setEnabled(False)
+            return
         if stage_id == ADD_STAGE_ACTION_DATA:
             previous_index = self._stage.findData(self._last_selected_stage_id)
             if previous_index < 0:
@@ -9506,7 +9943,6 @@ class DashboardWindow(QMainWindow):
         if isinstance(stage_id, int):
             self._last_selected_stage_id = stage_id
             self._current_project_file()
-            self._start_pending_stage_exports()
             stage = self._projects.get_stage(stage_id)
             details: list[str] = []
             if stage.fluid:
@@ -9708,8 +10144,11 @@ class DashboardWindow(QMainWindow):
             self._source.setCurrentIndex(source_index)
         finally:
             self._loading_pid_profile = False
-        self._apply_pid()
-        self._update_runtime_settings()
+        self._apply_pid_button.setEnabled(True)
+        self._pid_application_status.setText(
+            "A profil betöltve, de még nincs alkalmazva. Az aktív szabályozás változatlan."
+        )
+        self._pid_application_status.setStyleSheet("color:#9a6700;font-weight:700")
         self._save_user_settings()
 
     def _pid_values_changed(self, *_args: object) -> None:
@@ -9720,12 +10159,11 @@ class DashboardWindow(QMainWindow):
             self._pid_profile.setCurrentIndex(0)
             self._pid_profile.blockSignals(False)
             self._delete_pid_profile_button.setEnabled(False)
-        if self._runtime.running:
-            self._pid_application_status.setText(
-                "PID-frissítés előkészítve a következő vezérlési ciklushoz…"
-            )
-            self._pid_application_status.setStyleSheet("color:#9a6700;font-weight:700")
-            self._pid_live_update_timer.start()
+        self._apply_pid_button.setEnabled(True)
+        self._pid_application_status.setText(
+            "Nem alkalmazott PID-módosítások. Az aktív szabályozás változatlan."
+        )
+        self._pid_application_status.setStyleSheet("color:#9a6700;font-weight:700")
 
     def _save_pid_profile(self, _checked: bool = False, *, profile_name: str | None = None) -> None:
         del _checked
@@ -9802,6 +10240,7 @@ class DashboardWindow(QMainWindow):
             self._show_error(str(error))
             return
         if self._runtime.running:
+            self._update_runtime_settings()
             self._runtime.update_pid(parameters)
             message = "PID-frissítés sorba állítva a következő vezérlési ciklushoz."
         else:
@@ -9809,34 +10248,7 @@ class DashboardWindow(QMainWindow):
             message = "PID-beállítások alkalmazva; a következő mérés ezt használja."
         self._pid_application_status.setText(message)
         self._pid_application_status.setStyleSheet("color:#1b7f3a;font-weight:700")
-
-    def _apply_live_pid_update(self) -> None:
-        try:
-            parameters = self._pid_parameters()
-        except ValueError as error:
-            self._pid_application_status.setText(
-                "Az érvénytelen átmeneti érték nem került alkalmazásra; az előző "
-                f"PID maradt aktív. Részlet: {error}"
-            )
-            self._pid_application_status.setStyleSheet("color:#b00020;font-weight:700")
-            return
-        if not self._runtime.running:
-            self._pid_application_status.setText(
-                "A mérés leállt; a módosítás a következő indításkor lép életbe."
-            )
-            self._pid_application_status.setStyleSheet("color:#66788a;font-weight:700")
-            return
-        self._runtime.update_pid(parameters)
-        self._pid_application_status.setText(
-            "PID-frissítés sorba állítva; a következő vezérlési ciklus alkalmazza."
-        )
-        self._pid_application_status.setStyleSheet("color:#1b7f3a;font-weight:700")
-        self._diagnostics.emit(
-            DiagnosticCategory.RUNTIME,
-            "PID_LIVE_UPDATE",
-            "live PID parameters queued for next control cycle",
-            level="WARNING" if self._run_mode is RunMode.HARDWARE else "INFO",
-        )
+        self._apply_pid_button.setEnabled(False)
 
     def _pid_parameters(self) -> PidParameters:
         return PidParameters(
@@ -9863,7 +10275,8 @@ class DashboardWindow(QMainWindow):
                 line_calibration=LinearCalibration(*self._line_calibration_values()),
                 differential_calibration=LinearCalibration(*self._delta_calibration_values()),
                 safety_limits=SafetyLimits(
-                    self._max_pump.value(),
+                    self._max_jacket.value(),
+                    self._max_injection.value(),
                     self._max_delta.value(),
                     self._minimum_margin.value(),
                     self._max_line.value(),
@@ -9876,10 +10289,11 @@ class DashboardWindow(QMainWindow):
             return False
         return True
 
-    def _apply_common_pressure_limit(
+    def _apply_pressure_limits(
         self,
         dialog: CalibrationSettingsDialog,
-        pressure_bar: float,
+        jacket_pressure_bar: float,
+        injection_pressure_bar: float,
     ) -> None:
         pump_control = self._pump_control
         if pump_control is None:
@@ -9894,11 +10308,17 @@ class DashboardWindow(QMainWindow):
 
         def execute() -> None:
             try:
-                pump_control.apply_common_pressure_limit(pressure_bar)
+                pump_control.apply_pressure_limits(
+                    jacket_pressure_bar,
+                    injection_pressure_bar,
+                )
             except Exception as error:
                 self._runtime_bridge.pressure_limit_apply_failed.emit(str(error))
             else:
-                self._runtime_bridge.pressure_limit_apply_completed.emit(pressure_bar)
+                self._runtime_bridge.pressure_limit_apply_completed.emit(
+                    jacket_pressure_bar,
+                    injection_pressure_bar,
+                )
 
         Thread(target=execute, name="eor-maxpress-apply", daemon=True).start()
 
@@ -9909,23 +10329,29 @@ class DashboardWindow(QMainWindow):
         if dialog is not None:
             dialog._buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(True)
 
-    def _pressure_limit_apply_completed(self, pressure_bar: float) -> None:
+    def _pressure_limit_apply_completed(
+        self,
+        jacket_pressure_bar: float,
+        injection_pressure_bar: float,
+    ) -> None:
         self._finish_pressure_limit_apply()
         self._diagnostics.emit(
             DiagnosticCategory.SYSTEM,
             "MAXPRESS_APPLIED",
-            f"common MAXPRESS applied to both pumps: {pressure_bar}",
+            "separate MAXPRESS limits applied: "
+            f"jacket={jacket_pressure_bar}; injection={injection_pressure_bar}",
         )
         self._show_information(
             "MAXPRESS alkalmazva",
-            f"A {pressure_bar:.3f} bar MAXPRESS parancsot mindkét pumpa megkapta.",
+            f"Köpeny MAXPRESS: {jacket_pressure_bar:.3f} bar\n"
+            f"Besajtoló MAXPRESS: {injection_pressure_bar:.3f} bar",
         )
 
     def _pressure_limit_apply_failed(self, message: str) -> None:
         self._finish_pressure_limit_apply()
         if self._run_mode is RunMode.HARDWARE:
             self._handle_critical_hardware_fault(
-                f"a közös MAXPRESS alkalmazása sikertelen: {message}"
+                f"a pumpánkénti MAXPRESS alkalmazása sikertelen: {message}"
             )
             return
         self._show_error(f"A MAXPRESS alkalmazása sikertelen: {message}")
@@ -10151,7 +10577,8 @@ class DashboardWindow(QMainWindow):
         if self._run_mode in (RunMode.HARDWARE, RunMode.SIMULATION):
             dialog = MeasurementPumpStartupDialog(
                 self._default_measurement_pump_plan(),
-                maximum_pump_pressure_bar=self._max_pump.value(),
+                maximum_jacket_pressure_bar=self._max_jacket.value(),
+                maximum_injection_pressure_bar=self._max_injection.value(),
                 parent=self,
             )
             self._preflight_active = True
@@ -10245,8 +10672,10 @@ class DashboardWindow(QMainWindow):
         self._injection_pressures.clear()
         self._injection_flows.clear()
         self._line_pressures.clear()
+        self._differential_pressures.clear()
         self._alarm_points.clear()
         self._alarm_scatter.setData([])
+        self._follow_live_plot_button.setChecked(True)
         self._runtime.start(settings)
         # RUNNING is the terminal state of startup: the acquisition/control
         # worker must be active before the public measurement state advances.
@@ -10333,13 +10762,14 @@ class DashboardWindow(QMainWindow):
         self._preflight_active = True
         self._refresh_state()
         try:
+            settings = self._runtime_settings()
             readiness = self._control_loop.observe_once(active_stage=self._stage.currentText())
             if readiness.safety_reasons:
                 raise PermissionError(
                     "a friss PID-bemenet biztonsági hibás: " + "; ".join(readiness.safety_reasons)
                 )
             if (
-                PressureSource(self._source.currentData()) is PressureSource.LINE_SENSOR
+                settings.source is PressureSource.LINE_SENSOR
                 and readiness.snapshot.line_pressure_bar is None
             ):
                 raise ValueError("a kiválasztott vonali PID-forrás nem elérhető")
@@ -10347,10 +10777,11 @@ class DashboardWindow(QMainWindow):
             # preserves the configured rate/output limits and prevents startup
             # windup while the operator dialog is open.
             self._control_loop.configure_pid(self._pid_parameters())
+            self._control_loop.begin_measurement(settings.mode)
             # Measurement start owns only valve control and acquisition. Pump
             # state is the result of preparation or explicit manual operation;
             # do not issue STOP/FLOW/RUN here.
-            self._complete_measurement_start(self._runtime_settings())
+            self._complete_measurement_start(settings)
         except Exception as error:
             if self._run_mode is RunMode.HARDWARE:
                 self._handle_critical_hardware_fault(
@@ -10459,11 +10890,11 @@ class DashboardWindow(QMainWindow):
 
         default_jacket_pressure = min(
             self._setpoint.value() + self._minimum_margin.value(),
-            self._max_pump.value(),
+            self._max_jacket.value(),
         )
         default_injection_pressure = min(
             self._setpoint.value(),
-            self._max_pump.value(),
+            self._max_injection.value(),
         )
         return MeasurementPumpPlan(
             jacket_target_pressure_bar=stored_float(
@@ -10489,7 +10920,8 @@ class DashboardWindow(QMainWindow):
                 "pump_startup/injection_measurement_flow_ml_per_hour",
                 stage_flow,
             ),
-            pressure_limit_bar=self._max_pump.value(),
+            jacket_pressure_limit_bar=self._max_jacket.value(),
+            injection_pressure_limit_bar=self._max_injection.value(),
             minimum_jacket_margin_bar=self._minimum_margin.value(),
             margin_stability_seconds=stored_float(
                 "pump_startup/margin_stability_seconds",
@@ -10640,7 +11072,8 @@ class DashboardWindow(QMainWindow):
             LinearCalibration(*self._line_calibration_values())
             LinearCalibration(*self._delta_calibration_values())
             SafetyLimits(
-                self._max_pump.value(),
+                self._max_jacket.value(),
+                self._max_injection.value(),
                 self._max_delta.value(),
                 self._minimum_margin.value(),
                 self._max_line.value(),
@@ -10802,7 +11235,6 @@ class DashboardWindow(QMainWindow):
                 self._devices.status.fault_reason or "a mérés biztonságos leállítása sikertelen"
             )
             return
-        self._start_pending_stage_exports()
         self._pending_measurement_pump_plan = None
         self._preflight_active = False
         self._reset_measurement_dashboard()
@@ -10823,6 +11255,7 @@ class DashboardWindow(QMainWindow):
     def _reset_measurement_dashboard(self) -> None:
         self._measurement_time_origin = None
         self._last_cycle_result = None
+        self._follow_live_plot_button.setChecked(True)
         self._times.clear()
         self._jacket_pressures.clear()
         self._injection_pressures.clear()
@@ -10834,6 +11267,7 @@ class DashboardWindow(QMainWindow):
             self._jacket_curve,
             self._injection_curve,
             self._line_curve,
+            self._differential_curve,
             self._flow_curve,
         ):
             curve.setData([], [])
@@ -10862,7 +11296,6 @@ class DashboardWindow(QMainWindow):
             self._handle_critical_hardware_fault("kézi vészleállítás")
         else:
             self._devices.emergency_stop()
-            self._start_pending_stage_exports()
             self._refresh_state()
 
     def _handle_cycle(self, result: object) -> None:
@@ -10897,8 +11330,8 @@ class DashboardWindow(QMainWindow):
             )
         self._set_connection("jacket", snapshot.jacket_pump.connected)
         self._set_connection("injection", snapshot.injection_pump.connected)
-        self._set_connection("line_daq", True)
-        self._set_connection("delta_daq", True)
+        self._set_line_pressure_connection(snapshot)
+        self._set_differential_pressure_connection(snapshot)
         self._set_connection("valve", result.command.enabled)
         self._jacket_label.setText(format_dashboard_pressure(snapshot.jacket_pump.pressure_bar))
         self._injection_label.setText(
@@ -10935,7 +11368,14 @@ class DashboardWindow(QMainWindow):
             "background:transparent;font-size:20px;font-weight:700;color:#66788a"
         )
         output = result.command.output_percent
-        self._valve_label.setText("SAFE" if output is None else f"{output:.1f} %")
+        self._valve_label.setText(
+            self._format_valve_output(
+                output,
+                self._safe_valve_voltage()
+                if output is None
+                else result.valve_voltage,
+            )
+        )
         if (
             self._measurement_time_origin is None
             or snapshot.monotonic_seconds < self._measurement_time_origin
@@ -10948,16 +11388,20 @@ class DashboardWindow(QMainWindow):
         self._line_pressures.append(
             float("nan") if snapshot.line_pressure_bar is None else snapshot.line_pressure_bar
         )
+        self._differential_pressures.append(
+            float("nan")
+            if snapshot.differential_pressure_bar is None
+            else snapshot.differential_pressure_bar
+        )
         elapsed_times = [value - self._measurement_time_origin for value in self._times]
         self._jacket_curve.setData(elapsed_times, list(self._jacket_pressures))
         self._injection_curve.setData(elapsed_times, list(self._injection_pressures))
         self._line_curve.setData(elapsed_times, list(self._line_pressures))
+        self._differential_curve.setData(elapsed_times, list(self._differential_pressures))
         self._flow_curve.setData(elapsed_times, list(self._injection_flows))
         latest = elapsed_times[-1]
-        x_minimum = max(0.0, latest - 600.0)
-        x_maximum = max(1.0, latest)
-        self._plot.setXRange(x_minimum, x_maximum, padding=0.0)
-        self._flow_plot.setXRange(x_minimum, x_maximum, padding=0.0)
+        if self._follow_live_plot_button.isChecked():
+            self._show_complete_live_plot_range()
         if result.record.safety_reasons:
             reason = "; ".join(result.record.safety_reasons)
             safety_rule = (
@@ -11013,7 +11457,8 @@ class DashboardWindow(QMainWindow):
                     "injection_pressure_bar": snapshot.injection_pump.pressure_bar,
                     "line_pressure_bar": snapshot.line_pressure_bar,
                     "differential_pressure_bar": snapshot.differential_pressure_bar,
-                    "pump_pressure_limit_bar": self._max_pump.value(),
+                    "jacket_pressure_limit_bar": self._max_jacket.value(),
+                    "injection_pressure_limit_bar": self._max_injection.value(),
                     "line_pressure_limit_bar": self._max_line.value(),
                     "differential_pressure_limit_bar": self._max_delta.value(),
                 },
@@ -11029,7 +11474,6 @@ class DashboardWindow(QMainWindow):
             if self._devices.status.state is not ApplicationState.FAULT:
                 self._devices.emergency_stop(f"simulation safety interlock: {coded_reason}")
             self._measurement_writer.complete_current_phase()
-            self._start_pending_stage_exports()
             self._set_all_connections("HIBA", ok=False)
             self._refresh_state()
         elif snapshot.quality is not DataQuality.GOOD:
@@ -11230,7 +11674,6 @@ class DashboardWindow(QMainWindow):
         if self._devices.status.state is not ApplicationState.FAULT:
             self._devices.emergency_stop(f"control runtime failed: {message}")
         self._measurement_writer.complete_current_phase()
-        self._start_pending_stage_exports()
         self._set_all_connections("HIBA", ok=False)
         self._refresh_state()
 
@@ -11276,7 +11719,6 @@ class DashboardWindow(QMainWindow):
             except Exception as error:
                 release_errors.append(f"hardvermód eldobása: {error}")
                 self._remember_run_mode(RunMode.HARDWARE)
-            self._start_pending_stage_exports()
             self._set_all_connections("LEVÁLASZTVA — KRITIKUS HIBA", ok=False)
             details = (
                 "\n\nA portlezárás közben észlelt további hibák:\n- " + "\n- ".join(release_errors)
@@ -11319,7 +11761,6 @@ class DashboardWindow(QMainWindow):
                     errors.append(f"biztonsági leállítás: {error}")
             if self._pump_control is not None:
                 self._pump_control.observe_safe_stop()
-            self._start_pending_stage_exports()
             self._set_all_connections("VÉSZLEÁLLÍTÁS — RETESZELVE", ok=False)
             details = "" if not errors else "\n- " + "\n- ".join(errors)
             self._show_error(
@@ -11376,7 +11817,9 @@ class DashboardWindow(QMainWindow):
         if state is ApplicationState.RUNNING:
             result = self._last_cycle_result
             if result is None:
-                self._valve_label.setText("SAFE — indítás folyamatban")
+                self._valve_label.setText(
+                    f"SAFE | {self._safe_valve_voltage():.3f} V — indítás folyamatban"
+                )
                 status = (
                     "SZIMULÁCIÓ — SAFE"
                     if self._run_mode is RunMode.SIMULATION
@@ -11386,10 +11829,14 @@ class DashboardWindow(QMainWindow):
                 return
             output = result.command.output_percent
             if not result.command.enabled or output is None:
-                self._valve_label.setText("SAFE — biztonsági tiltás")
+                self._valve_label.setText(
+                    f"SAFE | {self._safe_valve_voltage():.3f} V — biztonsági tiltás"
+                )
                 self._set_connection_status("valve", "BIZTONSÁGI TILTÁS — SAFE", True)
                 return
-            self._valve_label.setText(f"{output:.1f} %")
+            self._valve_label.setText(
+                self._format_valve_output(output, result.valve_voltage)
+            )
             status = (
                 "SZIMULÁCIÓ — AKTÍV"
                 if self._run_mode is RunMode.SIMULATION
@@ -11399,7 +11846,9 @@ class DashboardWindow(QMainWindow):
             return
 
         if state is ApplicationState.READY:
-            self._valve_label.setText("SAFE — mérés nem fut")
+            self._valve_label.setText(
+                self._format_valve_output(None, self._safe_valve_voltage())
+            )
             status = (
                 "SZIMULÁCIÓ — SAFE"
                 if self._run_mode is RunMode.SIMULATION
@@ -11410,6 +11859,34 @@ class DashboardWindow(QMainWindow):
 
         self._valve_label.setText("NINCS KIMENET — leválasztva")
         self._set_connection_status("valve", "LEVÁLASZTVA", None)
+
+    def _safe_valve_voltage(self) -> float:
+        configuration = self._active_hardware_configuration
+        if configuration is not None:
+            return configuration.safe_output_voltage
+        return 1.0
+
+    def _valve_voltage_for_percent(self, output_percent: float) -> float:
+        configuration = self._active_hardware_configuration
+        zero = 1.0 if configuration is None else configuration.valve_zero_percent_voltage
+        hundred = (
+            5.0
+            if configuration is None
+            else configuration.valve_hundred_percent_voltage
+        )
+        return zero + (hundred - zero) * output_percent / 100.0
+
+    def _format_valve_output(
+        self, output_percent: float | None, voltage: float | None
+    ) -> str:
+        if output_percent is None:
+            return "SAFE" if voltage is None else f"SAFE | {voltage:.3f} V"
+        effective_voltage = (
+            self._valve_voltage_for_percent(output_percent)
+            if voltage is None
+            else voltage
+        )
+        return f"{output_percent:.1f} % | {effective_voltage:.3f} V"
 
     def _refresh_state(self) -> None:
         device_status = self._devices.status
@@ -11540,7 +12017,7 @@ class DashboardWindow(QMainWindow):
             field.setEnabled(not measurement_active or live_editing_available)
         self._stage.setEnabled(
             isinstance(self._project.currentData(), int)
-            and (not measurement_active or live_editing_available)
+            and not measurement_active
         )
 
         # This value has a supervised physical apply path, but no simulation-side
@@ -11721,10 +12198,6 @@ class DashboardWindow(QMainWindow):
         ):
             self._devices.stop()
         self._measurement_writer.complete_current_phase()
-        self._start_pending_stage_exports()
-        export_thread = self._stage_export_thread
-        if export_thread is not None and export_thread.is_alive():
-            export_thread.join(timeout=30.0)
         if self._devices.status.state is not ApplicationState.IDLE:
             self._devices.disconnect()
         if self._pump_control is not None:
@@ -11752,7 +12225,7 @@ def build_simulated_dashboard(
     daq = SimulatedDataAcquisition()
     daq.inputs.update(line_pressure=2.0, differential_pressure=1.5)
     valve = SimulatedValveActuator()
-    safety = SafetyMonitor(SafetyLimits(350.0, 50.0))
+    safety = SafetyMonitor(SafetyLimits(350.0, 350.0, 50.0))
     queue = NasSyncQueue(data_path.parent / "nas_sync_queue.sqlite3")
     nas_sync = BackgroundNasSynchronizer(queue)
     writer = ProjectMeasurementWriter(data_path.parent, nas_sync, measurement_kind="simulation")

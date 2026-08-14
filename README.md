@@ -48,14 +48,13 @@ A jelenlegi belépési pont szimulátoros PySide6 dashboardot indít. Hardvermó
 maga a sikeres módaktiválás hozza létre és tartja fenn az élő eszközkapcsolatot;
 külön Csatlakozás/Leválasztás kezelői gomb nincs. A méréshez az **Indítás**,
 **Szüneteltetés/Folytatás** és **Leállítás** művelet tartozik, az élő nyomások
-diagramon láthatók. A nyers rekordok projektenként és mérési
-fázisonként elkülönítve a
-`data/projects/<év>/<dátum>_<projektazonosító>_<projektnév>/<projektnév>_<fázis>_live_raw.csv`
-fájlokba kerülnek.
-Szimulációs módban a mért értékek az éles adatkezelési útvonalon mentődnek,
-exportálódnak és – ha engedélyezett – NAS-szinkronba kerülnek. Az eredet egyértelmű:
-a fájlnév `_simulation_live_raw.csv`, a külön szimulációs projekt- és konfigurációs
-pillanatkép pedig `measurement_kind=simulation` jelölést tartalmaz. A dashboard felső, állandó szöveges sávja
+diagramon láthatók. A nyers rekordok projektenként a
+`data/projects/<év>/<dátum>_<projektazonosító>_<projektnév>/project.sqlite`
+adatbázisba kerülnek; a fázisokat külön adatbázis-azonosító választja el.
+Szimulációs módban a mért értékek ugyanazon adatkezelési útvonalon mentődnek,
+és – ha engedélyezett – NAS-szinkronba kerülnek. Az eredetet az adatbázis
+`measurement_kind=simulation` beállítása és a `_simulation` projektmappa jelöli.
+A dashboard felső, állandó szöveges sávja
 mindig megkülönbözteti a szimulációt a hardvermódtól; alatta az aktív, reteszelt
 riasztás a kiváltó okkal, automatikus művelettel és következő kezelői lépéssel
 megmarad a biztonságos bezárásig. A bezárás aktív hibánál friss szenzor- és
@@ -214,11 +213,11 @@ alapértelmezetten elutasított gombos megerősítést kér; begépelendő paran
 nincs. Az ablak bezárása minden pumpán megkísérli a STOP-ot,
 bontja a kapcsolatot és lezárja a COM-portokat.
 
-A `Projekt` → `Adatkezelés és export…` ablak pontosvesszős vagy más elválasztójú,
-igény szerint tizedesvesszős CSV-t készít az aktív mérési fázis saját nyers
-CSV-jéből. A diagramot is tartalmazó Excel-fájl automatikusan, csak a mérési
-fázis lezárásakor készül el; futó fázisból nem indítható kézi Excel-export.
-Projektenként egy munkafüzet készül, amelyben minden lezárt szakasz saját,
+A `Projekt` → `Adatkezelés és export…` ablak megjeleníti a projekt-adatbázist és
+a hardveres vagy szimulációs eredetet. CSV-export nincs. Az Excel-fájl kizárólag
+az **Excel exportálása…** gomb megnyomása után készül el; mérésleállítás vagy
+fázislezárás nem hoz létre automatikus fájlt. Projektenként egy munkafüzet készül,
+amelyben minden adatbázisban tárolt szakasz saját,
 szűrhető adatokkal és beágyazott nyomás-/szelepdiagrammal rendelkező munkalapot
 kap. Az export helyét natív Windows fájlmentő ablakban kell kiválasztani; az
 alkalmazás megjegyzi az utoljára használt exportmappát.
@@ -240,7 +239,7 @@ visszatölti. Az adatsorok külön kapcsolhatók, választható vagy egyéni
 időtartomány adható meg, az Y tengely automatikus vagy kézi lehet, a grafikon pedig
 egérrel szabadon nagyítható és mozgatható. A nézet mérési fázisra szűrhető, az
 összes fázis folytonos szakaszait pedig külön, színes idősáv mutatja. Ehhez a nézet
-a külön fázis-CSV-ket csak memóriában rendezi közös időrendbe. A belső
+az adatbázis fázisrekordjait időrendben kérdezi le. A belső
 **Grafikon/Táblázat** váltó ugyanarra a szűrésre épül. A táblázat az Excel aktuális
 oszlopait és magyar helyi időt mutat, nagy mérésnél pedig 1000 soros lapokkal
 védi a célgépet a túlzott UI-terheléstől.

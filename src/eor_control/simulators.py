@@ -449,6 +449,8 @@ class SimulatedValveActuator:
     reverse_direction: bool = False
     clock: SimulationClock = field(default_factory=RealSimulationClock)
     _last_update_seconds: float | None = field(default=None, init=False, repr=False)
+    voltage_at_zero_percent: float = 1.0
+    voltage_at_hundred_percent: float = 5.0
 
     def write_percent(self, output_percent: float) -> None:
         if not 0.0 <= output_percent <= 100.0:
@@ -465,6 +467,13 @@ class SimulatedValveActuator:
     def actual_position(self) -> float:
         self._advance()
         return self.actual_position_percent
+
+    @property
+    def last_voltage(self) -> float:
+        output = 0.0 if self.output_percent is None else self.output_percent
+        return self.voltage_at_zero_percent + (
+            self.voltage_at_hundred_percent - self.voltage_at_zero_percent
+        ) * output / 100.0
 
     def _advance(self) -> None:
         now = self.clock.monotonic()

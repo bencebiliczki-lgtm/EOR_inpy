@@ -36,13 +36,14 @@ A projektadatbázis teszteli a szakaszok metaadatait, mozgatását és törlés 
 újraszámozását. Az adatkezelési teszt a
 magyar nyers CSV mellett a régi vesszős fájlok visszafelé kompatibilis megnyitását
 és az év/projekt JSON-pillanatképeket is ellenőrzi.
+Külön regresszió ellenőrzi, hogy fázislezáráskor nem készül automatikus Excel,
+valamint hogy az export UI kézi Excel-exportot kínál és megőrzi az eredetjelölést.
 
-Az adatkezelési tesztek ellenőrzik a projektenként és fázisonként eltérő,
-Windows-biztos fájlútvonalat, a fázisváltáskor létrejövő külön nyers CSV-ket, a
-csak olvasáskor történő időrendi összefűzést, a tizedesvesszős/pontosvesszős
-CSV-exportot, az egyetlen projekt-munkafüzet külön fázislapjait és azok beágyazott
-diagramját, egy korábbi fázislap adatvesztés nélküli frissítését, a rekordot
-tartalmazó fázis egyszeri lezárási eseményét, valamint
+Az adatkezelési tesztek ellenőrzik a projektenkénti Windows-biztos adatbázisútvonalat,
+a fázisazonosító szerinti elkülönítést, a csak olvasáskor történő időrendi
+lekérdezést, az egyetlen kézzel exportált projekt-munkafüzet külön fázislapjait
+és azok beágyazott diagramját, valamint a rekordot tartalmazó fázis egyszeri
+lezárási eseményét. Ellenőrzik továbbá, hogy lezáráskor nem keletkezik `.xlsx`, és
 a NAS-kiesés után SQLite-ban megmaradó várólista újbóli
 megnyitását és sikeres szinkronját. A Qt-teszt a korábbi projektfájl visszatöltését,
 az indítási projektválasztó szükségességét, a projektenként mentett utolsó mérési
@@ -59,7 +60,7 @@ nyers CSV-k változatlan megőrzését is igazolja.
 A NAS-kapcsolati teszt ideiglenes mappában ellenőrzi az írás–visszaolvasás–törlés
 kört és azt, hogy nem marad próbfájl. A UI-regresszió ellenőrzi a központi NAS
 beállítási oldalt, a csak olvasható útvonalkijelzést, a natív mappaválasztót, a
-tartós `nas/enabled` és `nas/target_path` kulcsokat, valamint hogy a CSV-export
+tartós `nas/enabled` és `nas/target_path` kulcsokat, valamint hogy az Excel-export
 natív fájlmentő ablakot használ és megjegyzi az utolsó célmappát.
 
 Az időzónatesztek külön téli és nyári UTC-időponttal ellenőrzik az
@@ -118,23 +119,36 @@ UI-teszt ellenőrzi a személyre szabott mezők mentését, a kézi módosítás
 „Egyéni beállítások” váltást és az alkalmazás újraindítása utáni visszatöltést.
 A runtime-regresszió ellenőrzi, hogy a sorba állított PID-csomagot pontosan a
 következő háttér-vezérlési ciklus alkalmazza. A UI-regresszió futó mérésnél
-ellenőrzi a kézi/automata mód azonnali runtime-frissítését, valamint a több
-mezőváltozást összevonó, valós idejű PID-frissítést. Külön mezőzárolási teszt
+ellenőrzi a kézi/automata mód azonnali runtime-frissítését, valamint azt, hogy a
+PID-mezők módosítása nem kerül sorba az alkalmazási gomb megnyomásáig. Az
+indítási regresszió igazolja, hogy az előre kiválasztott automata mód már az első
+vezérlési ciklusban aktív. Külön mezőzárolási teszt
 igazolja, hogy az indítási előkészítés alatt nincs szerkeszthető folyamatérték,
 majd csak a valóban alkalmazható runtime-mezők aktiválódnak; a hardveres BES-flow
-szimulációs mérés közben inaktív marad.
+szimulációs mérés közben inaktív marad. Ugyanez a regresszió ellenőrzi, hogy futó
+és szüneteltetett mérés alatt a szakaszválasztó tiltott, és a programozott
+indexváltás is visszaáll az eredeti szakaszra.
 A mérési és adattárolási tesztek lefedik mindkét pumpa pozitív és negatív nettó
 térfogatváltozását, a számlálók újraindítását, a V1→V2 biztonsági mentéses
 migrációt, a fázisok első előfordulási sorrendjét, a fázisszűrést és a
-`víz → olaj → víz` szegmentálást. Az exporttesztek ellenőrzik az egyfázisú
-CSV-kimenetet, valamint azt, hogy a projekt Excel-fájljában minden lezárt fázis
-saját munkalapot kap és egy ismételt fázisfrissítés nem törli a többi lapot.
-A szimulációs perzisztenciatesztek igazolják az eredetjelölt CSV és pillanatképek
+`víz → olaj → víz` szegmentálást. Az exporttesztek ellenőrzik, hogy a projekt
+Excel-fájljában minden adatbázis-fázis saját munkalapot és diagramot kap.
+A szimulációs perzisztenciatesztek igazolják az eredetjelölt SQLite-adatbázis
 létrejöttét, valamint azt, hogy szimulált rekord nem kerül a fizikai mérés
-fájljába. A UI-teszt ellenőrzi az aktív szimulációs adatmentés jelölését és a
+adatbázisába. A UI-teszt ellenőrzi az aktív szimulációs adatmentés jelölését és a
 mentett rekord megjelenését az előzménynézetben. A fázislezárási regresszió ugyanazt
 a writer-életciklust futtatja `live` és `simulation` eredettel, és mindkettőnél
 ellenőrzi az egyszeri lezárási eseményt és a nyers rekordok megmaradását.
+Az analóg adatút regressziói külön ellenőrzik a nyers/medián/szűrt értékek
+szétválasztását, a 0,9 V → −10 bar érvényes extrapolációt, az elektromos és fizikai
+hibatartományt, a nem véges, STALE és kapcsolatvesztési minőségeket, a vonali PID
+minőségi tiltását, az egyszeres EMA-t, valamint az adatbázis v1→v3 adatvesztésmentes
+migrációját és a régi CSV-k biztonsági másolatos bővítését.
+Ugyanez a tesztmátrix a differenciálnyomás-csatornán is lefedi a valid
+extrapolációt, elektromos/fizikai tartományhibát, STALE és kapcsolatvesztési
+reteszelést, az önálló szűrőbeállítások tartós visszatöltését, valamint a
+nyers/medián/szűrt értékek SQLite- és CSV-megőrzését. A szelep UI-regressziója
+ellenőrzi az aktív és SAFE kimeneti feszültség megjelenítését.
 A Developer szimulációs mód tesztje ellenőrzi a hardvermódból visszaépített
 szimulációs eszközréteget, az engedélyezett writert és a felület módjelzését.
 A dashboard értesítési tesztje igazolja az állandó mód- és riasztássáv jelenlétét,
@@ -217,7 +231,7 @@ után indulhat. A teszt ellenőrzi továbbá mindkét dokumentált
 `MAXPRESS` hardverhatár-parancsot és az `ML/HR` pumpaegység explicit beállítását,
 valamint hogy az `1000 ml/h` kezelői célérték `FLOW=1000` parancsként jut el a
 pumpához. Külön UI-regresszió igazolja, hogy a **Mentés és alkalmazás** mindkét
-pumpára elküldi a közös `MAXPRESS` értéket, hardvermódban pedig előtte explicit
+pumpára elküldi a hozzá külön beállított `MAXPRESS` értéket, hardvermódban pedig előtte explicit
 kezelői megerősítést kér. Ellenőrzi továbbá a pontos indítási
 megerősítést, a két kezdőnyomás és a tervezett nyomástöbblet kötelező bevitelét,
 a besajtoló kezdőnyomásának kivárását, a cél első elérésekor kiadott azonnali
@@ -312,6 +326,9 @@ csatorna nem kötelező, nem kerül a kapcsolattesztbe, a mérési rekordban hi�
 érték marad, és nem keletkezik biztonsági hiba. Külön regresszió igazolja,
 hogy a manuális szelepírás nem indít teljes mérési mintavételt, valamint a
 manuális pumpabiztonság nem kér nem kapcsolódó eszközadatot.
+A manuális ablak UI-regressziója ellenőrzi a vezérlés és a parancssor külön
+füleit, továbbá hogy a térfogatáram mező `ml/h`, a nyomásmező pedig `bar`
+egységet jelez.
 Külön globálisprofil-regresszió ellenőrzi az eszközök egyszeri migrációját és
 azt, hogy a projektváltás nem írja felül a globális eszközbeállítást, a
 Projektbeállítások pedig nem kínál eszközprofil-szerkesztést.
@@ -324,7 +341,8 @@ kategórianavigációt, a megadott kezdőoldalt, valamint azt, hogy az Eszközö
 Naplózás, Kalibráció, Megjelenés és Vezérlési ciklus tényleges szerkesztői a
 jobb oldali oldalterületbe ágyazódnak, és nem nyitógombos második dialógusok.
 A grafikon regressziója
-ellenőrzi a sárga figyelmeztetési és piros kritikus pontok részletes hover
+ellenőrzi a teljes mérés időtartományát, a kézi visszatekintéskor kikapcsoló élő
+követést, a differenciálnyomás élő adatsorát, valamint a sárga figyelmeztetési és piros kritikus pontok részletes hover
 adatait, valamint a pontok törlését a dashboard alaphelyzetbe állításakor.
 Az aktív hardver-dashboard regressziója `READY` állapotban, futó mérés nélkül
 ellenőrzi az élő pumpa- és NI-értékeket, a SAFE szelepállapotot, továbbá azt,

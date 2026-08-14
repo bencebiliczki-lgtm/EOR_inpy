@@ -19,7 +19,7 @@ def test_stable_default_profile_schema_is_valid_but_hardware_is_blocked() -> Non
     profile = load_stable_profile(PROFILE_PATH)
     validation = validate_stable_profile(profile)
 
-    assert profile.schema_version == 2
+    assert profile.schema_version == 3
     assert validation.application_can_start
     assert not validation.hardware_measurement_can_start
     assert validation.for_key("safety.valve_safe_output_v") is not None
@@ -53,12 +53,11 @@ def test_migration_applies_only_missing_software_values() -> None:
     assert "hardware/stale_timeout_seconds" in applied
 
 
-def test_schema_one_pressure_limits_migrate_to_one_conservative_limit(
+def test_schema_one_separate_pressure_limits_are_preserved(
     tmp_path: Path,
 ) -> None:
     payload = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
     payload["schema_version"] = 1
-    payload["safety"].pop("pump_max_pressure_bar")
     payload["safety"].update(
         {
             "jacket_max_pressure_bar": 400.0,
@@ -72,11 +71,28 @@ def test_schema_one_pressure_limits_migrate_to_one_conservative_limit(
     profile = load_stable_profile(path)
     safety = profile.section("safety")
 
-    assert profile.schema_version == 2
-    assert safety["pump_max_pressure_bar"] == pytest.approx(350.0)
-    assert "jacket_max_pressure_bar" not in safety
-    assert "injection_max_pressure_bar" not in safety
+    assert profile.schema_version == 3
+    assert safety["jacket_max_pressure_bar"] == pytest.approx(400.0)
+    assert safety["injection_max_pressure_bar"] == pytest.approx(350.0)
+    assert "pump_max_pressure_bar" not in safety
     assert "pressure_overshoot_shutdown_bar" not in safety
+
+
+def test_schema_two_common_pressure_limit_is_copied_to_both_pumps(
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    payload["schema_version"] = 2
+    payload["safety"].pop("jacket_max_pressure_bar")
+    payload["safety"].pop("injection_max_pressure_bar")
+    payload["safety"]["pump_max_pressure_bar"] = 325.0
+    path = tmp_path / "schema-two.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    safety = load_stable_profile(path).section("safety")
+
+    assert safety["jacket_max_pressure_bar"] == pytest.approx(325.0)
+    assert safety["injection_max_pressure_bar"] == pytest.approx(325.0)
 
 
 def test_obsolete_safe_output_and_pid_validation_flags_are_not_seeded() -> None:

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
 
-from eor_control.domain import MeasurementSnapshot
+from eor_control.domain import DataQuality, MeasurementSnapshot
 from eor_control.safety import SafetyDecision
 
 
@@ -114,14 +114,25 @@ class PidController:
         self._parameters = parameters
         self.reset(output_percent=current_output_percent)
 
-    def calculate(self, *, setpoint: float, measurement: float, dt_seconds: float) -> float:
+    def calculate(
+        self,
+        *,
+        setpoint: float,
+        measurement: float,
+        dt_seconds: float,
+        measurement_filter_alpha: float | None = None,
+    ) -> float:
         if not all(isfinite(value) for value in (setpoint, measurement, dt_seconds)):
             raise ValueError("PID inputs must be finite")
         if dt_seconds <= 0.0:
             raise ValueError("PID time step must be positive")
 
         self._elapsed_seconds += dt_seconds
-        alpha = self._parameters.measurement_filter_alpha
+        alpha = (
+            self._parameters.measurement_filter_alpha
+            if measurement_filter_alpha is None
+            else measurement_filter_alpha
+        )
         filtered = (
             measurement
             if self._filtered_measurement is None
@@ -222,6 +233,10 @@ class ValveController:
     ) -> None:
         self._pid.configure(parameters, current_output_percent=current_output_percent)
 
+    def begin_measurement(self, mode: ControlMode) -> None:
+        """Make the operator-selected mode the active mode at a new run boundary."""
+        self._last_mode = mode
+
     def command(
         self,
         *,
@@ -261,6 +276,18 @@ class ValveController:
         measurement = measurements[source]
         if measurement is None:
             raise ValueError("the selected pressure source is not configured")
+        if (
+            source is PressureSource.LINE_SENSOR
+            and snapshot.line_pressure_quality is not DataQuality.GOOD
+        ):
+            return ValveCommand(
+                False,
+                None,
+                mode,
+                source,
+                "line pressure source quality is "
+                f"{snapshot.line_pressure_quality.value}",
+            )
         transition_reason = None
         if self._last_mode is ControlMode.MANUAL:
             self._pid.prepare_bumpless(
@@ -270,7 +297,12 @@ class ValveController:
             )
             transition_reason = "bumpless manual-to-automatic transfer"
         output = self._pid.calculate(
-            setpoint=setpoint_bar, measurement=measurement, dt_seconds=dt_seconds
+            setpoint=setpoint_bar,
+            measurement=measurement,
+            dt_seconds=dt_seconds,
+            measurement_filter_alpha=(
+                1.0 if source is PressureSource.LINE_SENSOR else None
+            ),
         )
         self._last_mode = mode
         return ValveCommand(True, output, mode, source, transition_reason)

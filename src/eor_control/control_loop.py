@@ -9,7 +9,7 @@ from eor_control.control import (
     ValveController,
 )
 from eor_control.devices import ValveActuator
-from eor_control.domain import MeasurementRecord
+from eor_control.domain import AnalogPressureReading, MeasurementRecord
 from eor_control.measurement import MeasurementService
 from eor_control.safety import ManualSafetyMonitor, SafetyDecision, SafetyLimits
 
@@ -18,6 +18,7 @@ from eor_control.safety import ManualSafetyMonitor, SafetyDecision, SafetyLimits
 class ControlCycleResult:
     record: MeasurementRecord
     command: ValveCommand
+    valve_voltage: float | None = None
 
 
 class ControlLoop:
@@ -74,12 +75,21 @@ class ControlLoop:
         else:
             self._actuator.write_percent(command.output_percent)
             self._last_output_percent = command.output_percent
-        return ControlCycleResult(record=record, command=command)
+        voltage = getattr(self._actuator, "last_voltage", None)
+        return ControlCycleResult(
+            record=record,
+            command=command,
+            valve_voltage=float(voltage) if isinstance(voltage, (int, float)) else None,
+        )
 
     def configure_pid(self, parameters: PidParameters) -> None:
         self._controller.configure_pid(
             parameters, current_output_percent=self._last_output_percent
         )
+
+    def begin_measurement(self, mode: ControlMode) -> None:
+        """Activate the selected valve mode before the first runtime cycle."""
+        self._controller.begin_measurement(mode)
 
     def observe_once(self, *, active_stage: str) -> MeasurementRecord:
         """Acquire a non-persistent, safety-supervised telemetry snapshot."""
@@ -128,7 +138,12 @@ class ControlLoop:
                 source,
                 "measurement paused; physical output held",
             )
-        return ControlCycleResult(record=record, command=command)
+        voltage = getattr(self._actuator, "last_voltage", None)
+        return ControlCycleResult(
+            record=record,
+            command=command,
+            valve_voltage=float(voltage) if isinstance(voltage, (int, float)) else None,
+        )
 
     def observe_pump_startup_once(self, *, active_stage: str) -> MeasurementRecord:
         """Supervise jacket pressure buildup before injection is allowed to run."""
@@ -154,6 +169,9 @@ class ControlLoop:
         """Return partial NI telemetry without weakening the safety decision path."""
 
         return self._measurement.read_pressure_inputs_individually()
+
+    def latest_pressure_readings(self) -> dict[str, AnalogPressureReading]:
+        return self._measurement.latest_pressure_readings()
 
     def configure_measurement(
         self,

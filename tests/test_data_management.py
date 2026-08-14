@@ -153,6 +153,23 @@ def test_user_csv_export_uses_semicolon_and_decimal_comma(tmp_path: Path) -> Non
     assert rows[1][CsvMeasurementWriter.HEADER.index("line_pressure_bar")] == "101,75"
 
 
+def test_user_csv_export_filters_selected_database_phase(tmp_path: Path) -> None:
+    writer = ProjectMeasurementWriter(tmp_path)
+    source = writer.select_project(1, "Export", stage_name="víz")
+    writer.write(record("víz", recorded_at=datetime(2026, 7, 13, 12, 30, tzinfo=UTC)))
+    writer.write(record("olaj", recorded_at=datetime(2026, 7, 13, 12, 31, tzinfo=UTC)))
+    writer.close()
+    phases = list_phases(source)
+    destination = tmp_path / "phase-export.csv"
+
+    export_measurement_csv(source, destination, phase_id=phases[1].id)
+
+    with destination.open(encoding="utf-8-sig", newline="") as file:
+        rows = list(csv.reader(file, delimiter=";"))
+    assert len(rows) == 2
+    assert rows[1][CsvMeasurementWriter.HEADER.index("active_stage")] == "olaj"
+
+
 def test_reader_keeps_legacy_comma_delimited_raw_files_compatible(tmp_path: Path) -> None:
     source = tmp_path / "legacy.csv"
     with source.open("w", encoding="utf-8", newline="") as file:
@@ -239,6 +256,7 @@ def test_project_excel_uses_one_charted_worksheet_per_stage(tmp_path: Path) -> N
     assert workbook["01 víz"]["C2"].value == 120.5
     assert workbook["02 olaj"]["C2"].value == 120.5
     assert workbook["01 víz"].max_column == 13
+    assert len(workbook["01 víz"]._charts) == 1
 
     writer.select_project(1, "Excel", stage_name="víz")
     writer.write(

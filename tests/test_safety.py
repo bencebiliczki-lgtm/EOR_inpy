@@ -27,7 +27,8 @@ def snapshot(
 def monitor() -> SafetyMonitor:
     return SafetyMonitor(
         SafetyLimits(
-            max_pump_pressure_bar=350.0,
+            max_jacket_pressure_bar=350.0,
+            max_injection_pressure_bar=350.0,
             max_differential_pressure_bar=50.0,
         )
     )
@@ -63,9 +64,9 @@ def test_jacket_pressure_buildup_can_temporarily_ignore_only_margin() -> None:
     )
 
 
-def test_common_pump_pressure_limit_applies_to_injection_pump() -> None:
-    decision = monitor().evaluate(
-        snapshot(360.0, 351.0), enforce_minimum_margin=False
+def test_separate_pump_pressure_limits_are_applied_to_their_own_pumps() -> None:
+    decision = SafetyMonitor(SafetyLimits(400.0, 350.0, 50.0)).evaluate(
+        snapshot(400.0, 351.0), enforce_minimum_margin=False
     )
 
     assert not decision.safe
@@ -92,11 +93,11 @@ def test_equal_pump_pressures_are_safe_when_startup_margin_is_not_enforced() -> 
 
 
 def test_configured_margin_may_be_below_twenty_bar() -> None:
-    safety_monitor = SafetyMonitor(SafetyLimits(350.0, 50.0, 10.0))
+    safety_monitor = SafetyMonitor(SafetyLimits(350.0, 350.0, 50.0, 10.0))
 
     assert safety_monitor.evaluate(snapshot(110.0, 100.0)).safe
 
-    decision = SafetyMonitor(SafetyLimits(350.0, 50.0, 10.0)).evaluate(
+    decision = SafetyMonitor(SafetyLimits(350.0, 350.0, 50.0, 10.0)).evaluate(
         snapshot(109.9, 100.0)
     )
     assert not decision.safe
@@ -239,7 +240,7 @@ def test_reset_without_a_latched_fault_returns_current_safety_state() -> None:
 def test_reconfiguration_does_not_clear_latched_fault() -> None:
     safety_monitor = monitor()
     safety_monitor.evaluate(snapshot(119.0, 100.0))
-    safety_monitor.configure(SafetyLimits(500.0, 100.0, 10.0))
+    safety_monitor.configure(SafetyLimits(500.0, 500.0, 100.0, 10.0))
 
     decision = safety_monitor.evaluate(snapshot(120.0, 100.0))
 
@@ -249,4 +250,4 @@ def test_reconfiguration_does_not_clear_latched_fault() -> None:
 
 def test_invalid_safety_limits_are_rejected() -> None:
     with pytest.raises(ValueError, match="positive and finite"):
-        SafetyLimits(350.0, 50.0, 0.0)
+        SafetyLimits(350.0, 350.0, 50.0, 0.0)

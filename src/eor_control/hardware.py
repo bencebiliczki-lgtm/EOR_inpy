@@ -10,6 +10,7 @@ from typing import Protocol
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
 from eor_control.isco import IscoSerialConfig, open_isco_pump
 from eor_control.ni import NidaqBackend, NidaqConfig, NidaqmxBackend
+from eor_control.signal_filter import AnalogFilterConfig, AnalogSignalFilter
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +181,30 @@ class HardwareConfiguration:
     valve_output_enabled: bool = True
     serial_command_timeout_seconds: float = 2.0
     serial_command_retries: int = 2
+    analog_filter_enabled: bool = True
+    analog_samples_per_read: int = 20
+    analog_sample_rate_hz: float = 1000.0
+    line_median_enabled: bool = True
+    line_ema_alpha: float = 0.2
+    line_spike_rejection_enabled: bool = True
+    line_spike_limit_voltage: float = 0.1
+    line_spike_confirmation_samples: int = 3
+    line_electrical_min_voltage: float = 0.5
+    line_electrical_max_voltage: float = 5.5
+    line_physical_min_pressure_bar: float = -15.0
+    line_physical_max_pressure_bar: float = 420.0
+    line_stale_timeout_seconds: float = 1.0
+    differential_median_enabled: bool = True
+    differential_ema_alpha: float = 0.2
+    differential_spike_rejection_enabled: bool = True
+    differential_spike_limit_voltage: float = 0.1
+    differential_spike_confirmation_samples: int = 3
+    differential_electrical_min_voltage: float = 0.5
+    differential_electrical_max_voltage: float = 5.5
+    differential_physical_min_pressure_bar: float = -5.0
+    differential_physical_max_pressure_bar: float = 55.0
+    differential_stale_timeout_seconds: float = 1.0
+    analog_diagnostic_interval_seconds: float = 5.0
 
     def __post_init__(self) -> None:
         if (
@@ -218,6 +243,12 @@ class HardwareConfiguration:
         )
         if self.ni_terminal_configuration not in NidaqmxBackend.TERMINAL_CONFIGURATIONS:
             raise ValueError("unsupported NI terminal configuration")
+        self.analog_filter_config()
+        if (
+            not isfinite(self.analog_diagnostic_interval_seconds)
+            or self.analog_diagnostic_interval_seconds <= 0.0
+        ):
+            raise ValueError("analog diagnostic interval must be positive and finite")
         if not 1 <= self.supervised_test_minutes <= 1440:
             raise ValueError("supervised test duration must be between 1 and 1440 minutes")
         valve_voltages = (
@@ -263,6 +294,47 @@ class HardwareConfiguration:
             ),
             self.valve_output_channel if self.valve_output_enabled else None,
             self.safe_output_voltage,
+        )
+
+    def analog_filter_config(self) -> AnalogFilterConfig:
+        return AnalogFilterConfig(
+            enabled=self.analog_filter_enabled,
+            samples_per_read=self.analog_samples_per_read,
+            sample_rate_hz=self.analog_sample_rate_hz,
+            ema_alpha=self.line_ema_alpha,
+            median_enabled=self.line_median_enabled,
+            spike_rejection_enabled=self.line_spike_rejection_enabled,
+            line_spike_limit_voltage=self.line_spike_limit_voltage,
+            spike_confirmation_samples=self.line_spike_confirmation_samples,
+            line_electrical_min_voltage=self.line_electrical_min_voltage,
+            line_electrical_max_voltage=self.line_electrical_max_voltage,
+            line_physical_min_pressure_bar=self.line_physical_min_pressure_bar,
+            line_physical_max_pressure_bar=self.line_physical_max_pressure_bar,
+            line_stale_timeout_seconds=self.line_stale_timeout_seconds,
+            differential_median_enabled=self.differential_median_enabled,
+            differential_ema_alpha=self.differential_ema_alpha,
+            differential_spike_rejection_enabled=(
+                self.differential_spike_rejection_enabled
+            ),
+            differential_spike_limit_voltage=self.differential_spike_limit_voltage,
+            differential_spike_confirmation_samples=(
+                self.differential_spike_confirmation_samples
+            ),
+            differential_electrical_min_voltage=(
+                self.differential_electrical_min_voltage
+            ),
+            differential_electrical_max_voltage=(
+                self.differential_electrical_max_voltage
+            ),
+            differential_physical_min_pressure_bar=(
+                self.differential_physical_min_pressure_bar
+            ),
+            differential_physical_max_pressure_bar=(
+                self.differential_physical_max_pressure_bar
+            ),
+            differential_stale_timeout_seconds=(
+                self.differential_stale_timeout_seconds
+            ),
         )
 
     def enabled_test_devices(self) -> tuple["HardwareTestDevice", ...]:
@@ -353,6 +425,7 @@ def connection_configuration_fingerprint(
             configuration.line_pressure_enabled,
             configuration.line_pressure_channel,
             configuration.ni_terminal_configuration,
+            asdict(configuration.analog_filter_config()),
         ),
         HardwareTestDevice.DIFFERENTIAL_PRESSURE: (
             configuration.differential_pressure_enabled,
@@ -443,6 +516,7 @@ class HardwareConnectionTester(Protocol):
         channel: str,
         terminal_configuration: str,
         device: HardwareTestDevice,
+        filter_config: AnalogFilterConfig | None = None,
     ) -> DeviceConnectionResult: ...
 
 
@@ -469,11 +543,13 @@ class PhysicalHardwareConnectionTester:
                 configuration.line_pressure_channel,
                 configuration.ni_terminal_configuration,
                 HardwareTestDevice.LINE_PRESSURE,
+                configuration.analog_filter_config(),
             ),
             HardwareTestDevice.DIFFERENTIAL_PRESSURE: lambda: self.test_ni_input(
                 configuration.differential_pressure_channel,
                 configuration.ni_terminal_configuration,
                 HardwareTestDevice.DIFFERENTIAL_PRESSURE,
+                configuration.analog_filter_config(),
             ),
         }
         return ConnectionTestResult(
@@ -533,6 +609,7 @@ class PhysicalHardwareConnectionTester:
         channel: str,
         terminal_configuration: str,
         device: HardwareTestDevice,
+        filter_config: AnalogFilterConfig | None = None,
     ) -> DeviceConnectionResult:
         if device not in (
             HardwareTestDevice.LINE_PRESSURE,
@@ -545,18 +622,59 @@ class PhysicalHardwareConnectionTester:
             else DiagnosticCategory.NI_DIFFERENTIAL
         )
         try:
-            backend = self._ni_backend or NidaqmxBackend(terminal_configuration)
-            voltage = backend.read_voltage(channel)
-            if not isfinite(voltage):
-                raise ConnectionError("NI connection test returned a non-finite voltage")
+            config = filter_config or AnalogFilterConfig()
+            backend = self._ni_backend or NidaqmxBackend(
+                terminal_configuration, config.sample_rate_hz
+            )
+            read_many = getattr(backend, "read_voltages", None)
+            samples = (
+                read_many(channel, config.samples_per_read)
+                if callable(read_many)
+                else [backend.read_voltage(channel) for _ in range(config.samples_per_read)]
+            )
+            filtered = AnalogSignalFilter(
+                alpha=config.ema_alpha,
+                median_enabled=config.median_enabled,
+                spike_rejection_enabled=config.spike_rejection_enabled,
+                spike_limit_voltage=(
+                    config.line_spike_limit_voltage
+                    if device is HardwareTestDevice.LINE_PRESSURE
+                    else config.differential_spike_limit_voltage
+                ),
+                spike_confirmation_samples=config.spike_confirmation_samples,
+            ).process(samples)
+            voltage = filtered.last_raw_voltage
+            if device is HardwareTestDevice.LINE_PRESSURE and not (
+                config.line_electrical_min_voltage
+                <= filtered.median_voltage
+                <= config.line_electrical_max_voltage
+            ):
+                raise ConnectionError(
+                    "NI line voltage is outside configured electrical limits"
+                )
+            if device is HardwareTestDevice.DIFFERENTIAL_PRESSURE and not (
+                config.differential_electrical_min_voltage
+                <= filtered.median_voltage
+                <= config.differential_electrical_max_voltage
+            ):
+                raise ConnectionError(
+                    "NI differential voltage is outside configured electrical limits"
+                )
             if self._diagnostics is not None:
                 self._diagnostics.emit(
                     category,
                     "TEST-RX",
-                    f"{channel}={voltage:.6f} V",
+                    f"{channel}; terminal={terminal_configuration}; "
+                    f"last={voltage:.6f} V; median={filtered.median_voltage:.6f} V; "
+                    f"filtered={filtered.filtered_voltage:.6f} V; quality=good",
                 )
             return DeviceConnectionResult(
-                device, True, f"{channel}: {voltage:.4f} V", voltage
+                device,
+                True,
+                f"{channel} [{terminal_configuration}]: raw={voltage:.4f} V; "
+                f"median={filtered.median_voltage:.4f} V; "
+                f"filtered={filtered.filtered_voltage:.4f} V; GOOD",
+                voltage,
             )
         except Exception as error:
             return DeviceConnectionResult(

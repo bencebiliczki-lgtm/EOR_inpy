@@ -20,6 +20,27 @@ class PumpStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class AnalogPressureReading:
+    """Traceable result of one analog pressure sample burst."""
+
+    last_raw_voltage: float | None
+    median_voltage: float | None
+    filtered_voltage: float | None
+    raw_pressure_bar: float | None
+    filtered_pressure_bar: float | None
+    measured_at: datetime
+    monotonic_seconds: float
+    sample_age_seconds: float
+    quality: DataQuality
+    quality_reason: str = ""
+    sample_count: int = 0
+    sample_min_voltage: float | None = None
+    sample_max_voltage: float | None = None
+    physical_channel: str | None = None
+    terminal_configuration: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MeasurementSnapshot:
     recorded_at: datetime
     monotonic_seconds: float
@@ -33,6 +54,56 @@ class MeasurementSnapshot:
     raw_differential_pressure_bar: float | None = None
     raw_line_voltage: float | None = None
     raw_differential_voltage: float | None = None
+    line_pressure_reading: AnalogPressureReading | None = None
+    differential_pressure_reading: AnalogPressureReading | None = None
+
+    @property
+    def line_pressure_quality(self) -> DataQuality:
+        if self.line_pressure_reading is not None:
+            return self.line_pressure_reading.quality
+        return DataQuality.GOOD if self.line_pressure_bar is not None else DataQuality.DISCONNECTED
+
+    @property
+    def line_pressure_quality_reason(self) -> str:
+        return (
+            ""
+            if self.line_pressure_reading is None
+            else self.line_pressure_reading.quality_reason
+        )
+
+    @property
+    def line_pressure_sample_age_seconds(self) -> float | None:
+        return (
+            None
+            if self.line_pressure_reading is None
+            else self.line_pressure_reading.sample_age_seconds
+        )
+
+    @property
+    def differential_pressure_quality(self) -> DataQuality:
+        if self.differential_pressure_reading is not None:
+            return self.differential_pressure_reading.quality
+        return (
+            DataQuality.GOOD
+            if self.differential_pressure_bar is not None
+            else DataQuality.DISCONNECTED
+        )
+
+    @property
+    def differential_pressure_quality_reason(self) -> str:
+        return (
+            ""
+            if self.differential_pressure_reading is None
+            else self.differential_pressure_reading.quality_reason
+        )
+
+    @property
+    def differential_pressure_sample_age_seconds(self) -> float | None:
+        return (
+            None
+            if self.differential_pressure_reading is None
+            else self.differential_pressure_reading.sample_age_seconds
+        )
 
 
 @dataclass(frozen=True, slots=True)
