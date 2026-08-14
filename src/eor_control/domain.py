@@ -20,6 +20,18 @@ class PumpStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class PumpPressureReading:
+    """Timestamped PRESS telemetry used independently from slower pump fields."""
+
+    pressure_bar: float
+    monotonic_seconds: float
+    sample_age_seconds: float
+    sequence: int
+    quality: DataQuality
+    last_error: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class AnalogPressureReading:
     """Traceable result of one analog pressure sample burst."""
 
@@ -38,6 +50,7 @@ class AnalogPressureReading:
     sample_max_voltage: float | None = None
     physical_channel: str | None = None
     terminal_configuration: str | None = None
+    sequence: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +69,22 @@ class MeasurementSnapshot:
     raw_differential_voltage: float | None = None
     line_pressure_reading: AnalogPressureReading | None = None
     differential_pressure_reading: AnalogPressureReading | None = None
+    jacket_pressure_reading: PumpPressureReading | None = None
+    injection_pressure_reading: PumpPressureReading | None = None
+
+    @property
+    def injection_pressure_quality(self) -> DataQuality:
+        if self.injection_pressure_reading is not None:
+            return self.injection_pressure_reading.quality
+        return DataQuality.GOOD if self.injection_pump.connected else DataQuality.DISCONNECTED
+
+    @property
+    def injection_pressure_sample_age_seconds(self) -> float | None:
+        return (
+            None
+            if self.injection_pressure_reading is None
+            else self.injection_pressure_reading.sample_age_seconds
+        )
 
     @property
     def line_pressure_quality(self) -> DataQuality:

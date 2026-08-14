@@ -475,6 +475,10 @@ class SimulatedValveActuator:
             self.voltage_at_hundred_percent - self.voltage_at_zero_percent
         ) * output / 100.0
 
+    @property
+    def safe_output_percent(self) -> float:
+        return 0.0
+
     def _advance(self) -> None:
         now = self.clock.monotonic()
         previous = self._last_update_seconds

@@ -11,6 +11,7 @@ from eor_control.domain import (
     DataQuality,
     MeasurementRecord,
     MeasurementSnapshot,
+    PumpPressureReading,
     PumpStatus,
 )
 from eor_control.safety import SafetyDecision, SafetyLimits, SafetyMonitor
@@ -71,6 +72,8 @@ class MeasurementService:
         self._latest_pressure_readings: dict[str, AnalogPressureReading] = {}
         self._initial_jacket_volume_ml: float | None = None
         self._initial_injection_volume_ml: float | None = None
+        self._pump_sequences = {"jacket": 0, "injection": 0}
+        self._analog_sequences = {"line_pressure": 0, "differential_pressure": 0}
 
     def reset_injected_volume_tracking(self) -> None:
         """Start the injected-volume counter from the next acquired pump status."""
@@ -127,8 +130,12 @@ class MeasurementService:
         use_line_pressure_for_control: bool = False,
         enforce_minimum_margin: bool = False,
     ) -> MeasurementRecord:
-        jacket, jacket_quality = self._read_pump(self._jacket_pump)
-        injection, injection_quality = self._read_pump(self._injection_pump)
+        jacket, jacket_quality, jacket_pressure_reading = self._read_pump(
+            self._jacket_pump, "jacket"
+        )
+        injection, injection_quality, injection_pressure_reading = self._read_pump(
+            self._injection_pump, "injection"
+        )
         if self._initial_jacket_volume_ml is None:
             self._initial_jacket_volume_ml = jacket.remaining_volume_ml
         if self._initial_injection_volume_ml is None:
@@ -180,6 +187,8 @@ class MeasurementService:
             ),
             line_pressure_reading=line_reading,
             differential_pressure_reading=differential_reading,
+            jacket_pressure_reading=jacket_pressure_reading,
+            injection_pressure_reading=injection_pressure_reading,
         )
         decision = self._safety_monitor.evaluate(
             snapshot,
@@ -216,6 +225,8 @@ class MeasurementService:
     ) -> AnalogPressureReading | None:
         if channel is None:
             return None
+        self._analog_sequences[filter_key] += 1
+        sequence = self._analog_sequences[filter_key]
         config = self._analog_filter_config
         started = self._clock.monotonic()
         try:
@@ -225,7 +236,11 @@ class MeasurementService:
                 if config.enabled and callable(read_many)
                 else [self._daq.read_voltage(channel)]
             )
-            filtered = self._analog_filters[filter_key].process(samples)
+            sample_timestamp = self._clock.monotonic()
+            filtered = self._analog_filters[filter_key].process(
+                samples,
+                timestamp_monotonic=sample_timestamp,
+            )
             raw_pressure = calibration.convert(filtered.median_voltage)
             filtered_pressure = calibration.convert(filtered.filtered_voltage)
         except Exception as error:
@@ -247,12 +262,13 @@ class MeasurementService:
                 f"{label}: {type(error).__name__}: {error}",
                 physical_channel=self._physical_channel(channel),
                 terminal_configuration=self._terminal_configuration(),
+                sequence=sequence,
             )
             self._latest_pressure_readings[filter_key] = reading
             self._log_pressure_reading(filter_key, reading)
             return reading
         measured_at = self._clock.utc_now()
-        measured_monotonic = self._clock.monotonic()
+        measured_monotonic = sample_timestamp
         age = max(0.0, measured_monotonic - started)
         quality = DataQuality.GOOD
         reason = ""
@@ -307,6 +323,7 @@ class MeasurementService:
             max(samples),
             self._physical_channel(channel),
             self._terminal_configuration(),
+            sequence,
         )
         self._latest_pressure_readings[filter_key] = reading
         self._log_pressure_reading(filter_key, reading)
@@ -363,20 +380,68 @@ class MeasurementService:
                 if differential
                 else config.spike_confirmation_samples
             ),
+            ema_enabled=(
+                config.differential_ema_enabled
+                if differential
+                else config.line_ema_enabled
+            ),
+            time_constant_seconds=(
+                config.differential_ema_time_constant_seconds
+                if differential
+                else config.line_ema_time_constant_seconds
+            ),
         )
 
-    @staticmethod
-    def _read_pump(pump: Pump) -> tuple[PumpStatus, DataQuality]:
+    def _read_pump(
+        self, pump: Pump, role: str
+    ) -> tuple[PumpStatus, DataQuality, PumpPressureReading]:
+        read_telemetry = getattr(pump, "read_telemetry", None)
+        if callable(read_telemetry):
+            telemetry = read_telemetry()
+            pressure = telemetry.pressure
+            status_quality = telemetry.operating_status.quality
+            quality = self._combined_quality(pressure.quality, status_quality)
+            timestamp = pressure.last_update_monotonic
+            return (
+                telemetry.status,
+                quality,
+                PumpPressureReading(
+                    telemetry.status.pressure_bar,
+                    self._clock.monotonic() if timestamp is None else timestamp,
+                    0.0 if pressure.age_seconds is None else pressure.age_seconds,
+                    pressure.sequence,
+                    pressure.quality,
+                    pressure.last_error or "",
+                ),
+            )
         read_cached = getattr(pump, "read_cached_status", None)
         if callable(read_cached):
-            return cast(tuple[PumpStatus, DataQuality], read_cached())
+            status, quality = cast(tuple[PumpStatus, DataQuality], read_cached())
+            self._pump_sequences[role] += 1
+            now = self._clock.monotonic()
+            return status, quality, PumpPressureReading(
+                status.pressure_bar,
+                now,
+                0.0,
+                self._pump_sequences[role],
+                quality,
+            )
         if callable(getattr(pump, "read_pressure_bar", None)) and callable(
             getattr(pump, "read_operating_status", None)
         ):
             raise RuntimeError(
                 "raw pump cannot be used for measurement control; PollingPump required"
             )
-        return pump.read_status(), DataQuality.GOOD
+        status = pump.read_status()
+        self._pump_sequences[role] += 1
+        now = self._clock.monotonic()
+        return status, DataQuality.GOOD, PumpPressureReading(
+            status.pressure_bar,
+            now,
+            0.0,
+            self._pump_sequences[role],
+            DataQuality.GOOD,
+        )
 
     @staticmethod
     def _combined_quality(*qualities: DataQuality) -> DataQuality:

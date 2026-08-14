@@ -186,6 +186,8 @@ class HardwareConfiguration:
     analog_sample_rate_hz: float = 1000.0
     line_median_enabled: bool = True
     line_ema_alpha: float = 0.2
+    line_ema_enabled: bool = True
+    line_ema_time_constant_seconds: float = 0.8
     line_spike_rejection_enabled: bool = True
     line_spike_limit_voltage: float = 0.1
     line_spike_confirmation_samples: int = 3
@@ -196,6 +198,8 @@ class HardwareConfiguration:
     line_stale_timeout_seconds: float = 1.0
     differential_median_enabled: bool = True
     differential_ema_alpha: float = 0.2
+    differential_ema_enabled: bool = True
+    differential_ema_time_constant_seconds: float = 0.8
     differential_spike_rejection_enabled: bool = True
     differential_spike_limit_voltage: float = 0.1
     differential_spike_confirmation_samples: int = 3
@@ -302,6 +306,8 @@ class HardwareConfiguration:
             samples_per_read=self.analog_samples_per_read,
             sample_rate_hz=self.analog_sample_rate_hz,
             ema_alpha=self.line_ema_alpha,
+            line_ema_enabled=self.line_ema_enabled,
+            line_ema_time_constant_seconds=self.line_ema_time_constant_seconds,
             median_enabled=self.line_median_enabled,
             spike_rejection_enabled=self.line_spike_rejection_enabled,
             line_spike_limit_voltage=self.line_spike_limit_voltage,
@@ -313,6 +319,10 @@ class HardwareConfiguration:
             line_stale_timeout_seconds=self.line_stale_timeout_seconds,
             differential_median_enabled=self.differential_median_enabled,
             differential_ema_alpha=self.differential_ema_alpha,
+            differential_ema_enabled=self.differential_ema_enabled,
+            differential_ema_time_constant_seconds=(
+                self.differential_ema_time_constant_seconds
+            ),
             differential_spike_rejection_enabled=(
                 self.differential_spike_rejection_enabled
             ),

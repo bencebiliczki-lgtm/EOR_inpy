@@ -98,6 +98,7 @@ class TelemetryFieldState:
     age_seconds: float | None
     last_update_monotonic: float | None
     last_error: str | None = None
+    sequence: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +142,7 @@ class _CachedTelemetry:
     volume_at: float | None
     operating_status_at: float
     errors: tuple[tuple[str, str], ...] = ()
+    pressure_sequence: int = 0
 
 
 class PollingPump:
@@ -323,6 +325,7 @@ class PollingPump:
             self._intervals.pressure_stale_seconds,
             errors.get("pressure"),
             connected=connected,
+            sequence=cache.pressure_sequence,
         )
         flow = self._field_state(
             now,
@@ -842,6 +845,7 @@ class PollingPump:
                     None,
                     None,
                     status_at,
+                    pressure_sequence=1,
                 )
                 self._condition.notify_all()
 
@@ -1298,6 +1302,7 @@ class PollingPump:
                 now if field == "volume" else cache.volume_at,
                 now if field == "status" else cache.operating_status_at,
                 tuple(sorted(errors.items())),
+                cache.pressure_sequence + (1 if field == "pressure" else 0),
             )
             self._condition.notify_all()
         if recovered_error_count:
@@ -1343,6 +1348,7 @@ class PollingPump:
                 cache.volume_at,
                 cache.operating_status_at,
                 tuple(sorted(errors.items())),
+                cache.pressure_sequence,
             )
             self._condition.notify_all()
         if error_count == 1 or error_count % 10 == 0:
@@ -1382,6 +1388,7 @@ class PollingPump:
         error: str | None,
         *,
         connected: bool,
+        sequence: int = 0,
     ) -> TelemetryFieldState:
         age = None if updated_at is None else max(0.0, now - updated_at)
         if not connected:
@@ -1392,7 +1399,7 @@ class PollingPump:
             quality = DataQuality.STALE
         else:
             quality = DataQuality.GOOD
-        return TelemetryFieldState(quality, age, updated_at, error)
+        return TelemetryFieldState(quality, age, updated_at, error, sequence)
 
     def _log_quality_transitions(self, fields: dict[str, TelemetryFieldState]) -> None:
         for name, field in fields.items():

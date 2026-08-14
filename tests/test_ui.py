@@ -3460,6 +3460,28 @@ def test_dashboard_layout_editor_hides_restores_and_persists_elements(
     restored.close()
 
 
+def test_legacy_pid_filter_and_deadband_settings_are_migrated(tmp_path: Path) -> None:
+    application()
+    settings = QSettings(str(tmp_path / "legacy-pid.ini"), QSettings.Format.IniFormat)
+    settings.setValue("pid/filter_alpha", 0.25)
+    settings.setValue("pid/deadband_bar", 0.4)
+    settings.setValue("developer/control_interval_seconds", 0.2)
+
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv",
+        tmp_path / "projects.sqlite3",
+        settings=settings,
+    )
+
+    assert window._pid_filter_enabled.isChecked()
+    assert window._pid_filter_time_constant.value() == pytest.approx(0.6952, abs=0.0001)
+    assert window._pid_deadband.value() == pytest.approx(0.4)
+    assert window._pid_deadband_exit.value() == pytest.approx(0.56)
+    assert settings.value("pid/configuration_schema", type=int) == 2
+    assert settings.value("pid/migrated_unvalidated", type=bool) is True
+    window.close()
+
+
 def test_running_measurement_keeps_critical_right_controls_visible(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3530,6 +3552,7 @@ def test_running_pid_changes_require_explicit_apply(
     assert window._apply_pid_button.isEnabled()
     assert "változatlan" in window._pid_application_status.toPlainText()
 
+    monkeypatch.setattr(window, "_confirm_pending_pressure_source", lambda: True)
     window._apply_pid_button.click()
 
     assert len(queued) == 1

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from eor_control.calibration import LinearCalibration
 from eor_control.control import (
     ControlMode,
+    PidDiagnostics,
     PidParameters,
     PressureSource,
     ValveCommand,
@@ -19,6 +20,7 @@ class ControlCycleResult:
     record: MeasurementRecord
     command: ValveCommand
     valve_voltage: float | None = None
+    pid_diagnostics: PidDiagnostics | None = None
 
 
 class ControlLoop:
@@ -36,6 +38,14 @@ class ControlLoop:
         self._controller = controller
         self._actuator = actuator
         self._last_output_percent = initial_output_percent
+
+    @property
+    def last_output_percent(self) -> float:
+        return self._last_output_percent
+
+    @property
+    def pid_diagnostics(self) -> PidDiagnostics:
+        return self._controller.diagnostics
 
     def execute_once(
         self,
@@ -72,6 +82,9 @@ class ControlLoop:
         )
         if not command.enabled or command.output_percent is None:
             self._actuator.set_safe_state()
+            safe_percent = getattr(self._actuator, "safe_output_percent", 0.0)
+            self._last_output_percent = float(safe_percent)
+            self._controller.enter_safe(self._last_output_percent)
         else:
             self._actuator.write_percent(command.output_percent)
             self._last_output_percent = command.output_percent
@@ -80,6 +93,7 @@ class ControlLoop:
             record=record,
             command=command,
             valve_voltage=float(voltage) if isinstance(voltage, (int, float)) else None,
+            pid_diagnostics=self._controller.diagnostics,
         )
 
     def configure_pid(self, parameters: PidParameters) -> None:
@@ -122,7 +136,10 @@ class ControlLoop:
         )
         if record.safety_reasons:
             self._actuator.set_safe_state()
-            self._last_output_percent = 0.0
+            self._last_output_percent = float(
+                getattr(self._actuator, "safe_output_percent", 0.0)
+            )
+            self._controller.enter_safe(self._last_output_percent)
             command = ValveCommand(
                 False,
                 None,
@@ -143,6 +160,7 @@ class ControlLoop:
             record=record,
             command=command,
             valve_voltage=float(voltage) if isinstance(voltage, (int, float)) else None,
+            pid_diagnostics=self._controller.diagnostics,
         )
 
     def observe_pump_startup_once(self, *, active_stage: str) -> MeasurementRecord:
@@ -195,5 +213,8 @@ class ControlLoop:
 
     def request_safe_state(self) -> None:
         self._actuator.set_safe_state()
-        self._last_output_percent = 0.0
+        self._last_output_percent = float(
+            getattr(self._actuator, "safe_output_percent", 0.0)
+        )
+        self._controller.enter_safe(self._last_output_percent)
         self._measurement.request_safe_state()

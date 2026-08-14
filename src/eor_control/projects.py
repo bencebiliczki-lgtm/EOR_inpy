@@ -46,10 +46,19 @@ class PidProfile:
     pressure_source: str
     created_at: datetime
     updated_at: datetime
+    filter_enabled: bool = True
+    filter_time_constant_seconds: float = 0.8
+    deadband_enter_bar: float = 0.5
+    deadband_exit_bar: float = 0.7
+    integral_min_percent: float = -100.0
+    integral_max_percent: float = 100.0
+    maximum_output_rate_percent_per_second: float = 1000.0
+    physically_validated: bool = False
+    validated_at: datetime | None = None
 
 
 class ProjectRepository:
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 6
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,13 +112,22 @@ class ProjectRepository:
                         output_min_percent REAL NOT NULL,
                         output_max_percent REAL NOT NULL,
                         pressure_source TEXT NOT NULL,
+                        filter_enabled INTEGER NOT NULL DEFAULT 1,
+                        filter_time_constant_seconds REAL NOT NULL DEFAULT 0.8,
+                        deadband_enter_bar REAL NOT NULL DEFAULT 0.5,
+                        deadband_exit_bar REAL NOT NULL DEFAULT 0.7,
+                        integral_min_percent REAL NOT NULL DEFAULT -100.0,
+                        integral_max_percent REAL NOT NULL DEFAULT 100.0,
+                        maximum_output_rate_percent_per_second REAL NOT NULL DEFAULT 1000.0,
+                        physically_validated INTEGER NOT NULL DEFAULT 0,
+                        validated_at_utc TEXT,
                         created_at_utc TEXT NOT NULL,
                         updated_at_utc TEXT NOT NULL
                     );
-                    PRAGMA user_version = 5;
+                    PRAGMA user_version = 6;
                     """
                 )
-            version = 5
+            version = 6
         if version == 1:
             with self._connection:
                 self._connection.executescript(
@@ -166,6 +184,30 @@ class ProjectRepository:
                     ALTER TABLE projects
                     ADD COLUMN project_path TEXT NOT NULL DEFAULT '';
                     PRAGMA user_version = 5;
+                    """
+                )
+            version = 5
+        if version == 5:
+            with self._connection:
+                self._connection.executescript(
+                    """
+                    ALTER TABLE pid_profiles ADD COLUMN filter_enabled INTEGER NOT NULL DEFAULT 1;
+                    ALTER TABLE pid_profiles
+                    ADD COLUMN filter_time_constant_seconds REAL NOT NULL DEFAULT 0.8;
+                    ALTER TABLE pid_profiles
+                    ADD COLUMN deadband_enter_bar REAL NOT NULL DEFAULT 0.5;
+                    ALTER TABLE pid_profiles ADD COLUMN deadband_exit_bar REAL NOT NULL DEFAULT 0.7;
+                    ALTER TABLE pid_profiles
+                    ADD COLUMN integral_min_percent REAL NOT NULL DEFAULT -100.0;
+                    ALTER TABLE pid_profiles
+                    ADD COLUMN integral_max_percent REAL NOT NULL DEFAULT 100.0;
+                    ALTER TABLE pid_profiles
+                    ADD COLUMN maximum_output_rate_percent_per_second
+                    REAL NOT NULL DEFAULT 1000.0;
+                    ALTER TABLE pid_profiles
+                    ADD COLUMN physically_validated INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE pid_profiles ADD COLUMN validated_at_utc TEXT;
+                    PRAGMA user_version = 6;
                     """
                 )
 
@@ -258,6 +300,15 @@ class ProjectRepository:
         output_min_percent: float,
         output_max_percent: float,
         pressure_source: str,
+        filter_enabled: bool = True,
+        filter_time_constant_seconds: float = 0.8,
+        deadband_enter_bar: float = 0.5,
+        deadband_exit_bar: float = 0.7,
+        integral_min_percent: float = -100.0,
+        integral_max_percent: float = 100.0,
+        maximum_output_rate_percent_per_second: float = 1000.0,
+        physically_validated: bool = False,
+        validated_at: datetime | None = None,
     ) -> PidProfile:
         cleaned_name = self._validate_name(name, "PID profile name")
         self._validate_pid_profile(
@@ -276,7 +327,11 @@ class ProjectRepository:
                 INSERT INTO pid_profiles (
                     name, kp, ki, kd, direction, output_min_percent,
                     output_max_percent, pressure_source, created_at_utc, updated_at_utc
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    , filter_enabled, filter_time_constant_seconds,
+                    deadband_enter_bar, deadband_exit_bar, integral_min_percent,
+                    integral_max_percent, maximum_output_rate_percent_per_second,
+                    physically_validated, validated_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(name) DO UPDATE SET
                     name = excluded.name,
                     kp = excluded.kp,
@@ -286,6 +341,16 @@ class ProjectRepository:
                     output_min_percent = excluded.output_min_percent,
                     output_max_percent = excluded.output_max_percent,
                     pressure_source = excluded.pressure_source,
+                    filter_enabled = excluded.filter_enabled,
+                    filter_time_constant_seconds = excluded.filter_time_constant_seconds,
+                    deadband_enter_bar = excluded.deadband_enter_bar,
+                    deadband_exit_bar = excluded.deadband_exit_bar,
+                    integral_min_percent = excluded.integral_min_percent,
+                    integral_max_percent = excluded.integral_max_percent,
+                    maximum_output_rate_percent_per_second =
+                        excluded.maximum_output_rate_percent_per_second,
+                    physically_validated = excluded.physically_validated,
+                    validated_at_utc = excluded.validated_at_utc,
                     updated_at_utc = excluded.updated_at_utc
                 """,
                 (
@@ -299,6 +364,15 @@ class ProjectRepository:
                     pressure_source,
                     timestamp,
                     timestamp,
+                    int(filter_enabled),
+                    filter_time_constant_seconds,
+                    deadband_enter_bar,
+                    deadband_exit_bar,
+                    integral_min_percent,
+                    integral_max_percent,
+                    maximum_output_rate_percent_per_second,
+                    int(physically_validated),
+                    None if validated_at is None else validated_at.isoformat(),
                 ),
             )
         profile = self.get_pid_profile_by_name(cleaned_name)
@@ -543,6 +617,21 @@ class ProjectRepository:
             pressure_source=cast(str, row["pressure_source"]),
             created_at=datetime.fromisoformat(cast(str, row["created_at_utc"])),
             updated_at=datetime.fromisoformat(cast(str, row["updated_at_utc"])),
+            filter_enabled=bool(row["filter_enabled"]),
+            filter_time_constant_seconds=cast(float, row["filter_time_constant_seconds"]),
+            deadband_enter_bar=cast(float, row["deadband_enter_bar"]),
+            deadband_exit_bar=cast(float, row["deadband_exit_bar"]),
+            integral_min_percent=cast(float, row["integral_min_percent"]),
+            integral_max_percent=cast(float, row["integral_max_percent"]),
+            maximum_output_rate_percent_per_second=cast(
+                float, row["maximum_output_rate_percent_per_second"]
+            ),
+            physically_validated=bool(row["physically_validated"]),
+            validated_at=(
+                None
+                if row["validated_at_utc"] is None
+                else datetime.fromisoformat(cast(str, row["validated_at_utc"]))
+            ),
         )
 
     @staticmethod

@@ -84,11 +84,22 @@ def test_pid_profiles_can_be_saved_updated_and_deleted(tmp_path: Path) -> None:
             output_min_percent=10.0,
             output_max_percent=80.0,
             pressure_source="injection_pump",
+            filter_enabled=True,
+            filter_time_constant_seconds=1.2,
+            deadband_enter_bar=0.4,
+            deadband_exit_bar=0.7,
+            integral_min_percent=-30.0,
+            integral_max_percent=40.0,
+            maximum_output_rate_percent_per_second=8.0,
+            physically_validated=False,
         )
 
         assert updated.id == profile.id
         assert repository.list_pid_profiles() == (updated,)
         assert repository.get_pid_profile_by_name("viszkózus OLAJ") == updated
+        assert updated.filter_time_constant_seconds == pytest.approx(1.2)
+        assert updated.deadband_exit_bar == pytest.approx(0.7)
+        assert not updated.physically_validated
         repository.delete_pid_profile(updated.id)
         assert repository.list_pid_profiles() == ()
 
@@ -238,7 +249,7 @@ def test_version_one_database_is_migrated_with_stage_metadata(tmp_path: Path) ->
     assert stage.name == "Chemical"
     assert stage.fluid == "A"
     check = sqlite3.connect(path)
-    assert check.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert check.execute("PRAGMA user_version").fetchone()[0] == 6
     assert check.execute(
         "SELECT stage_type FROM measurement_stages WHERE id = ?", (stage.id,)
     ).fetchone()[0] == "Chemical"

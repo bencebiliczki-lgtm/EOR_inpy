@@ -360,3 +360,15 @@ class AnalogValveActuator:
     @property
     def last_voltage(self) -> float | None:
         return self._last_voltage
+
+    @property
+    def safe_output_percent(self) -> float:
+        return min(
+            100.0,
+            max(
+                0.0,
+                (self._daq.safe_output_voltage - self._zero)
+                / (self._hundred - self._zero)
+                * 100.0,
+            ),
+        )

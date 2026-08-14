@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from math import exp
 
 import pytest
 
@@ -15,6 +16,7 @@ from eor_control.domain import (
     AnalogPressureReading,
     DataQuality,
     MeasurementSnapshot,
+    PumpPressureReading,
     PumpStatus,
 )
 from eor_control.safety import SafetyDecision
@@ -64,6 +66,32 @@ def controller(parameters: PidParameters | None = None) -> ValveController:
                 direction=ControlDirection.DIRECT,
             )
         )
+    )
+
+
+def timestamped_snapshot(
+    pressure: float,
+    *,
+    sequence: int,
+    timestamp: float,
+    quality: DataQuality = DataQuality.GOOD,
+) -> MeasurementSnapshot:
+    base = snapshot(injection_pressure=pressure)
+    return MeasurementSnapshot(
+        recorded_at=base.recorded_at,
+        monotonic_seconds=timestamp,
+        jacket_pump=base.jacket_pump,
+        injection_pump=base.injection_pump,
+        line_pressure_bar=base.line_pressure_bar,
+        differential_pressure_bar=base.differential_pressure_bar,
+        valve_percent=base.valve_percent,
+        injection_pressure_reading=PumpPressureReading(
+            pressure,
+            timestamp,
+            0.0,
+            sequence,
+            quality,
+        ),
     )
 
 
@@ -361,3 +389,198 @@ def test_new_measurement_activates_preselected_automatic_mode_without_stale_tran
     assert command.mode is ControlMode.AUTOMATIC
     assert command.source is PressureSource.INJECTION_PUMP
     assert command.reason is None
+
+
+def test_same_pressure_sequence_updates_pid_only_once() -> None:
+    pid = PidController(
+        PidParameters(0.0, 1.0, 0.0, direction=ControlDirection.DIRECT)
+    )
+
+    first = pid.calculate(
+        setpoint=10.0,
+        measurement=0.0,
+        dt_seconds=0.2,
+        sequence=7,
+        timestamp_monotonic=1.0,
+    )
+    held = pid.calculate(
+        setpoint=10.0,
+        measurement=0.0,
+        dt_seconds=0.2,
+        sequence=7,
+        timestamp_monotonic=1.0,
+    )
+
+    assert held == pytest.approx(first)
+    assert pid.diagnostics.state.value == "HOLD"
+
+
+def test_time_based_ema_uses_real_measurement_interval() -> None:
+    pid = PidController(
+        PidParameters(
+            0.0,
+            0.0,
+            0.0,
+            measurement_filter_time_constant_seconds=1.0,
+            direction=ControlDirection.DIRECT,
+        )
+    )
+    pid.calculate(
+        setpoint=0.0,
+        measurement=0.0,
+        dt_seconds=0.2,
+        sequence=1,
+        timestamp_monotonic=0.0,
+    )
+    pid.calculate(
+        setpoint=0.0,
+        measurement=10.0,
+        dt_seconds=0.5,
+        sequence=2,
+        timestamp_monotonic=1.0,
+    )
+
+    assert pid.diagnostics.filtered_measurement_bar == pytest.approx(
+        10.0 * (1.0 - exp(-1.0))
+    )
+
+
+def test_integral_and_derivative_use_measurement_timestamp_delta() -> None:
+    pid = PidController(
+        PidParameters(
+            0.0,
+            1.0,
+            1.0,
+            direction=ControlDirection.REVERSE,
+            measurement_filter_enabled=False,
+        )
+    )
+    pid.calculate(
+        setpoint=20.0,
+        measurement=10.0,
+        dt_seconds=0.2,
+        sequence=1,
+        timestamp_monotonic=10.0,
+    )
+    pid.calculate(
+        setpoint=20.0,
+        measurement=14.0,
+        dt_seconds=0.2,
+        sequence=2,
+        timestamp_monotonic=12.0,
+    )
+
+    assert pid.diagnostics.measurement_dt_seconds == pytest.approx(2.0)
+    assert pid.diagnostics.d_term_percent == pytest.approx(2.0)
+
+
+def test_long_sample_gap_holds_integral_and_derivative_terms() -> None:
+    pid = PidController(
+        PidParameters(
+            0.0,
+            1.0,
+            1.0,
+            maximum_pid_sample_interval_seconds=1.0,
+            direction=ControlDirection.REVERSE,
+            measurement_filter_enabled=False,
+        )
+    )
+    pid.calculate(
+        setpoint=20.0,
+        measurement=10.0,
+        dt_seconds=0.2,
+        sequence=1,
+        timestamp_monotonic=1.0,
+    )
+    first_integral = pid.diagnostics.i_term_percent
+    pid.calculate(
+        setpoint=20.0,
+        measurement=15.0,
+        dt_seconds=0.2,
+        sequence=2,
+        timestamp_monotonic=5.0,
+    )
+
+    assert pid.diagnostics.i_term_percent == pytest.approx(first_integral)
+    assert pid.diagnostics.d_term_percent == pytest.approx(0.0)
+
+
+def test_stale_selected_source_blocks_automatic_pid() -> None:
+    valve = controller()
+    command = valve.command(
+        snapshot=timestamped_snapshot(
+            100.0,
+            sequence=1,
+            timestamp=1.0,
+            quality=DataQuality.STALE,
+        ),
+        safety=SafetyDecision(True, ()),
+        mode=ControlMode.AUTOMATIC,
+        source=PressureSource.INJECTION_PUMP,
+        setpoint_bar=110.0,
+        dt_seconds=0.2,
+    )
+
+    assert not command.enabled
+    assert command.pid_state.value == "BLOCKED"
+
+
+def test_pressure_source_switch_is_bumpless() -> None:
+    valve = controller(PidParameters(2.0, 0.2, 0.5))
+    before = valve.command(
+        snapshot=snapshot(injection_pressure=100.0, line_pressure=70.0),
+        safety=SafetyDecision(True, ()),
+        mode=ControlMode.AUTOMATIC,
+        source=PressureSource.INJECTION_PUMP,
+        setpoint_bar=110.0,
+        dt_seconds=0.2,
+    )
+    after = valve.command(
+        snapshot=snapshot(injection_pressure=100.0, line_pressure=70.0),
+        safety=SafetyDecision(True, ()),
+        mode=ControlMode.AUTOMATIC,
+        source=PressureSource.LINE_SENSOR,
+        setpoint_bar=110.0,
+        dt_seconds=0.2,
+    )
+
+    assert after.output_percent == pytest.approx(before.output_percent)
+    assert after.reason == "bumpless pressure-source transfer"
+    assert after.pid_state.value == "INITIALIZING"
+
+
+def test_safe_state_restart_is_bumpless() -> None:
+    valve = controller(PidParameters(2.0, 0.2, 0.5))
+    valve.enter_safe(17.0)
+
+    command = valve.command(
+        snapshot=snapshot(injection_pressure=90.0),
+        safety=SafetyDecision(True, ()),
+        mode=ControlMode.AUTOMATIC,
+        source=PressureSource.INJECTION_PUMP,
+        setpoint_bar=110.0,
+        dt_seconds=0.2,
+    )
+
+    assert command.output_percent == pytest.approx(17.0)
+    assert command.reason == "bumpless safe-to-automatic restart"
+    assert command.pid_state.value == "INITIALIZING"
+
+
+def test_deadband_uses_separate_exit_threshold() -> None:
+    pid = PidController(
+        PidParameters(
+            1.0,
+            0.0,
+            0.0,
+            deadband_bar=1.0,
+            deadband_exit_bar=2.0,
+            direction=ControlDirection.DIRECT,
+            measurement_filter_enabled=False,
+        )
+    )
+    pid.reset(output_percent=30.0)
+
+    assert pid.calculate(setpoint=10.0, measurement=9.5, dt_seconds=0.2) == 30.0
+    assert pid.calculate(setpoint=10.0, measurement=8.5, dt_seconds=0.2) == 30.0
+    assert pid.calculate(setpoint=10.0, measurement=7.5, dt_seconds=0.2) != 30.0

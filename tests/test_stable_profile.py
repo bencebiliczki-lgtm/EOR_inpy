@@ -19,7 +19,7 @@ def test_stable_default_profile_schema_is_valid_but_hardware_is_blocked() -> Non
     profile = load_stable_profile(PROFILE_PATH)
     validation = validate_stable_profile(profile)
 
-    assert profile.schema_version == 3
+    assert profile.schema_version == 4
     assert validation.application_can_start
     assert not validation.hardware_measurement_can_start
     assert validation.for_key("safety.valve_safe_output_v") is not None
@@ -71,7 +71,7 @@ def test_schema_one_separate_pressure_limits_are_preserved(
     profile = load_stable_profile(path)
     safety = profile.section("safety")
 
-    assert profile.schema_version == 3
+    assert profile.schema_version == 4
     assert safety["jacket_max_pressure_bar"] == pytest.approx(400.0)
     assert safety["injection_max_pressure_bar"] == pytest.approx(350.0)
     assert "pump_max_pressure_bar" not in safety

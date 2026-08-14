@@ -3,11 +3,11 @@ from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from math import isfinite
+from math import isfinite, log
 from pathlib import Path
 from typing import Any, cast
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 PROFILE_NAME = "AFKI-EOR Stabil alapbeállítások"
 
 
@@ -91,7 +91,7 @@ def migrate_profile(payload: dict[str, object]) -> dict[str, object]:
     version = payload.get("schema_version", 0)
     if version == CURRENT_SCHEMA_VERSION:
         return payload
-    if version not in {0, 1, 2}:
+    if version not in {0, 1, 2, 3}:
         raise ValueError(f"unsupported stable profile schema version: {version}")
     migrated = dict(payload)
     safety_value = migrated.get("safety")
@@ -104,6 +104,23 @@ def migrate_profile(payload: dict[str, object]) -> dict[str, object]:
     if version == 1:
         safety.pop("pressure_overshoot_shutdown_bar", None)
     migrated["safety"] = safety
+    if version == 3:
+        acquisition_value = migrated.get("acquisition")
+        acquisition = (
+            dict(acquisition_value) if isinstance(acquisition_value, Mapping) else {}
+        )
+        control_interval = 1.0 / float(acquisition.get("control_update_rate_hz", 5.0))
+        pid_value = migrated.get("pid")
+        pid = dict(pid_value) if isinstance(pid_value, Mapping) else {}
+        alpha = pid.pop("filter_alpha", None)
+        if isinstance(alpha, (int, float)) and 0.0 < alpha < 1.0:
+            pid.setdefault(
+                "filter_time_constant_seconds",
+                -control_interval / log(1.0 - float(alpha)),
+            )
+        pid.setdefault("filter_enabled", True)
+        pid.setdefault("physically_validated", False)
+        migrated["pid"] = pid
     migrated["schema_version"] = CURRENT_SCHEMA_VERSION
     migrated.setdefault("profile_name", PROFILE_NAME)
     migrated.setdefault("modified_at_utc", datetime.now(UTC).isoformat())

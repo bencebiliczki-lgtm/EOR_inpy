@@ -142,15 +142,19 @@ a projekt fázis-metaadatait is. A nyers mérési fájlok nem az adatbázis tula
 vannak, ezért archivált mérési adatként változatlanul megmaradnak. A UI törli az
 érvénytelenné vált utolsó projekt- és fázisazonosítókat a `QSettings` INI-ből.
 
-Az adatbázis 4-es sémája közös, név szerint kis- és nagybetűtől függetlenül egyedi
+Az adatbázis 6-os sémája közös, név szerint kis- és nagybetűtől függetlenül egyedi
 `pid_profiles` táblát tartalmaz. Egy profil a három erősítés, a hatásirány, a
-kimeneti korlátok és a nyomásforrás értékeit tárolja létrehozási és módosítási
+forrás, az időalapú EMA, a hiszterézises holtsáv, az integrátor- és kimeneti
+korlátok, valamint a fizikai validáció állapotát tárolja létrehozási és módosítási
 időbélyeggel. A mentés azonos névnél explicit UI-megerősítés után felülír, a törlés
 szintén megerősítést kér. A kiválasztott profil azonosítója az INI-be és a projekt
 konfigurációs pillanatképébe is bekerül; a profilérték kézi változtatása leválasztja
 az űrlapot a mentett profilról, ezért a tárolt profil hallgatólagosan nem módosul.
 
 ## Szabályozási mag
+
+A PID egységes, sequence-elt `PressureMeasurement` bemeneti és mintaidős
+szabályozási modelljének részletei: [pid-control.md](pid-control.md).
 
 A fizikai ISCO pumpákat a `PollingPump` worker választja le a vezérlési
 ciklusról. Kapcsolódáskor csak a biztonságkritikus nyomás és az alap működési
@@ -285,7 +289,7 @@ mérést.
 
 ## Háttér-vezérlési runtime
 
-A `BackgroundControlRunner` dedikált Python-szálon, alapértelmezetten 100 ms-os
+A `BackgroundControlRunner` dedikált Python-szálon, alapértelmezetten 200 ms-os
 ütemben futtatja a mérés–biztonság–PID–aktuátor láncot. A Qt widgeteket nem éri el;
 az eredményeket Qt signal továbbítja a főszálra. Az adatrögzítés ugyanebben a
 háttérszálban, de külön 1–3600 másodperces ütemezéssel történik, ezért a gyors PID

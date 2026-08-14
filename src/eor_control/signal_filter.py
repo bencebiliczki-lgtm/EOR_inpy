@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
-from math import isfinite
+from math import exp, isfinite
 from statistics import median
 
 
@@ -29,6 +29,10 @@ class AnalogFilterConfig:
     differential_physical_min_pressure_bar: float = -5.0
     differential_physical_max_pressure_bar: float = 55.0
     differential_stale_timeout_seconds: float = 1.0
+    line_ema_enabled: bool = True
+    line_ema_time_constant_seconds: float = 0.8
+    differential_ema_enabled: bool = True
+    differential_ema_time_constant_seconds: float = 0.8
 
     def __post_init__(self) -> None:
         if not 1 <= self.samples_per_read <= 100:
@@ -91,6 +95,14 @@ class AnalogFilterConfig:
             or self.differential_stale_timeout_seconds <= 0
         ):
             raise ValueError("differential stale timeout must be positive and finite")
+        if not all(
+            isfinite(value) and value > 0.0
+            for value in (
+                self.line_ema_time_constant_seconds,
+                self.differential_ema_time_constant_seconds,
+            )
+        ):
+            raise ValueError("analog EMA time constants must be positive and finite")
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,16 +128,26 @@ class AnalogSignalFilter:
         spike_rejection_enabled: bool,
         spike_limit_voltage: float,
         spike_confirmation_samples: int,
+        ema_enabled: bool = True,
+        time_constant_seconds: float | None = None,
     ) -> None:
         self._alpha = alpha
         self._median_enabled = median_enabled
         self._spike_rejection_enabled = spike_rejection_enabled
         self._spike_limit = spike_limit_voltage
         self._spike_confirmation_samples = spike_confirmation_samples
+        self._ema_enabled = ema_enabled
+        self._time_constant_seconds = time_constant_seconds
         self._filtered_voltage: float | None = None
         self._pending_spike_count = 0
+        self._last_timestamp_monotonic: float | None = None
 
-    def process(self, samples: Sequence[float]) -> FilteredAnalogValue:
+    def process(
+        self,
+        samples: Sequence[float],
+        *,
+        timestamp_monotonic: float | None = None,
+    ) -> FilteredAnalogValue:
         if not samples:
             raise ValueError("no analog samples received")
         if not all(isfinite(value) for value in samples):
@@ -134,6 +156,7 @@ class AnalogSignalFilter:
         raw_voltage = float(median(samples) if self._median_enabled else last_raw_voltage)
         if self._filtered_voltage is None:
             self._filtered_voltage = raw_voltage
+            self._last_timestamp_monotonic = timestamp_monotonic
             return FilteredAnalogValue(last_raw_voltage, raw_voltage, raw_voltage)
 
         candidate = raw_voltage
@@ -149,12 +172,22 @@ class AnalogSignalFilter:
         else:
             self._pending_spike_count = 0
 
-        self._filtered_voltage = (
-            self._alpha * candidate
-            + (1.0 - self._alpha) * self._filtered_voltage
-        )
+        alpha = self._alpha
+        if not self._ema_enabled:
+            alpha = 1.0
+        elif (
+            self._time_constant_seconds is not None
+            and timestamp_monotonic is not None
+            and self._last_timestamp_monotonic is not None
+        ):
+            dt_seconds = timestamp_monotonic - self._last_timestamp_monotonic
+            if dt_seconds > 0.0:
+                alpha = 1.0 - exp(-dt_seconds / self._time_constant_seconds)
+        self._filtered_voltage = alpha * candidate + (1.0 - alpha) * self._filtered_voltage
+        self._last_timestamp_monotonic = timestamp_monotonic
         return FilteredAnalogValue(last_raw_voltage, raw_voltage, self._filtered_voltage)
 
     def reset(self) -> None:
         self._filtered_voltage = None
         self._pending_spike_count = 0
+        self._last_timestamp_monotonic = None

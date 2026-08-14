@@ -99,8 +99,9 @@ megerősítés után. Ez a projekt- és fázis-metaadatokat törli; a korábbi n
 CSV-k biztonsági és visszakövethetőségi okból megmaradnak.
 
 A **Szelepvezérlés** panel összecsukható PID-részén a beállítások névvel menthető profilokba
-rendezhetők. A profil a `Kp`, `Ki`, `Kd`, hatásirány, kimeneti minimum/maximum és
-nyomásforrás értékeket tárolja. A profilok közös SQLite-adatok: kiválaszthatók,
+rendezhetők. A profil a `Kp`, `Ki`, `Kd`, forrást, hatásirányt, EMA-időállandót,
+hiszterézises holtsávot, integrátor- és kimeneti korlátokat, valamint fizikai
+validációs állapotot tárolja. A profilok közös SQLite-adatok: kiválaszthatók,
 felülírhatók és megerősítés után törölhetők. Egy mentett profil kézi módosítása
 automatikusan **Egyéni beállítások** állapotra vált; az utoljára kiválasztott profil
 alkalmazásindításkor visszatöltődik. Futó mérés közben a módváltás és az érvényes
@@ -123,7 +124,9 @@ valamint elindítható a dashboard elrendezésszerkesztője. Szerkesztéskor min
 kártya × gombbal elrejthető, az ablak alján lévő vízszintes elemsávból pedig
 visszakapcsolható. A láthatósági beállítások újraindítás után is megmaradnak.
 
-A PID-vezérlés 100 ms-os háttérszálon fut, ezért nem blokkolja a Qt főszálat. A
+A PID biztonsági felügyelete konfigurálható háttérszálon (alapérték: 0,2 s) fut,
+de a PID matematikája csak új, sequence-elt forrásmintánál frissül. Ezért nem
+blokkolja a Qt főszálat és nem integrálja többször ugyanazt a cache-mintát. A
 nyers adatrögzítés ettől függetlenül 1 másodperc és 1 óra között állítható. A
 dashboard külön kapcsolatjelzőt mutat a két pumpához, a két NI bemenethez és a
 szelepaktuátorhoz. A vonali nyomás a berendezés belépő nyomása is, ezért egyetlen

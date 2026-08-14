@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from math import isfinite
+from math import isfinite, log
 from pathlib import Path
 from threading import Event, Thread
 from time import monotonic
@@ -90,6 +90,7 @@ from eor_control.control import (
     ControlMode,
     PidController,
     PidParameters,
+    PidState,
     PressureSource,
     ValveController,
 )
@@ -1563,6 +1564,14 @@ class DeviceSettingsDialog(ResizableDialog):
         self.line_ema_alpha.setRange(0.01, 1.0)
         self.line_ema_alpha.setDecimals(3)
         self.line_ema_alpha.setValue(self._stored_float("line_ema_alpha", 0.2))
+        self.line_ema_enabled = QCheckBox("Vonali EMA engedélyezve")
+        self.line_ema_enabled.setChecked(self._stored_bool("line_ema_enabled", True))
+        self.line_ema_time_constant_seconds = QDoubleSpinBox()
+        self.line_ema_time_constant_seconds.setRange(0.01, 60.0)
+        self.line_ema_time_constant_seconds.setSuffix(" s")
+        self.line_ema_time_constant_seconds.setValue(
+            self._stored_float("line_ema_time_constant_seconds", 0.8)
+        )
         self.line_spike_rejection_enabled = QCheckBox("Tüskeszűrés engedélyezve")
         self.line_spike_rejection_enabled.setChecked(
             self._stored_bool("line_spike_rejection_enabled", True)
@@ -1613,6 +1622,16 @@ class DeviceSettingsDialog(ResizableDialog):
         self.differential_ema_alpha.setDecimals(3)
         self.differential_ema_alpha.setValue(
             self._stored_float("differential_ema_alpha", 0.2)
+        )
+        self.differential_ema_enabled = QCheckBox("Differenciális EMA engedélyezve")
+        self.differential_ema_enabled.setChecked(
+            self._stored_bool("differential_ema_enabled", True)
+        )
+        self.differential_ema_time_constant_seconds = QDoubleSpinBox()
+        self.differential_ema_time_constant_seconds.setRange(0.01, 60.0)
+        self.differential_ema_time_constant_seconds.setSuffix(" s")
+        self.differential_ema_time_constant_seconds.setValue(
+            self._stored_float("differential_ema_time_constant_seconds", 0.8)
         )
         self.differential_spike_rejection_enabled = QCheckBox(
             "Differenciális tüskeszűrés"
@@ -1733,7 +1752,8 @@ class DeviceSettingsDialog(ResizableDialog):
             ("Minták olvasásonként", self.analog_samples_per_read),
             ("Mintavételi frekvencia", self.analog_sample_rate_hz),
             ("Vonali medián", self.line_median_enabled),
-            ("Vonali EMA alfa", self.line_ema_alpha),
+            ("Vonali EMA", self.line_ema_enabled),
+            ("Vonali EMA időállandó", self.line_ema_time_constant_seconds),
             ("Vonali tüskeszűrés", self.line_spike_rejection_enabled),
             ("Tüskehatár", self.line_spike_limit_voltage),
             ("Tüske megerősítési minták", self.line_spike_confirmation_samples),
@@ -1743,7 +1763,11 @@ class DeviceSettingsDialog(ResizableDialog):
             ("Fizikai maximum", self.line_physical_max_pressure_bar),
             ("STALE időhatár", self.line_stale_timeout_seconds),
             ("Differenciális medián", self.differential_median_enabled),
-            ("Differenciális EMA alfa", self.differential_ema_alpha),
+            ("Differenciális EMA", self.differential_ema_enabled),
+            (
+                "Differenciális EMA időállandó",
+                self.differential_ema_time_constant_seconds,
+            ),
             (
                 "Differenciális tüskeszűrés",
                 self.differential_spike_rejection_enabled,
@@ -2360,6 +2384,10 @@ class DeviceSettingsDialog(ResizableDialog):
             analog_sample_rate_hz=self.analog_sample_rate_hz.value(),
             line_median_enabled=self.line_median_enabled.isChecked(),
             line_ema_alpha=self.line_ema_alpha.value(),
+            line_ema_enabled=self.line_ema_enabled.isChecked(),
+            line_ema_time_constant_seconds=(
+                self.line_ema_time_constant_seconds.value()
+            ),
             line_spike_rejection_enabled=self.line_spike_rejection_enabled.isChecked(),
             line_spike_limit_voltage=self.line_spike_limit_voltage.value(),
             line_spike_confirmation_samples=self.line_spike_confirmation_samples.value(),
@@ -2372,6 +2400,10 @@ class DeviceSettingsDialog(ResizableDialog):
                 self.differential_median_enabled.isChecked()
             ),
             differential_ema_alpha=self.differential_ema_alpha.value(),
+            differential_ema_enabled=self.differential_ema_enabled.isChecked(),
+            differential_ema_time_constant_seconds=(
+                self.differential_ema_time_constant_seconds.value()
+            ),
             differential_spike_rejection_enabled=(
                 self.differential_spike_rejection_enabled.isChecked()
             ),
@@ -3550,7 +3582,13 @@ class PumpControlDialog(ResizableDialog):
                     pump_errors,
                     pressure_values,
                     pressure_errors,
-                    self._control_loop.latest_pressure_readings(),
+                    (
+                        self._control_loop.latest_pressure_readings()
+                        if callable(
+                            getattr(self._control_loop, "latest_pressure_readings", None)
+                        )
+                        else {}
+                    ),
                 )
             )
 
@@ -3583,6 +3621,8 @@ class PumpControlDialog(ResizableDialog):
                 if "line_pressure" not in self._enabled_pressure_inputs
                 else self._format_analog_pressure_detail(line_detail)
                 if line_detail is not None
+                else f"KAPCSOLÓDVA | {result.pressure_values['line_pressure']:.3f} bar"
+                if "line_pressure" in result.pressure_values
                 else "NINCS KAPCSOLAT — "
                 + result.pressure_errors.get("line_pressure", "ismeretlen hiba")
             )
@@ -6564,6 +6604,9 @@ class DashboardWindow(QMainWindow):
         self._hardware_actuator: AnalogValveActuator | None = None
         self._measurement_time_origin: float | None = None
         self._last_cycle_result: ControlCycleResult | None = None
+        self._last_pid_diagnostic_key: (
+            tuple[PressureSource | None, int | None, PidState] | None
+        ) = None
         self._last_hardware_status_record: MeasurementRecord | None = None
         self._diagnostic_measurement_id: str | None = None
         self._diagnostic_section_id: int | None = None
@@ -6612,6 +6655,9 @@ class DashboardWindow(QMainWindow):
         self._injection_flows: deque[float] = deque()
         self._line_pressures: deque[float] = deque()
         self._differential_pressures: deque[float] = deque()
+        self._pid_raw_pressures: deque[float] = deque()
+        self._pid_filtered_pressures: deque[float] = deque()
+        self._pid_setpoints: deque[float] = deque()
         self._alarm_points: list[dict[str, object]] = []
         self._runtime_bridge = RuntimeBridge(self)
         self._runtime_bridge.cycle_completed.connect(self._handle_cycle)
@@ -6824,8 +6870,9 @@ class DashboardWindow(QMainWindow):
         self._mode.addItem("Kézi", ControlMode.MANUAL)
         self._mode.addItem("Automata", ControlMode.AUTOMATIC)
         self._source = QComboBox()
-        self._source.addItem("Besajtolópumpa", PressureSource.INJECTION_PUMP)
-        self._source.addItem("Vonali nyomás", PressureSource.LINE_SENSOR)
+        self._source.addItem("Besajtolópumpa nyomása", PressureSource.INJECTION_PUMP)
+        self._source.addItem("Vonali nyomásmérő", PressureSource.LINE_SENSOR)
+        self._confirmed_pressure_source = PressureSource.INJECTION_PUMP
         self._manual_output = QDoubleSpinBox()
         self._manual_output.setRange(0.0, 100.0)
         self._manual_output.setValue(25.0)
@@ -6845,10 +6892,38 @@ class DashboardWindow(QMainWindow):
         self._output_max = self._percent_spinbox(100.0)
         self._pid_deadband = self._pid_spinbox(0.5)
         self._pid_deadband.setSuffix(" bar")
+        self._pid_deadband_exit = self._pid_spinbox(0.7)
+        self._pid_deadband_exit.setSuffix(" bar")
         self._pid_output_rate = self._pid_spinbox(10.0)
         self._pid_output_rate.setSuffix(" %/s")
-        self._pid_filter_alpha = self._pid_spinbox(0.25)
-        self._pid_filter_alpha.setRange(0.01, 1.0)
+        self._pid_filter_enabled = QCheckBox("Engedélyezve")
+        self._pid_filter_enabled.setChecked(True)
+        self._pid_filter_time_constant = self._pid_spinbox(0.8)
+        self._pid_filter_time_constant.setRange(0.01, 60.0)
+        self._pid_filter_time_constant.setSuffix(" s")
+        self._pid_filter_time_constant.setToolTip(
+            "A nagyobb időállandó simább, de lassabban reagáló nyomásjelet eredményez. "
+            "A szűrő csak új nyomásminta érkezésekor frissül."
+        )
+        # Internal compatibility alias for UI extensions that referenced the
+        # removed cycle-dependent alpha editor.
+        self._pid_filter_alpha = self._pid_filter_time_constant
+        self._pid_integral_min = self._pid_spinbox(0.0)
+        self._pid_integral_min.setRange(-100.0, 100.0)
+        self._pid_integral_min.setValue(-100.0)
+        self._pid_integral_min.setSuffix(" %")
+        self._pid_integral_max = self._pid_spinbox(100.0)
+        self._pid_integral_max.setRange(-100.0, 100.0)
+        self._pid_integral_max.setSuffix(" %")
+        self._pid_max_sample_interval = self._pid_spinbox(2.0)
+        self._pid_max_sample_interval.setRange(0.05, 60.0)
+        self._pid_max_sample_interval.setSuffix(" s")
+        self._pump_pid_max_age = self._pid_spinbox(2.0)
+        self._pump_pid_max_age.setRange(0.05, 60.0)
+        self._pump_pid_max_age.setSuffix(" s")
+        self._line_pid_max_age = self._pid_spinbox(1.0)
+        self._line_pid_max_age.setRange(0.01, 60.0)
+        self._line_pid_max_age.setSuffix(" s")
         self._pid_reversal_interval = self._pid_spinbox(1.0)
         self._pid_reversal_interval.setSuffix(" s")
         self._pid_reversal_deadband = self._percent_spinbox(0.5)
@@ -6907,6 +6982,20 @@ class DashboardWindow(QMainWindow):
         form.addRow("Nyomásforrás", self._source)
         form.addRow("Kézi kimenet", self._manual_output)
         form.addRow("Célérték", self._setpoint)
+        self._pid_source_value_label = QLabel("—")
+        self._pid_filtered_value_label = QLabel("—")
+        self._pid_source_age_label = QLabel("—")
+        self._pid_source_quality_label = QLabel("—")
+        self._pid_state_label = QLabel(PidState.MANUAL.value)
+        self._pid_valve_output_label = QLabel("—")
+        self._pid_voltage_label = QLabel("—")
+        form.addRow("Aktuális forrásérték", self._pid_source_value_label)
+        form.addRow("Szűrt PID-bemenet", self._pid_filtered_value_label)
+        form.addRow("Forrásadat kora", self._pid_source_age_label)
+        form.addRow("Forrás adatminősége", self._pid_source_quality_label)
+        form.addRow("PID állapot", self._pid_state_label)
+        form.addRow("Aktuális szelepállás", self._pid_valve_output_label)
+        form.addRow("Aktuális NI-kimeneti feszültség", self._pid_voltage_label)
         form.addRow("Adatrögzítési időköz", self._recording_interval)
         self._pid_settings_toggle = QPushButton("PID-beállítások megjelenítése ▼")
         self._pid_settings_toggle.setObjectName("pid_settings_toggle")
@@ -6921,7 +7010,11 @@ class DashboardWindow(QMainWindow):
         pid_form.setContentsMargins(0, 0, 0, 0)
         pid_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         pid_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        pid_form.addRow("PID ciklus", QLabel("100 ms (háttérszál)"))
+        self._pid_timing_label = QLabel(
+            "Felügyeleti ciklus: 0.200 s | PID frissítése: új forrásmintánként"
+        )
+        self._pid_timing_label.setWordWrap(True)
+        pid_form.addRow("Időzítés", self._pid_timing_label)
         pid_form.addRow("PID profil", self._pid_profile)
         pid_form.addRow("", profile_actions)
         pid_form.addRow("Kp", self._kp)
@@ -6930,12 +7023,29 @@ class DashboardWindow(QMainWindow):
         pid_form.addRow("Hatásirány", self._direction)
         pid_form.addRow("Kimeneti minimum", self._output_min)
         pid_form.addRow("Kimeneti maximum", self._output_max)
-        pid_form.addRow("Nyomásholtsáv", self._pid_deadband)
+        pid_form.addRow("Holtsáv belépési érték", self._pid_deadband)
+        pid_form.addRow("Holtsáv kilépési érték", self._pid_deadband_exit)
+        pid_form.addRow("Integrátor minimum", self._pid_integral_min)
+        pid_form.addRow("Integrátor maximum", self._pid_integral_max)
         pid_form.addRow("Maximális kimeneti sebesség", self._pid_output_rate)
-        pid_form.addRow("Nyomásszűrő alfa", self._pid_filter_alpha)
+        pid_form.addRow("PID EMA", self._pid_filter_enabled)
+        pid_form.addRow("PID-szűrő időállandó", self._pid_filter_time_constant)
+        pid_form.addRow("Pumpa PID-bemenet maximális adatkora", self._pump_pid_max_age)
+        pid_form.addRow("Vonali PID-bemenet maximális adatkora", self._line_pid_max_age)
+        pid_form.addRow("Maximális PID-mintaköz", self._pid_max_sample_interval)
         pid_form.addRow("Minimális irányváltási idő", self._pid_reversal_interval)
         pid_form.addRow("Ellenirányú korrekció holtsávja", self._pid_reversal_deadband)
         pid_form.addRow("Maximális irányváltásszám / 10 s", self._pid_max_reversals)
+        self._pid_diagnostics_view = QTextEdit()
+        self._pid_diagnostics_view.setReadOnly(True)
+        self._pid_diagnostics_view.setMaximumHeight(180)
+        self._pid_diagnostics_view.setPlaceholderText("Még nincs PID-minta.")
+        self._copy_pid_diagnostics_button = QPushButton("PID diagnosztika másolása")
+        self._copy_pid_diagnostics_button.clicked.connect(
+            self._copy_pid_diagnostics
+        )
+        pid_form.addRow("PID diagnosztika", self._pid_diagnostics_view)
+        pid_form.addRow(self._copy_pid_diagnostics_button)
         pid_form.addRow(self._pid_application_status_block)
         pid_form.addRow(self._apply_pid_button)
         self._pid_settings_panel.hide()
@@ -6957,7 +7067,14 @@ class DashboardWindow(QMainWindow):
             self._output_max,
             self._pid_deadband,
             self._pid_output_rate,
-            self._pid_filter_alpha,
+            self._pid_filter_enabled,
+            self._pid_filter_time_constant,
+            self._pid_deadband_exit,
+            self._pid_integral_min,
+            self._pid_integral_max,
+            self._pump_pid_max_age,
+            self._line_pid_max_age,
+            self._pid_max_sample_interval,
             self._pid_reversal_interval,
             self._pid_reversal_deadband,
             self._pid_max_reversals,
@@ -6970,20 +7087,21 @@ class DashboardWindow(QMainWindow):
             label = pid_form.labelForField(field)
             if isinstance(label, QLabel):
                 label.setWordWrap(True)
-        for widget in (
+        for pid_widget in (
             self._mode,
             self._manual_output,
             self._setpoint,
             self._recording_interval,
         ):
-            if isinstance(widget, QComboBox):
-                widget.currentIndexChanged.connect(self._update_runtime_settings)
+            if isinstance(pid_widget, QComboBox):
+                pid_widget.currentIndexChanged.connect(self._update_runtime_settings)
             else:
-                widget.valueChanged.connect(self._update_runtime_settings)
+                pid_widget.valueChanged.connect(self._update_runtime_settings)
         self._pid_profile.currentIndexChanged.connect(self._pid_profile_changed)
+        self._source.currentIndexChanged.connect(self._pressure_source_changed)
         self._save_pid_profile_button.clicked.connect(self._save_pid_profile)
         self._delete_pid_profile_button.clicked.connect(self._delete_pid_profile)
-        for widget in (
+        for control_widget in (
             self._source,
             self._kp,
             self._ki,
@@ -6993,15 +7111,24 @@ class DashboardWindow(QMainWindow):
             self._output_max,
             self._pid_deadband,
             self._pid_output_rate,
-            self._pid_filter_alpha,
+            self._pid_filter_enabled,
+            self._pid_filter_time_constant,
+            self._pid_deadband_exit,
+            self._pid_integral_min,
+            self._pid_integral_max,
+            self._pump_pid_max_age,
+            self._line_pid_max_age,
+            self._pid_max_sample_interval,
             self._pid_reversal_interval,
             self._pid_reversal_deadband,
             self._pid_max_reversals,
         ):
-            if isinstance(widget, QComboBox):
-                widget.currentIndexChanged.connect(self._pid_values_changed)
+            if isinstance(control_widget, QComboBox):
+                control_widget.currentIndexChanged.connect(self._pid_values_changed)
+            elif isinstance(control_widget, QCheckBox):
+                control_widget.checkStateChanged.connect(self._pid_values_changed)
             else:
-                widget.valueChanged.connect(self._pid_values_changed)
+                control_widget.valueChanged.connect(self._pid_values_changed)
         self._reload_pid_profiles()
         self._live_measurement_fields = (
             self._mode,
@@ -7018,13 +7145,23 @@ class DashboardWindow(QMainWindow):
             self._output_max,
             self._pid_deadband,
             self._pid_output_rate,
-            self._pid_filter_alpha,
+            self._pid_filter_enabled,
+            self._pid_filter_time_constant,
+            self._pid_deadband_exit,
+            self._pid_integral_min,
+            self._pid_integral_max,
+            self._pump_pid_max_age,
+            self._line_pid_max_age,
+            self._pid_max_sample_interval,
             self._pid_reversal_interval,
             self._pid_reversal_deadband,
             self._pid_max_reversals,
         )
         self._configure_control_tooltips()
         return settings
+
+    def _copy_pid_diagnostics(self) -> None:
+        QApplication.clipboard().setText(self._pid_diagnostics_view.toPlainText())
 
     def _create_project_component(self) -> tuple[QWidget, QWidget]:
         project_box = QGroupBox("Mérési projekt és szakasz")
@@ -7252,6 +7389,23 @@ class DashboardWindow(QMainWindow):
         self._differential_curve = self._plot.plot(
             pen="#8e24aa", name="Differenciálnyomás [bar]"
         )
+        self._pid_raw_curve = self._plot.plot(
+            pen=pg.mkPen("#ef6c00", style=Qt.PenStyle.DotLine),
+            name="PID-forrás nyers [bar]",
+        )
+        self._pid_filtered_curve = self._plot.plot(
+            pen=pg.mkPen("#00838f", width=2), name="PID-bemenet [bar]"
+        )
+        self._pid_setpoint_curve = self._plot.plot(
+            pen=pg.mkPen("#455a64", style=Qt.PenStyle.DashLine),
+            name="PID célérték [bar]",
+        )
+        for curve in (
+            self._pid_raw_curve,
+            self._pid_filtered_curve,
+            self._pid_setpoint_curve,
+        ):
+            curve.hide()
         self._alarm_scatter = pg.ScatterPlotItem(
             size=12,
             symbol="o",
@@ -7279,6 +7433,9 @@ class DashboardWindow(QMainWindow):
             self._injection_curve,
             self._line_curve,
             self._differential_curve,
+            self._pid_raw_curve,
+            self._pid_filtered_curve,
+            self._pid_setpoint_curve,
             self._flow_curve,
         ):
             curve.setDownsampling(auto=True, method="peak")
@@ -7313,6 +7470,19 @@ class DashboardWindow(QMainWindow):
         )
         live_measurement_layout = QVBoxLayout(live_measurement_page)
         live_measurement_layout.setContentsMargins(0, 0, 0, 0)
+        pid_curve_controls = QWidget()
+        pid_curve_layout = QHBoxLayout(pid_curve_controls)
+        pid_curve_layout.setContentsMargins(0, 0, 0, 0)
+        for label, curve in (
+            ("PID nyers", self._pid_raw_curve),
+            ("PID szűrt", self._pid_filtered_curve),
+            ("PID célérték", self._pid_setpoint_curve),
+        ):
+            toggle = QCheckBox(label)
+            toggle.toggled.connect(curve.setVisible)
+            pid_curve_layout.addWidget(toggle)
+        pid_curve_layout.addStretch(1)
+        live_measurement_layout.addWidget(pid_curve_controls)
         live_measurement_layout.addWidget(
             self._follow_live_plot_button, alignment=Qt.AlignmentFlag.AlignRight
         )
@@ -8421,7 +8591,12 @@ class DashboardWindow(QMainWindow):
             "background:transparent;font-size:20px;font-weight:700;color:#66788a"
         )
 
-    def _set_line_pressure_connection(self, snapshot: MeasurementSnapshot) -> None:
+    def _set_line_pressure_connection(
+        self,
+        snapshot: MeasurementSnapshot,
+        *,
+        show_quality_details: bool = True,
+    ) -> None:
         quality = snapshot.line_pressure_quality
         age = snapshot.line_pressure_sample_age_seconds
         age_text = "" if age is None else f" | kor: {age:.3f} s"
@@ -8429,7 +8604,13 @@ class DashboardWindow(QMainWindow):
         reason_text = "" if not reason else f" | {reason}"
         self._set_connection_status(
             "line_daq",
-            f"{quality.value.upper()}{age_text}{reason_text}",
+            (
+                f"{quality.value.upper()}{age_text}{reason_text}"
+                if quality is DataQuality.GOOD and show_quality_details
+                else "KAPCSOLÓDVA"
+                if quality is DataQuality.GOOD
+                else f"{quality.value.upper()}{age_text}{reason_text}"
+            ),
             quality is DataQuality.GOOD,
         )
 
@@ -8583,7 +8764,8 @@ class DashboardWindow(QMainWindow):
                 self._kp,
                 "Arányos erősítés: a pillanatnyi nyomáshiba közvetlen hatása a "
                 "szelepkimenetre. Nagyobb érték erősebb reakciót okoz. Futó "
-                "mérésnél az Alkalmaz gomb után, a következő ciklusban lép életbe.",
+                "mérésnél nem automatikusan, hanem az Alkalmaz gomb után, a "
+                "következő ciklusban lép életbe.",
             ),
             (
                 self._ki,
@@ -8629,10 +8811,9 @@ class DashboardWindow(QMainWindow):
                 "mérésnél is csak az Alkalmaz gomb után frissül.",
             ),
             (
-                self._pid_filter_alpha,
-                "A PID nyomásszűrőjének súlya. 1,0 esetén nincs simítás; kisebb "
-                "érték erősebben simít, de késlelteti a reakciót. Futó mérésnél "
-                "is csak az Alkalmaz gomb után frissül.",
+                self._pid_filter_time_constant,
+                "A nagyobb időállandó simább, de lassabban reagáló nyomásjelet "
+                "eredményez. A szűrő csak új nyomásminta érkezésekor frissül.",
             ),
             (
                 self._pid_reversal_interval,
@@ -9652,6 +9833,37 @@ class DashboardWindow(QMainWindow):
         ):
             self._user_settings.remove(obsolete_key)
 
+        if self._user_settings.value("pid/filter_time_constant_seconds") is None:
+            try:
+                legacy_alpha = float(
+                    str(self._user_settings.value("pid/filter_alpha", 0.25))
+                )
+            except (TypeError, ValueError):
+                legacy_alpha = 0.25
+            control_interval = ControlCycleSettingsDialog.setting_value(
+                self._user_settings,
+                "developer/control_interval_seconds",
+                ControlCycleSettingsDialog.DEFAULT_INTERVAL_SECONDS,
+            )
+            if 0.0 < legacy_alpha < 1.0:
+                migrated_tau = -control_interval / log(1.0 - legacy_alpha)
+                self._user_settings.setValue(
+                    "pid/filter_time_constant_seconds", migrated_tau
+                )
+                self._user_settings.setValue("pid/filter_enabled", True)
+            else:
+                self._user_settings.setValue("pid/filter_time_constant_seconds", 0.8)
+                self._user_settings.setValue("pid/filter_enabled", False)
+            legacy_deadband = float(
+                str(self._user_settings.value("pid/deadband_bar", 0.5))
+            )
+            self._user_settings.setValue("pid/deadband_enter_bar", legacy_deadband)
+            self._user_settings.setValue(
+                "pid/deadband_exit_bar", max(legacy_deadband, legacy_deadband * 1.4)
+            )
+            self._user_settings.setValue("pid/configuration_schema", 2)
+            self._user_settings.setValue("pid/migrated_unvalidated", True)
+
         numeric_settings = (
             (self._manual_output, "control/manual_output"),
             (self._setpoint, "control/setpoint_bar"),
@@ -9661,9 +9873,15 @@ class DashboardWindow(QMainWindow):
             (self._kd, "pid/kd"),
             (self._output_min, "pid/output_min"),
             (self._output_max, "pid/output_max"),
-            (self._pid_deadband, "pid/deadband_bar"),
+            (self._pid_deadband, "pid/deadband_enter_bar"),
+            (self._pid_deadband_exit, "pid/deadband_exit_bar"),
             (self._pid_output_rate, "pid/output_rate_percent_per_second"),
-            (self._pid_filter_alpha, "pid/filter_alpha"),
+            (self._pid_filter_time_constant, "pid/filter_time_constant_seconds"),
+            (self._pid_integral_min, "pid/integral_min_percent"),
+            (self._pid_integral_max, "pid/integral_max_percent"),
+            (self._pid_max_sample_interval, "pid/maximum_sample_interval_seconds"),
+            (self._pump_pid_max_age, "pid/pump_input_max_age_seconds"),
+            (self._line_pid_max_age, "pid/line_input_max_age_seconds"),
             (self._pid_reversal_interval, "pid/reversal_interval_seconds"),
             (self._pid_reversal_deadband, "pid/reversal_deadband_percent"),
             (self._pid_max_reversals, "pid/maximum_reversals"),
@@ -9693,6 +9911,9 @@ class DashboardWindow(QMainWindow):
                     widget.setValue(numeric_value)
             except (TypeError, ValueError):
                 continue
+        self._pid_filter_enabled.setChecked(
+            self._setting_bool("pid/filter_enabled", True)
+        )
         profile_id = self._stored_int("pid/last_profile_id")
         if profile_id is not None:
             profile_index = self._pid_profile.findData(profile_id)
@@ -9732,9 +9953,16 @@ class DashboardWindow(QMainWindow):
             "pid/direction": ControlDirection(self._direction.currentData()).value,
             "pid/output_min": self._output_min.value(),
             "pid/output_max": self._output_max.value(),
-            "pid/deadband_bar": self._pid_deadband.value(),
+            "pid/deadband_enter_bar": self._pid_deadband.value(),
+            "pid/deadband_exit_bar": self._pid_deadband_exit.value(),
             "pid/output_rate_percent_per_second": self._pid_output_rate.value(),
-            "pid/filter_alpha": self._pid_filter_alpha.value(),
+            "pid/filter_enabled": self._pid_filter_enabled.isChecked(),
+            "pid/filter_time_constant_seconds": self._pid_filter_time_constant.value(),
+            "pid/integral_min_percent": self._pid_integral_min.value(),
+            "pid/integral_max_percent": self._pid_integral_max.value(),
+            "pid/maximum_sample_interval_seconds": self._pid_max_sample_interval.value(),
+            "pid/pump_input_max_age_seconds": self._pump_pid_max_age.value(),
+            "pid/line_input_max_age_seconds": self._line_pid_max_age.value(),
             "pid/reversal_interval_seconds": self._pid_reversal_interval.value(),
             "pid/reversal_deadband_percent": self._pid_reversal_deadband.value(),
             "pid/maximum_reversals": self._pid_max_reversals.value(),
@@ -10128,6 +10356,79 @@ class DashboardWindow(QMainWindow):
             self._show_error(str(error))
             self._reload_pid_profiles()
 
+    def _pressure_source_changed(self, *_args: object) -> None:
+        if self._loading_pid_profile:
+            return
+        new_source = PressureSource(self._source.currentData())
+        if not self._runtime.running:
+            self._confirmed_pressure_source = new_source
+        # During a run the combo box edits only the pending PID settings. The
+        # active source changes exclusively through the explicit Apply path.
+
+    def _confirm_pending_pressure_source(self) -> bool:
+        new_source = PressureSource(self._source.currentData())
+        old_source = self._confirmed_pressure_source
+        if not self._runtime.running or new_source is old_source:
+            self._confirmed_pressure_source = new_source
+            return True
+        snapshot = (
+            None
+            if self._last_cycle_result is None
+            else self._last_cycle_result.record.snapshot
+        )
+        pressure = (
+            None
+            if snapshot is None
+            else ValveController.pressure_measurement(snapshot, new_source)
+        )
+        max_age = (
+            self._pump_pid_max_age.value()
+            if new_source is PressureSource.INJECTION_PUMP
+            else self._line_pid_max_age.value()
+        )
+        if (
+            pressure is None
+            or pressure.quality is not DataQuality.GOOD
+            or pressure.age_seconds > max_age
+        ):
+            self._show_error(
+                "A kiválasztott új PID-forrás nem használható: nincs friss, GOOD mintája."
+            )
+            return False
+        old_pressure = (
+            None
+            if snapshot is None
+            else ValveController.pressure_measurement(snapshot, old_source)
+        )
+        answer = QMessageBox.question(
+            self,
+            "PID nyomásforrás váltása",
+            "A PID nyomásforrásának módosítása megváltoztatja a szelep "
+            "szabályozási alapját.\n\n"
+            f"Jelenlegi forrás: {old_source.value}\n"
+            f"Új forrás: {new_source.value}\n"
+            f"Jelenlegi érték: "
+            f"{('—' if old_pressure is None else f'{old_pressure.filtered_value_bar:.3f} bar')}\n"
+            f"Új forrás értéke: {pressure.filtered_value_bar:.3f} bar\n"
+            f"Új forrás adatának kora: {pressure.age_seconds:.3f} s\n"
+            f"Új forrás minősége: {pressure.quality.value.upper()}\n\n"
+            "A szelepállás a váltás alatt változatlan marad, és a PID bumpless "
+            "módon indul újra.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        self._confirmed_pressure_source = new_source
+        self._diagnostics.emit(
+            DiagnosticCategory.RUNTIME,
+            "PID_SOURCE_CHANGED",
+            f"old={old_source.value}; new={new_source.value}; "
+            f"new_value={pressure.filtered_value_bar:.6f}; "
+            f"age={pressure.age_seconds:.6f}; quality={pressure.quality.value}",
+        )
+        return True
+
     def _load_pid_profile(self, profile: PidProfile) -> None:
         self._loading_pid_profile = True
         try:
@@ -10136,17 +10437,42 @@ class DashboardWindow(QMainWindow):
             self._kd.setValue(profile.kd)
             self._output_min.setValue(profile.output_min_percent)
             self._output_max.setValue(profile.output_max_percent)
+            self._pid_filter_enabled.setChecked(profile.filter_enabled)
+            self._pid_filter_time_constant.setValue(
+                profile.filter_time_constant_seconds
+            )
+            self._pid_deadband.setValue(profile.deadband_enter_bar)
+            self._pid_deadband_exit.setValue(profile.deadband_exit_bar)
+            self._pid_integral_min.setValue(profile.integral_min_percent)
+            self._pid_integral_max.setValue(profile.integral_max_percent)
+            self._pid_output_rate.setValue(
+                profile.maximum_output_rate_percent_per_second
+            )
             direction_index = self._direction.findData(profile.direction)
             source_index = self._source.findData(profile.pressure_source)
             if direction_index < 0 or source_index < 0:
                 raise ValueError("A PID-profil ismeretlen vezérlési beállítást tartalmaz.")
             self._direction.setCurrentIndex(direction_index)
-            self._source.setCurrentIndex(source_index)
+            source_mismatch = (
+                PressureSource(profile.pressure_source)
+                is not PressureSource(self._source.currentData())
+            )
+            if not self._runtime.running:
+                self._source.setCurrentIndex(source_index)
         finally:
             self._loading_pid_profile = False
         self._apply_pid_button.setEnabled(True)
         self._pid_application_status.setText(
-            "A profil betöltve, de még nincs alkalmazva. Az aktív szabályozás változatlan."
+            "A profil betöltve, de még nincs alkalmazva. "
+            + (
+                "FIGYELEM: a profil másik nyomásforráshoz készült; a forrás "
+                "nem váltott automatikusan."
+                if source_mismatch and self._runtime.running
+                else
+                "Az aktív szabályozás változatlan."
+                if profile.physically_validated
+                else "FIGYELEM: a profil nincs fizikailag validálva."
+            )
         )
         self._pid_application_status.setStyleSheet("color:#9a6700;font-weight:700")
         self._save_user_settings()
@@ -10202,6 +10528,14 @@ class DashboardWindow(QMainWindow):
                 output_min_percent=self._output_min.value(),
                 output_max_percent=self._output_max.value(),
                 pressure_source=PressureSource(self._source.currentData()).value,
+                filter_enabled=self._pid_filter_enabled.isChecked(),
+                filter_time_constant_seconds=self._pid_filter_time_constant.value(),
+                deadband_enter_bar=self._pid_deadband.value(),
+                deadband_exit_bar=self._pid_deadband_exit.value(),
+                integral_min_percent=self._pid_integral_min.value(),
+                integral_max_percent=self._pid_integral_max.value(),
+                maximum_output_rate_percent_per_second=self._pid_output_rate.value(),
+                physically_validated=False,
             )
             self._reload_pid_profiles(profile.id)
             self._save_user_settings()
@@ -10232,6 +10566,14 @@ class DashboardWindow(QMainWindow):
 
     def _apply_pid(self, _checked: bool = False) -> None:
         del _checked
+        if not self._confirm_pending_pressure_source():
+            self._pid_application_status.setText(
+                "A PID-forrás váltása elmaradt; az aktív szabályozás változatlan."
+            )
+            self._pid_application_status.setStyleSheet(
+                "color:#b00020;font-weight:700"
+            )
+            return
         try:
             parameters = self._pid_parameters()
         except ValueError as error:
@@ -10259,8 +10601,17 @@ class DashboardWindow(QMainWindow):
             output_max_percent=self._output_max.value(),
             direction=ControlDirection(self._direction.currentData()),
             deadband_bar=self._pid_deadband.value(),
+            deadband_exit_bar=self._pid_deadband_exit.value(),
             maximum_output_rate_percent_per_second=self._pid_output_rate.value(),
-            measurement_filter_alpha=self._pid_filter_alpha.value(),
+            measurement_filter_enabled=self._pid_filter_enabled.isChecked(),
+            measurement_filter_time_constant_seconds=(
+                self._pid_filter_time_constant.value()
+            ),
+            integral_min_percent=self._pid_integral_min.value(),
+            integral_max_percent=self._pid_integral_max.value(),
+            maximum_pid_sample_interval_seconds=self._pid_max_sample_interval.value(),
+            pump_pid_input_max_age_seconds=self._pump_pid_max_age.value(),
+            line_pid_input_max_age_seconds=self._line_pid_max_age.value(),
             minimum_reversal_interval_seconds=self._pid_reversal_interval.value(),
             reversal_deadband_percent=self._pid_reversal_deadband.value(),
             maximum_reversals=self._pid_max_reversals.value(),
@@ -10673,6 +11024,9 @@ class DashboardWindow(QMainWindow):
         self._injection_flows.clear()
         self._line_pressures.clear()
         self._differential_pressures.clear()
+        self._pid_raw_pressures.clear()
+        self._pid_filtered_pressures.clear()
+        self._pid_setpoints.clear()
         self._alarm_points.clear()
         self._alarm_scatter.setData([])
         self._follow_live_plot_button.setChecked(True)
@@ -11261,6 +11615,10 @@ class DashboardWindow(QMainWindow):
         self._injection_pressures.clear()
         self._injection_flows.clear()
         self._line_pressures.clear()
+        self._differential_pressures.clear()
+        self._pid_raw_pressures.clear()
+        self._pid_filtered_pressures.clear()
+        self._pid_setpoints.clear()
         self._alarm_points.clear()
         self._alarm_scatter.setData([])
         for curve in (
@@ -11268,6 +11626,9 @@ class DashboardWindow(QMainWindow):
             self._injection_curve,
             self._line_curve,
             self._differential_curve,
+            self._pid_raw_curve,
+            self._pid_filtered_curve,
+            self._pid_setpoint_curve,
             self._flow_curve,
         ):
             curve.setData([], [])
@@ -11309,6 +11670,127 @@ class DashboardWindow(QMainWindow):
         self._last_cycle_result = result
         self._last_hardware_status_record = result.record
         snapshot = result.record.snapshot
+        pressure = result.command.pressure_measurement
+        diagnostics = result.pid_diagnostics
+        self._pid_source_value_label.setText(
+            "—" if pressure is None else f"{pressure.raw_value_bar:.3f} bar"
+        )
+        self._pid_filtered_value_label.setText(
+            "—"
+            if result.command.pid_measurement_bar is None
+            else f"{result.command.pid_measurement_bar:.3f} bar"
+        )
+        self._pid_source_age_label.setText(
+            "—" if pressure is None else f"{pressure.age_seconds:.3f} s"
+        )
+        self._pid_source_quality_label.setText(
+            "—" if pressure is None else pressure.quality.value.upper()
+        )
+        pid_state = result.command.pid_state
+        self._pid_state_label.setText(pid_state.value)
+        state_color = (
+            "#1b7f3a"
+            if pid_state is PidState.ACTIVE
+            else "#b00020"
+            if pid_state in {PidState.BLOCKED, PidState.SAFE, PidState.FAULT}
+            else "#9a6700"
+            if pressure is not None
+            and pressure.age_seconds
+            > 0.8
+            * (
+                self._pump_pid_max_age.value()
+                if pressure.source is PressureSource.INJECTION_PUMP
+                else self._line_pid_max_age.value()
+            )
+            else "#52677a"
+        )
+        self._pid_state_label.setStyleSheet(f"color:{state_color};font-weight:700")
+        self._pid_valve_output_label.setText(
+            "SAFE"
+            if result.command.output_percent is None
+            else f"{result.command.output_percent:.1f} %"
+        )
+        self._pid_voltage_label.setText(
+            "—" if result.valve_voltage is None else f"{result.valve_voltage:.3f} V"
+        )
+        self._pid_timing_label.setText(
+            f"Felügyeleti ciklus: {self._runtime.control_interval_seconds:.3f} s | "
+            "PID frissítése: új forrásmintánként"
+        )
+        if diagnostics is not None:
+            source_details: list[str] = []
+            if pressure is not None and pressure.source is PressureSource.INJECTION_PUMP:
+                intervals = self._active_pump_telemetry_intervals
+                source_details.extend(
+                    (
+                        "pump_pressure_poll_seconds="
+                        + ("NONE" if intervals is None else str(intervals.pressure_seconds)),
+                        f"source_last_error={pressure.last_error}",
+                    )
+                )
+            elif pressure is not None and pressure.source is PressureSource.LINE_SENSOR:
+                reading = snapshot.line_pressure_reading
+                source_details.extend(
+                    (
+                        "physical_channel="
+                        + ("NONE" if reading is None else str(reading.physical_channel)),
+                        "terminal_configuration="
+                        + (
+                            "NONE"
+                            if reading is None
+                            else str(reading.terminal_configuration)
+                        ),
+                        "last_raw_voltage="
+                        + ("NONE" if reading is None else str(reading.last_raw_voltage)),
+                        "median_voltage="
+                        + ("NONE" if reading is None else str(reading.median_voltage)),
+                        "filtered_voltage="
+                        + ("NONE" if reading is None else str(reading.filtered_voltage)),
+                        "raw_line_pressure_bar="
+                        + ("NONE" if reading is None else str(reading.raw_pressure_bar)),
+                        "source_quality_reason="
+                        + ("NONE" if reading is None else reading.quality_reason),
+                    )
+                )
+            self._pid_diagnostics_view.setPlainText(
+                "\n".join(
+                    [
+                        f"source={('NONE' if pressure is None else pressure.source.value)}",
+                        "raw_pressure_bar="
+                        f"{('NONE' if pressure is None else pressure.raw_value_bar)}",
+                        f"pid_pressure_bar={diagnostics.filtered_measurement_bar}",
+                        "timestamp_monotonic="
+                        f"{('NONE' if pressure is None else pressure.timestamp_monotonic)}",
+                        f"age_seconds={('NONE' if pressure is None else pressure.age_seconds)}",
+                        f"sequence={('NONE' if pressure is None else pressure.sequence)}",
+                        f"measurement_dt_seconds={diagnostics.measurement_dt_seconds}",
+                        f"setpoint_bar={self._setpoint.value()}",
+                        f"error_bar={diagnostics.error_bar}",
+                        f"p_term_percent={diagnostics.p_term_percent}",
+                        f"i_term_percent={diagnostics.i_term_percent}",
+                        f"d_term_percent={diagnostics.d_term_percent}",
+                        f"unconstrained_output_percent={diagnostics.unconstrained_output_percent}",
+                        f"constrained_output_percent={diagnostics.constrained_output_percent}",
+                        f"applied_output_percent={diagnostics.applied_output_percent}",
+                        f"output_voltage={result.valve_voltage}",
+                        f"pid_state={pid_state.value}",
+                        f"state_reason={result.command.reason or diagnostics.reason}",
+                        *source_details,
+                    ]
+                )
+            )
+            diagnostic_key = (
+                None if pressure is None else pressure.source,
+                None if pressure is None else pressure.sequence,
+                pid_state,
+            )
+            if diagnostic_key != self._last_pid_diagnostic_key:
+                self._last_pid_diagnostic_key = diagnostic_key
+                self._diagnostics.emit(
+                    DiagnosticCategory.RUNTIME,
+                    "PID_SAMPLE",
+                    self._pid_diagnostics_view.toPlainText().replace("\n", "; "),
+                )
         self._diagnostics.emit(
             DiagnosticCategory.RUNTIME,
             "CYCLE",
@@ -11330,7 +11812,7 @@ class DashboardWindow(QMainWindow):
             )
         self._set_connection("jacket", snapshot.jacket_pump.connected)
         self._set_connection("injection", snapshot.injection_pump.connected)
-        self._set_line_pressure_connection(snapshot)
+        self._set_line_pressure_connection(snapshot, show_quality_details=False)
         self._set_differential_pressure_connection(snapshot)
         self._set_connection("valve", result.command.enabled)
         self._jacket_label.setText(format_dashboard_pressure(snapshot.jacket_pump.pressure_bar))
@@ -11393,11 +11875,26 @@ class DashboardWindow(QMainWindow):
             if snapshot.differential_pressure_bar is None
             else snapshot.differential_pressure_bar
         )
+        pid_pressure = result.command.pressure_measurement
+        self._pid_raw_pressures.append(
+            float("nan") if pid_pressure is None else pid_pressure.raw_value_bar
+        )
+        self._pid_filtered_pressures.append(
+            float("nan")
+            if result.command.pid_measurement_bar is None
+            else result.command.pid_measurement_bar
+        )
+        self._pid_setpoints.append(self._setpoint.value())
         elapsed_times = [value - self._measurement_time_origin for value in self._times]
         self._jacket_curve.setData(elapsed_times, list(self._jacket_pressures))
         self._injection_curve.setData(elapsed_times, list(self._injection_pressures))
         self._line_curve.setData(elapsed_times, list(self._line_pressures))
         self._differential_curve.setData(elapsed_times, list(self._differential_pressures))
+        self._pid_raw_curve.setData(elapsed_times, list(self._pid_raw_pressures))
+        self._pid_filtered_curve.setData(
+            elapsed_times, list(self._pid_filtered_pressures)
+        )
+        self._pid_setpoint_curve.setData(elapsed_times, list(self._pid_setpoints))
         self._flow_curve.setData(elapsed_times, list(self._injection_flows))
         latest = elapsed_times[-1]
         if self._follow_live_plot_button.isChecked():

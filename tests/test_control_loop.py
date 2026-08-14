@@ -135,6 +135,19 @@ def test_separate_manual_output_safety_does_not_require_measurement_snapshot() -
     assert writer.records == []
 
 
+def test_safe_state_synchronizes_physical_and_internal_valve_output() -> None:
+    control_loop, actuator, _ = loop()
+    control_loop.write_manual_output(35.0)
+
+    control_loop.request_safe_state()
+
+    assert actuator.safe_state_requested
+    assert control_loop.last_output_percent == pytest.approx(
+        actuator.safe_output_percent
+    )
+    assert control_loop.pid_diagnostics.state.value == "SAFE"
+
+
 def test_paused_supervision_holds_output_without_persisting() -> None:
     control_loop, actuator, writer = loop()
     control_loop.execute_once(

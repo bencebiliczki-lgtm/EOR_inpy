@@ -1,3 +1,5 @@
+from math import exp
+
 import pytest
 
 from eor_control.signal_filter import AnalogSignalFilter
@@ -43,3 +45,19 @@ def test_large_step_is_held_then_accepted_after_confirmation() -> None:
     assert first.filtered_voltage == pytest.approx(2.0)
     assert second.filtered_voltage == pytest.approx(2.0)
     assert third.filtered_voltage == pytest.approx(2.1)
+
+
+def test_analog_ema_uses_elapsed_sample_time() -> None:
+    filter_ = AnalogSignalFilter(
+        alpha=0.01,
+        median_enabled=True,
+        spike_rejection_enabled=False,
+        spike_limit_voltage=0.1,
+        spike_confirmation_samples=3,
+        time_constant_seconds=1.0,
+    )
+    filter_.process([2.0] * 20, timestamp_monotonic=10.0)
+
+    result = filter_.process([3.0] * 20, timestamp_monotonic=11.0)
+
+    assert result.filtered_voltage == pytest.approx(2.0 + (1.0 - exp(-1.0)))
