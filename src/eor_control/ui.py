@@ -11,7 +11,7 @@ from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime
 from math import isfinite, log
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from time import monotonic
 from typing import cast
 from uuid import uuid4
@@ -6844,6 +6844,8 @@ class DashboardWindow(QMainWindow):
         self._active_hardware_configuration: HardwareConfiguration | None = None
         self._startup_connection_error: str | None = None
         self._hardware_reconnect_active = False
+        self._hardware_activation_lock = Lock()
+        self._hardware_activation_in_progress = False
         self._active_pump_telemetry_intervals = next(
             (
                 pump.polling_intervals
@@ -7572,6 +7574,8 @@ class DashboardWindow(QMainWindow):
         layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         self._current_jacket_pressure = QLabel("— bar")
         self._current_jacket_pressure.setObjectName("current_jacket_holding_pressure")
+        self._jacket_holding_state = QLabel("NEM AKTÍV")
+        self._jacket_holding_state.setObjectName("jacket_holding_state")
         self._new_jacket_pressure = QDoubleSpinBox()
         self._new_jacket_pressure.setObjectName("new_jacket_holding_pressure")
         self._new_jacket_pressure.setRange(0.001, 10_000.0)
@@ -7587,6 +7591,7 @@ class DashboardWindow(QMainWindow):
         self._apply_jacket_pressure_button.clicked.connect(
             self._apply_running_jacket_pressure
         )
+        layout.addRow("Állapot", self._jacket_holding_state)
         layout.addRow("Aktuális", self._current_jacket_pressure)
         layout.addRow("Új érték", self._new_jacket_pressure)
         layout.addRow(self._apply_jacket_pressure_button)
@@ -9901,6 +9906,42 @@ class DashboardWindow(QMainWindow):
         connect_in_background: bool = False,
         reconnect_attempt: int = 1,
     ) -> None:
+        if not self._hardware_activation_lock.acquire(blocking=False):
+            self._diagnostics.emit(
+                DiagnosticCategory.SYSTEM,
+                "NI_ACTIVATION",
+                "hardware activation request ignored: activation already in progress",
+                level="WARNING",
+            )
+            return
+        self._hardware_activation_in_progress = True
+        try:
+            self._activate_hardware_impl(
+                configuration,
+                connection_result,
+                connect_in_background=connect_in_background,
+                reconnect_attempt=reconnect_attempt,
+            )
+        except Exception:
+            self._finish_hardware_activation_guard()
+            raise
+        if not connect_in_background:
+            self._finish_hardware_activation_guard()
+
+    def _finish_hardware_activation_guard(self) -> None:
+        if not self._hardware_activation_in_progress:
+            return
+        self._hardware_activation_in_progress = False
+        self._hardware_activation_lock.release()
+
+    def _activate_hardware_impl(
+        self,
+        configuration: HardwareConfiguration,
+        connection_result: ConnectionTestResult | None = None,
+        *,
+        connect_in_background: bool = False,
+        reconnect_attempt: int = 1,
+    ) -> None:
         if self._devices.status.state is not ApplicationState.IDLE:
             self._devices.disconnect()
             if self._pump_control is not None:
@@ -9963,6 +10004,21 @@ class DashboardWindow(QMainWindow):
             self._diagnostics,
             configuration.analog_diagnostic_interval_seconds,
         )
+        analog_filter_config = configuration.analog_filter_config()
+        activation_samples = (
+            analog_filter_config.samples_per_read if analog_filter_config.enabled else 1
+        )
+        activation_timeout = max(
+            0.1,
+            activation_samples / configuration.analog_sample_rate_hz + 0.1,
+        )
+
+        def activate_ni() -> None:
+            daq.activate(
+                samples_per_read=activation_samples,
+                timeout_seconds=activation_timeout,
+            )
+
         actuator = AnalogValveActuator(
             daq,
             voltage_at_zero_percent=configuration.valve_zero_percent_voltage,
@@ -9992,7 +10048,7 @@ class DashboardWindow(QMainWindow):
                     "differential_pressure" if configuration.differential_pressure_enabled else None
                 ),
             ),
-            analog_filter_config=configuration.analog_filter_config(),
+            analog_filter_config=analog_filter_config,
             enabled_pumps=frozenset(
                 name
                 for name, enabled in (
@@ -10023,17 +10079,17 @@ class DashboardWindow(QMainWindow):
                         configuration.injection_port,
                     ),
                     DeviceId.LINE_PRESSURE: DeviceConnector(
-                        lambda: daq.read_voltage("line_pressure"),
-                        lambda: None,
+                        activate_ni,
+                        daq.close,
                         configuration.line_pressure_channel,
                     ),
                     DeviceId.DIFFERENTIAL_PRESSURE: DeviceConnector(
-                        lambda: daq.read_voltage("differential_pressure"),
-                        lambda: None,
+                        activate_ni,
+                        daq.close,
                         configuration.differential_pressure_channel,
                     ),
                     DeviceId.VALVE: DeviceConnector(
-                        daq.set_safe_state,
+                        activate_ni,
                         daq.close,
                         configuration.valve_output_channel,
                     ),
@@ -10098,6 +10154,8 @@ class DashboardWindow(QMainWindow):
                 new_devices.disconnect()
             pump_control.shutdown_connections()
             with suppress(Exception):
+                daq.close()
+            with suppress(Exception):
                 new_loop.close()
             with suppress(Exception):
                 writer.close()
@@ -10151,6 +10209,7 @@ class DashboardWindow(QMainWindow):
                     connect_devices()
                 except Exception as error:
                     cleanup_failed_connection()
+                    self._finish_hardware_activation_guard()
                     self._runtime_bridge.hardware_activation_failed.emit(
                         (configuration, reconnect_attempt, str(error))
                     )
@@ -10174,8 +10233,14 @@ class DashboardWindow(QMainWindow):
                         f"injection_is_open={getattr(injection, 'serial_is_open', False)}; "
                         f"injection_worker={getattr(injection_worker, 'running', False)}",
                     )
+                    def complete_activation() -> None:
+                        try:
+                            finalize_activation()
+                        finally:
+                            self._finish_hardware_activation_guard()
+
                     self._runtime_bridge.hardware_activation_completed.emit(
-                        finalize_activation
+                        complete_activation
                     )
 
             Thread(
@@ -13300,6 +13365,17 @@ class DashboardWindow(QMainWindow):
             self._current_jacket_pressure.setText(f"{jacket_state.target:.3f} bar")
             if not self._new_jacket_pressure.hasFocus():
                 self._new_jacket_pressure.setValue(jacket_state.target)
+        self._jacket_holding_state.setText(
+            "NYOMÁSTARTÁS"
+            if jacket_state is not None
+            and jacket_state.running
+            and jacket_state.mode is PumpOperatingMode.CONSTANT_PRESSURE
+            else "NYOMÁSFELÉPÍTÉS"
+            if jacket_state is not None
+            and jacket_state.running
+            and jacket_state.mode is PumpOperatingMode.CONSTANT_FLOW
+            else "NEM AKTÍV"
+        )
         self._refresh_measurement_field_editability(state)
         self._configuration_summary_label.setText(self._configuration_summary_text())
         self._refresh_valve_status()

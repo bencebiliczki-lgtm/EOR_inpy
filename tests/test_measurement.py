@@ -102,6 +102,31 @@ def test_sample_calibrates_and_tracks_injected_volume() -> None:
     assert restarted.jacket_net_volume_ml == pytest.approx(0.0)
 
 
+def test_runtime_pressure_samples_use_one_batch_without_swapping_channels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    measurement_service, _, _, daq, _ = service()
+    calls: list[int] = []
+
+    def read_pressure_voltages(number_of_samples: int) -> dict[str, list[float]]:
+        calls.append(number_of_samples)
+        return {
+            "line_pressure": [2.0] * number_of_samples,
+            "differential_pressure": [1.5] * number_of_samples,
+        }
+
+    monkeypatch.setattr(
+        daq, "read_pressure_voltages", read_pressure_voltages, raising=False
+    )
+
+    record = measurement_service.sample_once(
+        active_stage="water", valve_percent=25.0
+    )
+
+    assert calls == [measurement_service._analog_filter_config.samples_per_read]
+    assert record.snapshot.line_pressure_bar == pytest.approx(100.0)
+    assert record.snapshot.differential_pressure_bar == pytest.approx(5.0)
+
 def test_disabled_pump_is_not_read_and_does_not_create_a_safety_fault() -> None:
     injection = SimulatedPump(pressure_bar=100.0, remaining_volume_ml=250.0)
     injection.connect()

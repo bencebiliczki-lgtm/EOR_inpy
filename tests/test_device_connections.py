@@ -141,3 +141,49 @@ def test_parallel_connect_for_same_device_executes_connector_once() -> None:
     second.join(1.0)
 
     assert calls == ["connect"]
+
+
+def test_connection_order_is_parallel_pumps_then_shared_ai_then_valve() -> None:
+    events: list[str] = []
+    jacket_started = Event()
+    injection_started = Event()
+
+    def jacket_connect() -> None:
+        jacket_started.set()
+        assert injection_started.wait(1.0)
+        events.append("jacket")
+
+    def injection_connect() -> None:
+        injection_started.set()
+        assert jacket_started.wait(1.0)
+        events.append("injection")
+
+    def shared_ai_connect() -> None:
+        assert set(events) == {"jacket", "injection"}
+        events.append("shared_ai")
+
+    def valve_connect() -> None:
+        assert events[-1] == "shared_ai"
+        events.append("valve")
+
+    manager = DeviceConnectionManager(
+        {
+            DeviceId.JACKET_PUMP: DeviceConnector(jacket_connect, lambda: None, "COM1"),
+            DeviceId.INJECTION_PUMP: DeviceConnector(
+                injection_connect, lambda: None, "COM2"
+            ),
+            DeviceId.LINE_PRESSURE: DeviceConnector(
+                shared_ai_connect, lambda: None, "Dev1/ai0"
+            ),
+            DeviceId.DIFFERENTIAL_PRESSURE: DeviceConnector(
+                shared_ai_connect, lambda: None, "Dev1/ai1"
+            ),
+            DeviceId.VALVE: DeviceConnector(valve_connect, lambda: None, "Dev1/ao0"),
+        },
+        enabled_devices=frozenset(DeviceId),
+    )
+
+    assert manager.connect_enabled() == ()
+    assert events.count("shared_ai") == 1
+    assert events[-2:] == ["shared_ai", "valve"]
+    assert manager.all_enabled_connected

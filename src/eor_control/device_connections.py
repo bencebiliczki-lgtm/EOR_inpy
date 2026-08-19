@@ -1,5 +1,6 @@
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
 from dataclasses import dataclass
 from enum import StrEnum
 from threading import RLock
@@ -126,22 +127,82 @@ class DeviceConnectionManager:
         return status
 
     def connect_enabled(self) -> tuple[str, ...]:
-        return self._run_for_enabled(self.connect_device)
+        errors = list(
+            self._run_for_devices(
+                self.connect_device,
+                tuple(
+                    device
+                    for device in (DeviceId.JACKET_PUMP, DeviceId.INJECTION_PUMP)
+                    if device in self._enabled
+                ),
+            )
+        )
+        if errors:
+            return tuple(sorted(errors))
+        pressure_inputs = tuple(
+            device
+            for device in (DeviceId.LINE_PRESSURE, DeviceId.DIFFERENTIAL_PRESSURE)
+            if device in self._enabled
+        )
+        if pressure_inputs:
+            try:
+                self._connect_shared_devices(pressure_inputs)
+            except Exception as error:
+                errors.append(f"ni_pressure_inputs: {error}")
+                return tuple(sorted(errors))
+        if DeviceId.VALVE in self._enabled:
+            try:
+                self.connect_device(DeviceId.VALVE)
+            except Exception as error:
+                errors.append(f"valve: {error}")
+        return tuple(sorted(errors))
 
     def disconnect_all(self) -> tuple[str, ...]:
-        return self._run_for_enabled(self.disconnect_device)
+        errors: list[str] = []
+        ni_devices = tuple(
+            device
+            for device in (
+                DeviceId.VALVE,
+                DeviceId.LINE_PRESSURE,
+                DeviceId.DIFFERENTIAL_PRESSURE,
+            )
+            if device in self._enabled
+        )
+        if ni_devices:
+            try:
+                self._disconnect_shared_devices(ni_devices)
+            except Exception as error:
+                errors.append(f"ni: {error}")
+        errors.extend(
+            self._run_for_devices(
+                self.disconnect_device,
+                tuple(
+                    device
+                    for device in (DeviceId.JACKET_PUMP, DeviceId.INJECTION_PUMP)
+                    if device in self._enabled
+                ),
+            )
+        )
+        return tuple(sorted(errors))
 
     def _run_for_enabled(
         self,
         operation: Callable[[DeviceId], DeviceConnectionStatus],
     ) -> tuple[str, ...]:
-        if not self._enabled:
+        return self._run_for_devices(operation, tuple(self._enabled))
+
+    def _run_for_devices(
+        self,
+        operation: Callable[[DeviceId], DeviceConnectionStatus],
+        devices: tuple[DeviceId, ...],
+    ) -> tuple[str, ...]:
+        if not devices:
             return ()
         errors: list[str] = []
         with ThreadPoolExecutor(
-            max_workers=len(self._enabled), thread_name_prefix="eor-device-connection"
+            max_workers=len(devices), thread_name_prefix="eor-device-connection"
         ) as executor:
-            futures = {executor.submit(operation, device): device for device in self._enabled}
+            futures = {executor.submit(operation, device): device for device in devices}
             for future in as_completed(futures):
                 device = futures[future]
                 try:
@@ -149,6 +210,58 @@ class DeviceConnectionManager:
                 except Exception as error:
                     errors.append(f"{device.value}: {error}")
         return tuple(sorted(errors))
+
+    def _connect_shared_devices(self, devices: tuple[DeviceId, ...]) -> None:
+        with ExitStack() as stack:
+            for device in sorted(devices, key=lambda item: item.value):
+                stack.enter_context(self._device_locks[device])
+            pending = tuple(
+                device
+                for device in devices
+                if self.status(device).state is DeviceConnectionState.DISCONNECTED
+            )
+            if not pending:
+                return
+            for device in pending:
+                self._emit(device, "CONNECT_REQUESTED")
+            try:
+                self._connectors[pending[0]].connect()
+            except Exception as error:
+                for device in pending:
+                    self._set_status(
+                        device, DeviceConnectionState.DISCONNECTED, str(error)
+                    )
+                    self._emit(device, "CONNECT_FAILED", str(error))
+                raise
+            for device in pending:
+                self._set_status(device, DeviceConnectionState.CONNECTED, None)
+                self._emit(device, "CONNECTED")
+
+    def _disconnect_shared_devices(self, devices: tuple[DeviceId, ...]) -> None:
+        with ExitStack() as stack:
+            for device in sorted(devices, key=lambda item: item.value):
+                stack.enter_context(self._device_locks[device])
+            connected = tuple(
+                device
+                for device in devices
+                if self.status(device).state is DeviceConnectionState.CONNECTED
+            )
+            if not connected:
+                return
+            for device in connected:
+                self._emit(device, "DISCONNECT_REQUESTED")
+            try:
+                self._connectors[connected[0]].disconnect()
+            except Exception as error:
+                for device in connected:
+                    self._set_status(
+                        device, DeviceConnectionState.CONNECTED, str(error)
+                    )
+                    self._emit(device, "DISCONNECT_FAILED", str(error))
+                raise
+            for device in connected:
+                self._set_status(device, DeviceConnectionState.DISCONNECTED, None)
+                self._emit(device, "DISCONNECTED")
 
     def _set_status(
         self,

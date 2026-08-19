@@ -98,7 +98,9 @@ from eor_control.pump_commands import (  # noqa: E402
 )
 from eor_control.pump_control import (  # noqa: E402
     PumpControlTiming,
+    PumpOperatingMode,
     PumpPreparationProgress,
+    PumpPreparationState,
     PumpRole,
 )
 from eor_control.pump_telemetry import (  # noqa: E402
@@ -3034,6 +3036,16 @@ def test_dashboard_places_jacket_pressure_control_below_bes_flow(
 
     assert window.findChild(QWidget, "dashboard_pump_start_controls") is None
     assert window._jacket_pressure_box.title() == "KÖP tartási nyomás"
+    assert window._jacket_holding_state.text() == "NEM AKTÍV"
+    service._states[PumpRole.JACKET] = PumpPreparationState(
+        remote=True,
+        configured=True,
+        running=True,
+        mode=PumpOperatingMode.CONSTANT_PRESSURE,
+        target=135.0,
+    )
+    window._refresh_state()
+    assert window._jacket_holding_state.text() == "NYOMÁSTARTÁS"
     sidebar_layout = window._jacket_pressure_box.parentWidget().layout()
     assert sidebar_layout is not None
     assert sidebar_layout.indexOf(window._jacket_pressure_box) == (

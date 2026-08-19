@@ -1029,15 +1029,31 @@ class PumpControlService:
     ) -> PumpPreparationProgress:
         def state_text(role: PumpRole) -> str:
             pump = self._pumps[role]
+            state = self._states[role]
+            operating_mode = (
+                "NYOMÁSTARTÁS"
+                if state.running
+                and state.mode is PumpOperatingMode.CONSTANT_PRESSURE
+                else (
+                    "NYOMÁSFELÉPÍTÉS"
+                    if state.running
+                    and state.mode is PumpOperatingMode.CONSTANT_FLOW
+                    else None
+                )
+            )
             telemetry_reader = getattr(pump, "read_telemetry", None)
             if callable(telemetry_reader):
                 text = getattr(telemetry_reader(), "operating_status_text", None)
                 if text:
-                    return str(text)
-            state = self._states[role]
+                    return (
+                        str(text)
+                        if operating_mode is None
+                        else f"{text} — {operating_mode}"
+                    )
             mode = "REMOTE" if state.remote else "LOCAL/UNKNOWN"
             motion = "RUN" if state.running else "STOP"
-            return f"{motion} {mode}"
+            text = f"{motion} {mode}"
+            return text if operating_mode is None else f"{text} — {operating_mode}"
 
         def pressure_age(role: PumpRole) -> float | None:
             telemetry_reader = getattr(self._pumps[role], "read_telemetry", None)

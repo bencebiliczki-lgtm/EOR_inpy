@@ -89,31 +89,12 @@ class MeasurementService:
     def read_pressure_inputs_individually(
         self,
     ) -> tuple[dict[str, float], dict[str, str]]:
-        """Read each NI pressure input independently for service telemetry."""
+        """Read configured NI pressure inputs in one synchronized acquisition."""
 
         values: dict[str, float] = {}
         errors: dict[str, str] = {}
-        inputs = (
-            (
-                "line_pressure",
-                self._channels.line_pressure,
-                self._line_calibration,
-            ),
-            (
-                "differential_pressure",
-                self._channels.differential_pressure,
-                self._differential_calibration,
-            ),
-        )
-        for key, channel, calibration in inputs:
-            if channel is None:
-                continue
-            reading = self._read_optional_pressure(
-                channel,
-                calibration,
-                f"{key.replace('_', ' ')} input",
-                key,
-            )
+        readings = self._read_configured_pressures()
+        for key, reading in readings.items():
             if reading is not None and reading.filtered_pressure_bar is not None:
                 values[key] = reading.filtered_pressure_bar
                 self._latest_pressure_readings[key] = reading
@@ -145,18 +126,9 @@ class MeasurementService:
         if "injection" in self._enabled_pumps and self._initial_injection_volume_ml is None:
             self._initial_injection_volume_ml = injection.remaining_volume_ml
 
-        line_reading = self._read_optional_pressure(
-            self._channels.line_pressure,
-            self._line_calibration,
-            "line pressure input",
-            "line_pressure",
-        )
-        differential_reading = self._read_optional_pressure(
-            self._channels.differential_pressure,
-            self._differential_calibration,
-            "differential pressure input",
-            "differential_pressure",
-        )
+        pressure_readings = self._read_configured_pressures()
+        line_reading = pressure_readings.get("line_pressure")
+        differential_reading = pressure_readings.get("differential_pressure")
 
         snapshot = MeasurementSnapshot(
             recorded_at=self._clock.utc_now(),
@@ -254,20 +226,33 @@ class MeasurementService:
         calibration: LinearCalibration,
         label: str,
         filter_key: str,
+        *,
+        acquired_samples: list[float] | None = None,
+        acquisition_error: Exception | None = None,
+        acquisition_started: float | None = None,
     ) -> AnalogPressureReading | None:
         if channel is None:
             return None
         self._analog_sequences[filter_key] += 1
         sequence = self._analog_sequences[filter_key]
         config = self._analog_filter_config
-        started = self._clock.monotonic()
+        started = (
+            self._clock.monotonic()
+            if acquisition_started is None
+            else acquisition_started
+        )
         try:
-            read_many = getattr(self._daq, "read_voltages", None)
-            samples = (
-                read_many(channel, config.samples_per_read)
-                if config.enabled and callable(read_many)
-                else [self._daq.read_voltage(channel)]
-            )
+            if acquisition_error is not None:
+                raise acquisition_error
+            if acquired_samples is None:
+                read_many = getattr(self._daq, "read_voltages", None)
+                samples = (
+                    read_many(channel, config.samples_per_read)
+                    if config.enabled and callable(read_many)
+                    else [self._daq.read_voltage(channel)]
+                )
+            else:
+                samples = acquired_samples
             sample_timestamp = self._clock.monotonic()
             filtered = self._analog_filters[filter_key].process(
                 samples,
@@ -360,6 +345,66 @@ class MeasurementService:
         self._latest_pressure_readings[filter_key] = reading
         self._log_pressure_reading(filter_key, reading)
         return reading
+
+    def _read_configured_pressures(self) -> dict[str, AnalogPressureReading]:
+        inputs = tuple(
+            (key, channel, calibration, label)
+            for key, channel, calibration, label in (
+                (
+                    "line_pressure",
+                    self._channels.line_pressure,
+                    self._line_calibration,
+                    "line pressure input",
+                ),
+                (
+                    "differential_pressure",
+                    self._channels.differential_pressure,
+                    self._differential_calibration,
+                    "differential pressure input",
+                ),
+            )
+            if channel is not None
+        )
+        if not inputs:
+            return {}
+        batch_reader = getattr(self._daq, "read_pressure_voltages", None)
+        if not callable(batch_reader):
+            return {
+                key: reading
+                for key, channel, calibration, label in inputs
+                if (
+                    reading := self._read_optional_pressure(
+                        channel, calibration, label, key
+                    )
+                )
+                is not None
+            }
+        sample_count = (
+            self._analog_filter_config.samples_per_read
+            if self._analog_filter_config.enabled
+            else 1
+        )
+        started = self._clock.monotonic()
+        try:
+            samples_by_channel = batch_reader(sample_count)
+            acquisition_error: Exception | None = None
+        except Exception as error:
+            samples_by_channel = {}
+            acquisition_error = error
+        readings: dict[str, AnalogPressureReading] = {}
+        for key, channel, calibration, label in inputs:
+            reading = self._read_optional_pressure(
+                channel,
+                calibration,
+                label,
+                key,
+                acquired_samples=samples_by_channel.get(key),
+                acquisition_error=acquisition_error,
+                acquisition_started=started,
+            )
+            if reading is not None:
+                readings[key] = reading
+        return readings
 
     def _log_pressure_reading(
         self, filter_key: str, reading: AnalogPressureReading

@@ -1,8 +1,10 @@
 import importlib
+from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import count
 from math import isfinite
-from threading import Lock
-from time import monotonic
+from threading import Lock, RLock
+from time import monotonic, sleep
 from typing import Any, Protocol, cast
 
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
@@ -29,6 +31,7 @@ class NidaqmxBackend:
         "DIFFERENTIAL",
         "PSEUDODIFFERENTIAL",
     }
+    _task_ids = count(1)
 
     def __init__(
         self,
@@ -44,55 +47,96 @@ class NidaqmxBackend:
         self._sample_rate_hz = sample_rate_hz
         self._output_task: object | None = None
         self._output_channel: str | None = None
-        self._output_lock = Lock()
+        self._task_lock = RLock()
+
+    @classmethod
+    def _task_name(cls, purpose: str) -> str:
+        return f"eor_{purpose}_{next(cls._task_ids)}"
 
     def read_voltage(self, physical_channel: str) -> float:
-        nidaqmx = importlib.import_module("nidaqmx")
-
-        terminal_configuration = getattr(
-            importlib.import_module("nidaqmx.constants").TerminalConfiguration,
-            self._terminal_configuration,
-        )
-
-        with nidaqmx.Task() as task:
-            task.ai_channels.add_ai_voltage_chan(
-                physical_channel,
-                terminal_config=terminal_configuration,
-            )
-            return float(task.read())
+        return self.read_channel_voltages((physical_channel,), 1)[physical_channel][0]
 
     def read_voltages(
         self, physical_channel: str, number_of_samples: int
     ) -> list[float]:
+        return self.read_channel_voltages(
+            (physical_channel,), number_of_samples
+        )[physical_channel]
+
+    def read_channel_voltages(
+        self,
+        physical_channels: Sequence[str],
+        number_of_samples: int,
+        *,
+        timeout_seconds: float = 0.1,
+    ) -> dict[str, list[float]]:
         if number_of_samples < 1:
             raise ValueError("NI sample count must be positive")
-        nidaqmx = importlib.import_module("nidaqmx")
-        constants = importlib.import_module("nidaqmx.constants")
-        terminal_configuration = getattr(
-            constants.TerminalConfiguration,
-            self._terminal_configuration,
-        )
-        with nidaqmx.Task() as task:
-            task.ai_channels.add_ai_voltage_chan(
-                physical_channel,
-                terminal_config=terminal_configuration,
+        channels = tuple(physical_channels)
+        if not channels or any(not channel.strip() for channel in channels):
+            raise ValueError("NI input channel list must not be empty")
+        if len(set(channels)) != len(channels):
+            raise ValueError("NI input channels must be distinct")
+        with self._task_lock:
+            nidaqmx = importlib.import_module("nidaqmx")
+            constants = importlib.import_module("nidaqmx.constants")
+            terminal_configuration = getattr(
+                constants.TerminalConfiguration,
+                self._terminal_configuration,
             )
-            task.timing.cfg_samp_clk_timing(
-                self._sample_rate_hz,
-                sample_mode=constants.AcquisitionType.FINITE,
-                samps_per_chan=number_of_samples,
+            task_name = self._task_name("pressure_inputs_ai")
+            with nidaqmx.Task(task_name) as task:
+                for physical_channel in channels:
+                    task.ai_channels.add_ai_voltage_chan(
+                        physical_channel,
+                        terminal_config=terminal_configuration,
+                    )
+                if number_of_samples > 1:
+                    task.timing.cfg_samp_clk_timing(
+                        self._sample_rate_hz,
+                        sample_mode=constants.AcquisitionType.FINITE,
+                        samps_per_chan=number_of_samples,
+                    )
+                    raw_values = task.read(
+                        number_of_samples_per_channel=number_of_samples,
+                        timeout=timeout_seconds,
+                    )
+                else:
+                    raw_values = task.read(timeout=timeout_seconds)
+        return self._split_channel_values(channels, raw_values, number_of_samples)
+
+    @staticmethod
+    def _split_channel_values(
+        channels: tuple[str, ...], raw_values: object, number_of_samples: int
+    ) -> dict[str, list[float]]:
+        if len(channels) == 1:
+            values = (
+                cast(Sequence[object], raw_values)
+                if number_of_samples > 1
+                else (raw_values,)
             )
-            values = task.read(
-                number_of_samples_per_channel=number_of_samples,
-                timeout=0.1,
+            return {channels[0]: [float(cast(Any, value)) for value in values]}
+        rows = cast(Sequence[object], raw_values)
+        if len(rows) != len(channels):
+            raise ValueError(
+                f"NI returned {len(rows)} channel rows; expected {len(channels)}"
             )
-        return [float(value) for value in cast(list[float], values)]
+        result: dict[str, list[float]] = {}
+        for channel, row in zip(channels, rows, strict=True):
+            samples = cast(Sequence[object], row) if number_of_samples > 1 else (row,)
+            if len(samples) != number_of_samples:
+                raise ValueError(
+                    f"NI channel {channel} returned {len(samples)} samples; "
+                    f"expected {number_of_samples}"
+                )
+            result[channel] = [float(cast(Any, value)) for value in samples]
+        return result
 
     def write_voltage(self, physical_channel: str, voltage: float) -> None:
-        with self._output_lock:
+        with self._task_lock:
             if self._output_task is None:
                 nidaqmx = importlib.import_module("nidaqmx")
-                task = nidaqmx.Task()
+                task = nidaqmx.Task(self._task_name("valve_ao"))
                 try:
                     task.ao_channels.add_ao_voltage_chan(physical_channel)
                 except Exception:
@@ -105,12 +149,20 @@ class NidaqmxBackend:
             cast(Any, self._output_task).write(voltage, auto_start=True)
 
     def close_output(self) -> None:
-        with self._output_lock:
+        with self._task_lock:
             task = self._output_task
             self._output_task = None
             self._output_channel = None
             if task is not None:
                 cast(Any, task).close()
+
+    @property
+    def active_task_names(self) -> tuple[str, ...]:
+        with self._task_lock:
+            if self._output_task is None:
+                return ()
+            name = getattr(self._output_task, "name", None)
+            return (str(name or "eor_valve_ao"),)
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +202,7 @@ class NidaqConfig:
 
 class NidaqmxDataAcquisition:
     HARDWARE_CONFIRMATION = "ENABLE NI PHYSICAL OUTPUT"
+    RESOURCE_RESERVED_ERROR_CODES = frozenset({-50103})
 
     def __init__(
         self,
@@ -167,6 +220,8 @@ class NidaqmxDataAcquisition:
         self._diagnostic_interval_seconds = diagnostic_interval_seconds
         self._last_input_log_at: dict[str, float] = {}
         self._last_pressure_quality: dict[str, str] = {}
+        self._activation_lock = Lock()
+        self._activated = False
         self._channels = {
             key: channel
             for key, channel in (
@@ -203,6 +258,126 @@ class NidaqmxDataAcquisition:
     def read_voltage(self, channel: str) -> float:
         return self.read_voltages(channel, 1)[0]
 
+    def read_pressure_voltages(
+        self, number_of_samples: int
+    ) -> dict[str, list[float]]:
+        if number_of_samples < 1:
+            raise ValueError("NI sample count must be positive")
+        logical_channels = tuple(self._channels)
+        physical_channels = tuple(self._channels[channel] for channel in logical_channels)
+        read_channels = getattr(self._backend, "read_channel_voltages", None)
+        if callable(read_channels):
+            physical_values = read_channels(physical_channels, number_of_samples)
+            values = {
+                logical: list(physical_values[physical])
+                for logical, physical in zip(
+                    logical_channels, physical_channels, strict=True
+                )
+            }
+        else:
+            values = {
+                channel: self.read_voltages(channel, number_of_samples)
+                for channel in logical_channels
+            }
+        for channel, samples in values.items():
+            if len(samples) != number_of_samples:
+                raise ValueError(
+                    f"NI channel {channel} returned {len(samples)} samples; "
+                    f"expected {number_of_samples}"
+                )
+            self._log_input_samples(channel, samples)
+        return values
+
+    def activate(
+        self, *, samples_per_read: int = 1, timeout_seconds: float = 0.1
+    ) -> None:
+        """Validate both AI channels, then create AO and apply SAFE once."""
+        if samples_per_read < 1:
+            raise ValueError("NI activation sample count must be positive")
+        with self._activation_lock:
+            if self._activated:
+                return
+            channels = tuple(self._channels.values())
+            terminal = self.terminal_configuration
+            sample_rate = getattr(self._backend, "_sample_rate_hz", "UNKNOWN")
+            self._log(
+                DiagnosticCategory.NI_LINE,
+                "NI_ACTIVATION",
+                "NI activation started; "
+                f"AI channels={','.join(channels) or 'NONE'}; terminal={terminal}; "
+                f"sample_rate={sample_rate}; samples_per_read={samples_per_read}",
+            )
+            for attempt in range(1, 4):
+                self._cleanup_backend()
+                task_name = "eor_pressure_inputs_ai"
+                self._log(
+                    DiagnosticCategory.NI_LINE,
+                    "NI_ACTIVATION",
+                    f"activation attempt={attempt}; AI task name={task_name}; "
+                    f"AI channel list={','.join(channels) or 'NONE'}",
+                )
+                try:
+                    if channels:
+                        read_channels = getattr(
+                            self._backend, "read_channel_voltages", None
+                        )
+                        if callable(read_channels):
+                            read_channels(
+                                channels,
+                                samples_per_read,
+                                timeout_seconds=timeout_seconds,
+                            )
+                        else:
+                            self.read_pressure_voltages(samples_per_read)
+                        self._log(
+                            DiagnosticCategory.NI_LINE,
+                            "NI_ACTIVATION",
+                            "AI validation completed",
+                        )
+                    if self._config.valve_output_channel is not None:
+                        if not self._output_authorized:
+                            raise PermissionError(
+                                "NI physical output requires explicit operator confirmation"
+                            )
+                        self._backend.write_voltage(
+                            self._config.valve_output_channel,
+                            self._config.safe_output_voltage,
+                        )
+                        self._log(
+                            DiagnosticCategory.NI_VALVE,
+                            "NI_ACTIVATION",
+                            "AO task created; safe voltage applied; "
+                            f"channel={self._config.valve_output_channel}; "
+                            f"voltage={self._config.safe_output_voltage:.6f} V",
+                        )
+                except Exception as error:
+                    cleanup_result = self._cleanup_backend()
+                    if not self._is_resource_reserved(error) or attempt == 3:
+                        self._log(
+                            DiagnosticCategory.NI_LINE,
+                            "NI_ACTIVATION",
+                            f"activation failed; task={task_name}; attempt={attempt}; "
+                            f"active known tasks={self._active_task_names()}; "
+                            f"cleanup result={cleanup_result}; error={error}",
+                        )
+                        raise
+                    self._log(
+                        DiagnosticCategory.NI_LINE,
+                        "NI_RESOURCE_RESERVED",
+                        f"NI resource reserved; failing task={task_name}; "
+                        f"active known tasks={self._active_task_names()}; "
+                        f"cleanup result={cleanup_result}; retry number={attempt + 1}",
+                    )
+                    sleep(0.25 * attempt)
+                    continue
+                self._activated = True
+                self._log(
+                    DiagnosticCategory.NI_LINE,
+                    "NI_ACTIVATION",
+                    "NI activation completed",
+                )
+                return
+
     def read_voltages(self, channel: str, number_of_samples: int) -> list[float]:
         if number_of_samples < 1:
             raise ValueError("NI sample count must be positive")
@@ -226,6 +401,11 @@ class NidaqmxDataAcquisition:
                 f"NI channel {channel} returned {len(voltages)} samples; "
                 f"expected {number_of_samples}"
             )
+        self._log_input_samples(channel, voltages)
+        return voltages
+
+    def _log_input_samples(self, channel: str, voltages: list[float]) -> None:
+        physical_channel = self._channels[channel]
         categories = {
             "line_pressure": DiagnosticCategory.NI_LINE,
             "differential_pressure": DiagnosticCategory.NI_DIFFERENTIAL,
@@ -242,7 +422,6 @@ class NidaqmxDataAcquisition:
                 f"{physical_channel} samples={len(voltages)} "
                 f"min={min(voltages):.6f} V max={max(voltages):.6f} V",
             )
-        return voltages
 
     def log_pressure_reading(
         self, channel: str, reading: AnalogPressureReading
@@ -304,13 +483,30 @@ class NidaqmxDataAcquisition:
             )
 
     def close(self) -> None:
+        with self._activation_lock:
+            try:
+                self.set_safe_state()
+            finally:
+                self._activated = False
+                self._output_authorized = False
+                self._cleanup_backend()
+
+    def _cleanup_backend(self) -> str:
+        close_output = getattr(self._backend, "close_output", None)
+        if not callable(close_output):
+            return "no persistent task"
         try:
-            self.set_safe_state()
-        finally:
-            self._output_authorized = False
-            close_output = getattr(self._backend, "close_output", None)
-            if callable(close_output):
-                close_output()
+            close_output()
+        except Exception as error:
+            return f"failed: {type(error).__name__}: {error}"
+        return "completed"
+
+    def _active_task_names(self) -> tuple[str, ...]:
+        return tuple(getattr(self._backend, "active_task_names", ()))
+
+    @classmethod
+    def _is_resource_reserved(cls, error: Exception) -> bool:
+        return getattr(error, "error_code", None) in cls.RESOURCE_RESERVED_ERROR_CODES
 
     def _validate_output(self, voltage: float) -> None:
         if not isfinite(voltage):
