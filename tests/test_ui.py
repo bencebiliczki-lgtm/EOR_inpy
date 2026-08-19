@@ -2840,7 +2840,13 @@ def test_startup_hardware_reconnect_runs_connection_test_before_activation(
         valve_zero_percent_voltage=1.0,
         valve_hundred_percent_voltage=5.0,
     )
-    connection_result = ConnectionTestResult(tuple(), hardware.enabled_test_devices())
+    connection_result = ConnectionTestResult(
+        tuple(
+            DeviceConnectionResult(device, True, device.value)
+            for device in hardware.enabled_test_devices()
+        ),
+        hardware.enabled_test_devices(),
+    )
     tested: list[HardwareConfiguration] = []
     activated: list[ConnectionTestResult | None] = []
 

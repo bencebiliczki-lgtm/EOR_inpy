@@ -9507,7 +9507,7 @@ class DashboardWindow(QMainWindow):
                 )
             except Exception as error:
                 self._runtime_bridge.hardware_activation_failed.emit(
-                    (configuration, attempt, str(error))
+                    (configuration, attempt, str(error), run_connection_test)
                 )
 
         QTimer.singleShot(0, reconnect)
@@ -10283,13 +10283,14 @@ class DashboardWindow(QMainWindow):
     def _hardware_activation_failed(self, payload: object) -> None:
         if not (
             isinstance(payload, tuple)
-            and len(payload) == 3
+            and len(payload) in (3, 4)
             and isinstance(payload[0], HardwareConfiguration)
             and isinstance(payload[1], int)
             and isinstance(payload[2], str)
         ):
             return
-        configuration, attempt, message = payload
+        configuration, attempt, message = payload[:3]
+        run_connection_test = len(payload) == 4 and bool(payload[3])
         self._startup_connection_error = message
         self._diagnostics.emit(
             DiagnosticCategory.SYSTEM,
@@ -10301,7 +10302,9 @@ class DashboardWindow(QMainWindow):
             QTimer.singleShot(
                 min(5000, attempt * 1000),
                 lambda: self._schedule_hardware_reconnect(
-                    configuration, attempt + 1
+                    configuration,
+                    attempt + 1,
+                    run_connection_test=run_connection_test,
                 ),
             )
             return
