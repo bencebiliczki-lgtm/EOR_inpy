@@ -358,13 +358,8 @@ class HardwareConfiguration:
 
     @property
     def measurement_ready(self) -> bool:
-        """Core devices needed for a normal EOR measurement; line pressure is optional."""
-        return (
-            self.jacket_pump_enabled
-            and self.injection_pump_enabled
-            and self.differential_pressure_enabled
-            and self.valve_output_enabled
-        )
+        """Configuration validity; runtime readiness comes from enabled connections."""
+        return True
 
     def to_settings(self) -> dict[str, object]:
         return asdict(self)
@@ -388,14 +383,14 @@ class DeviceConnectionResult:
 @dataclass(frozen=True, slots=True)
 class ConnectionTestResult:
     devices: tuple[DeviceConnectionResult, ...]
-    required_devices: tuple[HardwareTestDevice, ...] = tuple(HardwareTestDevice)
+    enabled_devices: tuple[HardwareTestDevice, ...] = tuple(HardwareTestDevice)
 
     @property
     def all_successful(self) -> bool:
         results = {result.device: result for result in self.devices}
         return all(
             device in results and results[device].successful
-            for device in self.required_devices
+            for device in self.enabled_devices
         )
 
     def for_device(self, device: HardwareTestDevice) -> DeviceConnectionResult | None:

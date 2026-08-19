@@ -286,8 +286,8 @@ után hajtható végre.
 A Remote-felügyeleti regresszió igazolja, hogy Local státusz dashboard/üresjárati
 polling alatt nem küld parancsot, aktív vezérlési felügyelet mellett viszont a
 következő periodikus STATUS után visszaellenőrzött `REMOTE` helyreállítás indul.
-A részleges kapcsolati tesztek igazolják, hogy az egyik pumpa vagy NI-bemenet hibája
-mellett a többi eszköz sikeres státusza megmarad. A közvetlen pumpakapcsolódás
+Az eszközönkénti kapcsolati tesztek igazolják, hogy az egyik pumpa vagy NI-bemenet
+hibája mellett a többi eszköz sikeres státusza megmarad. A közvetlen pumpakapcsolódás
 nem vált módot; az első vezérlőművelet ellenőrzi és szükség esetén helyreállítja
 a Remote módot. Külön regresszió fedi a futás közbeni Remote-vesztést és az
 ellenőrzés utáni `LOCAL MODE` válasz egyszeri helyreállítását. A STOP-deduplikációs
@@ -310,8 +310,8 @@ igazolja, hogy a tranzakció befejezésétől számított ütemezés nem hoz lé
 felzárkózó pollingburstöt. Külön teszt ellenőrzi a vezérlőparancsok közötti
 kötelező biztonsági PRESS/STATUS lehetőséget és a normál parancsok kifutását.
 Külön telemetriateszt igazolja, hogy FLOW/VOLA timeout mellett a nyomáspolling
-tovább fut, a nyomás minősége `GOOD` marad, míg a kapcsolat `DEGRADED` állapotot
-és mezőszintű hibát ad.
+tovább fut, a nyomás minősége `GOOD`, a kapcsolat `CONNECTED` marad, és a lassú
+mező önálló adatminőségi hibát ad.
 A STALE szervizoldal UI-tesztje ellenőrzi a polling-, külön PRESS/FLOW-VOLA/STATUS
 STALE- és startup timeoutértékek tartós mentését, visszatöltését, valamint a
 soros retry-keretnél rövidebb STALE-határ mentésének tiltását.
@@ -335,6 +335,13 @@ Projektbeállítások pedig nem kínál eszközprofil-szerkesztést.
 A csak szelepet tartalmazó globális profil UI-tesztje igazolja, hogy sikeres
 olvasási kapcsolatpróba és globális hardvermód nélkül is megnyithatja a
 közvetlen eszközkezelést, miközben a többi eszköz nincs hozzáadva.
+Dashboard-regresszió ellenőrzi, hogy a KÖP tartásinyomás-vezérlő közvetlenül a
+BES mérési térfogatáram alatt jelenik meg, és futó hardvermérésben a felügyelt
+szolgáltatási útvonalat hívja. A szolgáltatástesztek lefedik a STOP–beállítás–
+visszaolvasás–RUN sorrendet, a MAXPRESS-határt és a hibás visszaolvasást.
+A PID-diagram regressziója ellenőrzi, hogy normál módban csak az üzemi mérési
+görbék és a riasztás szerepelnek a jelmagyarázatban, Developer módban pedig a
+PID nyers, szűrt, célérték, szelepállás és állapotesemény sorozatok is megjelennek.
 
 A beállítási központ tesztje ellenőrzi az átméretezhetőséget, a bal oldali
 kategórianavigációt, a megadott kezdőoldalt, valamint azt, hogy az Eszközök,
@@ -393,7 +400,7 @@ Felügyelt környezetben, nyomásfelépítés nélkül vagy meghatározott bizto
 
 ## Vezetett eszközteszt és PID-védelem
 
-Az automatikus tesztek lefedik a részleges kapcsolatpróba-összesítést és célzott
+Az automatikus tesztek lefedik az eszközönkénti kapcsolatpróba-összesítést és célzott
 érvénytelenítést, a szimulációs/futó-runtime tiltást, a többmintás statisztikát, a
 nem véges jelet, AO- és szelephibánál a központi STOP/SAFE útvonalat, a kötelező
 kihagyási indokot és a JSON round-tripet. A PID-tesztek ellenőrzik a holtsávban
@@ -426,3 +433,11 @@ fizikai paraméterek mérésblokkoló hatását, a három pollingperiódusos
 STALE-ablakot, a csak hiányzó INI-kulcsokra alkalmazott migrációt és a COM3
 automatikus jelöltlistából való kizárását. A COM3 manuális szervizmódú
 felülbírálása külön teszteset.
+## Eszköz-életciklus regressziók
+
+Az automatikus tesztek külön ellenőrzik a kis- és nagybetűfüggetlen
+COM-foglalást, a lusta soros megnyitást, az azonosítási hiba utáni takarítást,
+a leálláskor beragadt worker foglalásának megtartását, a letiltott eszközök
+kihagyását, az egymástól független eszközkapcsolati eredményt és a mentett
+hardverprofil dialógus nélküli visszatöltését. A tesztek nem nyithatnak valódi
+soros portot és nem írhatnak valódi NI kimenetre.

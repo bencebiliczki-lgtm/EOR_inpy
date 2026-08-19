@@ -2,8 +2,9 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from eor_control.connection_registry import SerialPortRegistry
 from eor_control.dasnet import DasnetResponse
-from eor_control.isco import IscoPump, IscoSerialConfig, parse_measurement
+from eor_control.isco import IscoPump, IscoSerialConfig, open_isco_pump, parse_measurement
 
 
 @dataclass
@@ -67,6 +68,101 @@ def test_disconnect_releases_client_and_next_connect_reopens_it() -> None:
     assert client.commands.count("RSVP") == 2
 
 
+def test_serial_registry_is_case_insensitive_and_releases_after_disconnect() -> None:
+    registry = SerialPortRegistry()
+    first_client = ScriptedClient(
+        {"RSVP": ["READY"], "IDENTIFY": ["MODEL 260D PUMP"]}
+    )
+    second_client = ScriptedClient(
+        {"RSVP": ["READY"], "IDENTIFY": ["MODEL 260D PUMP"]}
+    )
+    first = IscoPump(
+        first_client,
+        IscoSerialConfig("COM4", 6),
+        port_registry=registry,
+        connection_owner="jacket",
+    )
+    second = IscoPump(
+        second_client,
+        IscoSerialConfig("com4", 7),
+        port_registry=registry,
+        connection_owner="injection",
+    )
+
+    first.connect()
+    with pytest.raises(RuntimeError, match="reserved by jacket"):
+        second.connect()
+
+    first.disconnect()
+    second.connect()
+    assert registry.owner("COM4") == "injection"
+    second.disconnect()
+
+
+def test_failed_identification_closes_and_releases_serial_reservation() -> None:
+    registry = SerialPortRegistry()
+    failed_client = ScriptedClient(
+        {"RSVP": ["READY"], "IDENTIFY": ["UNKNOWN DEVICE"]}
+    )
+    pump = IscoPump(
+        failed_client,
+        IscoSerialConfig("COM2", 6),
+        port_registry=registry,
+        connection_owner="jacket",
+    )
+
+    with pytest.raises(ConnectionError, match="not a 260D"):
+        pump.connect()
+
+    assert failed_client.closed
+    assert registry.owner("com2") is None
+
+
+def test_open_isco_pump_constructs_a_closed_serial_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[object] = []
+
+    class ClosedSerial:
+        def __init__(self, *, port: str | None, **_kwargs: object) -> None:
+            self.port = port
+            self.is_open = port is not None
+            created.append(self)
+
+    monkeypatch.setattr("eor_control.isco.serial.Serial", ClosedSerial)
+
+    open_isco_pump(IscoSerialConfig("COM4", 6), port_registry=SerialPortRegistry())
+
+    connection = created[0]
+    assert isinstance(connection, ClosedSerial)
+    assert connection.port == "COM4"
+    assert not connection.is_open
+
+
+def test_failed_close_retains_port_reservation() -> None:
+    class UncloseableClient(ScriptedClient):
+        def close(self) -> None:
+            raise OSError("close failed")
+
+    registry = SerialPortRegistry()
+    client = UncloseableClient(
+        {"RSVP": ["READY"], "IDENTIFY": ["UNKNOWN DEVICE"]}
+    )
+    pump = IscoPump(
+        client,
+        IscoSerialConfig("COM4", 6),
+        port_registry=registry,
+        connection_owner="jacket",
+    )
+
+    with pytest.raises(ConnectionError):
+        pump.connect()
+
+    assert registry.owner("COM4") == "jacket"
+    with pytest.raises(RuntimeError, match="previous serial close failed"):
+        pump.connect()
+
+
 def test_status_queries_documented_fields_and_converts_flow_to_hour() -> None:
     pump, client = connected_pump()
 
@@ -86,6 +182,16 @@ def test_setflow_accepts_flowa_firmware_response() -> None:
 
     assert value == pytest.approx(0.001)
     assert client.commands[-1] == "SETFLOWA"
+
+
+def test_setpress_accepts_pressa_firmware_response() -> None:
+    pump, client = connected_pump()
+    client.responses["SETPRESSA"] = ["PRESSA=135.250 BAR"]
+
+    value = pump.read_configured_pressure_bar()
+
+    assert value == pytest.approx(135.25)
+    assert client.commands[-1] == "SETPRESSA"
 
 
 def test_hourly_flow_command_prevents_x60_on_unitless_readback() -> None:

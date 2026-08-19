@@ -59,6 +59,9 @@ class DisabledPump:
     def read_configured_flow_ml_per_hour(self) -> float:
         raise ConnectionError(self._message)
 
+    def read_configured_pressure_bar(self) -> float:
+        raise ConnectionError(self._message)
+
     def set_constant_pressure(self, pressure_bar: float) -> None:
         raise ConnectionError(self._message)
 

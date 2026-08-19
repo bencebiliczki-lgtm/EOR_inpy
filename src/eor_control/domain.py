@@ -29,6 +29,7 @@ class PumpPressureReading:
     sequence: int
     quality: DataQuality
     last_error: str = ""
+    status_quality: DataQuality = DataQuality.GOOD
 
 
 @dataclass(frozen=True, slots=True)

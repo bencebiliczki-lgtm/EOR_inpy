@@ -46,7 +46,10 @@ from eor_control.application import (  # noqa: E402
 )
 from eor_control.control import (  # noqa: E402
     ControlMode,
+    PidDiagnostics,
     PidParameters,
+    PidState,
+    PressureMeasurement,
     PressureSource,
     ValveCommand,
 )
@@ -71,6 +74,7 @@ from eor_control.domain import (  # noqa: E402
     DataQuality,
     MeasurementRecord,
     MeasurementSnapshot,
+    PumpPressureReading,
     PumpStatus,
 )
 from eor_control.hardware import (  # noqa: E402
@@ -1270,6 +1274,56 @@ def test_manual_control_connects_without_remote_and_closes_ports() -> None:
     assert dialog._shutdown_complete
 
 
+def test_borrowed_manual_control_stops_safely_without_disconnecting_ports() -> None:
+    app = application()
+
+    class BorrowedService:
+        shutdown_calls = 0
+        safe_stop_observed = False
+
+        def shutdown_connections(self) -> tuple[str, ...]:
+            self.shutdown_calls += 1
+            return ()
+
+        def observe_safe_stop(self) -> None:
+            self.safe_stop_observed = True
+
+    class BorrowedLoop:
+        safe_state_calls = 0
+
+        def request_safe_state(self) -> None:
+            self.safe_state_calls += 1
+
+    service = BorrowedService()
+    loop = BorrowedLoop()
+    dialog = PumpControlDialog(  # type: ignore[arg-type]
+        service,
+        loop,  # type: ignore[arg-type]
+        lambda: "Teszt szakasz",
+        disconnect_on_close=False,
+        connection_changes_enabled=False,
+    )
+    dialog._telemetry_timer.stop()
+
+    dialog._request_close()
+    for _ in range(100):
+        app.processEvents()
+        if dialog._shutdown_complete:
+            break
+        sleep(0.01)
+
+    assert loop.safe_state_calls == 1
+    assert service.safe_stop_observed
+    assert service.shutdown_calls == 0
+    connection_buttons = [
+        button
+        for button in dialog.findChildren(QPushButton)
+        if button.text() in {"CSATLAKOZÁS", "LEVÁLASZTÁS"}
+    ]
+    assert connection_buttons
+    assert all(not button.isEnabled() for button in connection_buttons)
+
+
 def test_manual_control_retains_partial_pump_status_when_sensor_is_missing() -> None:
     app = application()
     full_safety_checks: list[str] = []
@@ -1314,7 +1368,7 @@ def test_manual_control_retains_partial_pump_status_when_sensor_is_missing() -> 
     assert "NINCS KAPCSOLAT" in dialog._status_labels[PumpRole.INJECTION].text()
     assert dialog._line_pressure_status.text() == "KAPCSOLÓDVA | 12.500 bar"
     assert "sensor is not connected" in dialog._differential_pressure_status.text()
-    assert "RÉSZLEGES KAPCSOLAT" in dialog._safety_status.text()
+    assert "EGYES ESZKÖZÖK NEM ÉRHETŐK EL" in dialog._safety_status.text()
     assert "manuális biztonsági profil" in dialog._safety_status.text()
     assert full_safety_checks == []
     dialog.close()
@@ -1462,6 +1516,13 @@ def test_successful_guided_valve_test_persists_direction_for_current_mapping(
     )
 
     assert window._valve_direction_is_validated()
+    window._source.setCurrentIndex(
+        window._source.findData(PressureSource.LINE_SENSOR)
+    )
+    assert not window._valve_direction_is_validated()
+    window._source.setCurrentIndex(
+        window._source.findData(PressureSource.INJECTION_PUMP)
+    )
     window._active_hardware_configuration = replace(
         configuration, valve_hundred_percent_voltage=4.0
     )
@@ -2258,6 +2319,7 @@ def test_device_settings_warns_but_accepts_finite_ni_read_outside_calibration(
 
 def test_device_settings_keeps_actions_visible_on_small_screen(tmp_path: Path) -> None:
     app = application()
+    simulation_requests: list[bool] = []
     dialog = DeviceSettingsDialog(
         UnusedTester(),  # type: ignore[arg-type]
         settings=QSettings(str(tmp_path / "small-screen.ini"), QSettings.Format.IniFormat),
@@ -2265,6 +2327,7 @@ def test_device_settings_keeps_actions_visible_on_small_screen(tmp_path: Path) -
         discoverer=HardwareDiscovery,
         developer_mode=True,
         direct_control_opener=lambda _configuration: None,
+        simulation_mode_opener=lambda: simulation_requests.append(True),
     )
     dialog.resize(480, 420)
     dialog.show()
@@ -2279,6 +2342,7 @@ def test_device_settings_keeps_actions_visible_on_small_screen(tmp_path: Path) -
         dialog._test_button,
         dialog._activate_button,
         dialog._direct_control_button,
+        dialog._simulation_mode_button,
         dialog._cancel_button,
     )
     for button in action_buttons:
@@ -2288,6 +2352,8 @@ def test_device_settings_keeps_actions_visible_on_small_screen(tmp_path: Path) -
     assert [button.geometry().left() for button in action_buttons] == sorted(
         button.geometry().left() for button in action_buttons
     )
+    dialog._simulation_mode_button.click()
+    assert simulation_requests == [True]
 
     dialog.close()
 
@@ -2659,23 +2725,47 @@ def test_developer_can_switch_back_to_persistent_simulation(tmp_path: Path) -> N
     window.close()
 
 
-def test_last_hardware_mode_opens_safe_activation_flow_once(
+def test_last_hardware_mode_restores_saved_profile_without_opening_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     application()
     settings = QSettings(str(tmp_path / "hardware.ini"), QSettings.Format.IniFormat)
     settings.setValue("application/last_run_mode", RunMode.HARDWARE.value)
+    hardware = HardwareConfiguration(
+        jacket_port="COM1",
+        jacket_unit_id=1,
+        jacket_channel="A",
+        injection_port="COM2",
+        injection_unit_id=2,
+        injection_channel="A",
+        baud_rate=9600,
+        line_pressure_channel="Dev1/ai0",
+        differential_pressure_channel="Dev1/ai1",
+        valve_output_channel="Dev1/ao0",
+        safe_output_voltage=1.0,
+        valve_zero_percent_voltage=1.0,
+        valve_hundred_percent_voltage=5.0,
+    )
+    for key, value in hardware.to_settings().items():
+        settings.setValue(f"hardware/{key}", value)
     window = build_simulated_dashboard(
         tmp_path / "raw.csv", tmp_path / "projects.sqlite3", settings=settings
     )
     window._project_selector_required = False
     opened: list[bool] = []
-    monkeypatch.setattr(window, "_open_device_settings", lambda: opened.append(True))
+    restored: list[HardwareConfiguration] = []
+    monkeypatch.setattr(window, "_open_settings_hub", lambda _page: opened.append(True))
+    monkeypatch.setattr(
+        window,
+        "_schedule_hardware_reconnect",
+        lambda configuration: restored.append(configuration),
+    )
 
     window._restore_startup_mode()
     window._restore_startup_mode()
 
-    assert opened == [True]
+    assert restored == [hardware]
+    assert opened == []
     assert window._run_mode is RunMode.SIMULATION
     window.close()
 
@@ -2920,6 +3010,46 @@ def test_window_shutdown_requests_safe_state_from_ready_devices(tmp_path: Path) 
     # A cycle signal queued before closeEvent may be delivered after the NAS
     # queue has closed; shutdown callbacks must become harmless no-ops.
     window._refresh_recording_status()
+
+
+def test_dashboard_places_jacket_pressure_control_below_bes_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    window = build_simulated_dashboard(tmp_path / "raw.csv", tmp_path / "projects.sqlite3")
+    service = window._pump_control
+    assert service is not None
+    window._run_mode = RunMode.HARDWARE
+    window._devices.start()
+    window._devices.set_measurement_state(MeasurementState.RUNNING)
+    applied: list[tuple[float, float]] = []
+    monkeypatch.setattr(
+        service,
+        "apply_jacket_holding_pressure",
+        lambda requested, *, maximum_pressure_bar: (
+            applied.append((requested, maximum_pressure_bar)) or requested
+        ),
+    )
+    window._refresh_state()
+
+    assert window.findChild(QWidget, "dashboard_pump_start_controls") is None
+    assert window._jacket_pressure_box.title() == "KÖP tartási nyomás"
+    sidebar_layout = window._jacket_pressure_box.parentWidget().layout()
+    assert sidebar_layout is not None
+    assert sidebar_layout.indexOf(window._jacket_pressure_box) == (
+        sidebar_layout.indexOf(window._dashboard_boxes["measurement_flow"]) + 1
+    )
+    window._new_jacket_pressure.setValue(135.0)
+    window._apply_jacket_pressure_button.click()
+    for _ in range(100):
+        application().processEvents()
+        if applied:
+            break
+        sleep(0.01)
+
+    assert applied == [(135.0, window._max_jacket.value())]
+    assert window._current_jacket_pressure.text() == "135.000 bar"
+    window.close()
 
 
 def test_measurement_start_preflight_accepts_finite_voltage_outside_nominal_span(
@@ -3328,6 +3458,170 @@ def test_valve_card_always_shows_current_safe_or_commanded_state(
 
     assert window._valve_label.text() == "SAFE | 1.000 V"
     assert window._connection_labels["valve"].text() == "SZIMULÁCIÓ — SAFE"
+    window.close()
+
+
+def test_unavailable_line_pid_source_is_not_selectable(tmp_path: Path) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+    )
+
+    window._set_line_pressure_source_available(False)
+    assert window._source.findData(PressureSource.LINE_SENSOR) == -1
+    window._set_line_pressure_source_available(True)
+    assert window._source.findData(PressureSource.LINE_SENSOR) >= 0
+    window.close()
+
+
+def test_pid_diagnostics_copy_contains_source_timing_quality_and_configuration(
+    tmp_path: Path,
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+    )
+    window._set_developer_mode(False)
+    pressure_reading = PumpPressureReading(
+        91.0,
+        5.0,
+        0.2,
+        12,
+        DataQuality.GOOD,
+        status_quality=DataQuality.GOOD,
+    )
+    snapshot = MeasurementSnapshot(
+        recorded_at=datetime(2026, 8, 6, 10, 30, tzinfo=UTC),
+        monotonic_seconds=5.2,
+        jacket_pump=PumpStatus(120.0, 0.0, 250.0),
+        injection_pump=PumpStatus(91.0, 8.0, 240.0),
+        line_pressure_bar=92.0,
+        differential_pressure_bar=2.0,
+        valve_percent=25.0,
+        injection_pressure_reading=pressure_reading,
+    )
+    pressure = PressureMeasurement(
+        PressureSource.INJECTION_PUMP,
+        91.0,
+        91.0,
+        5.0,
+        0.2,
+        12,
+        DataQuality.GOOD,
+    )
+    command = ValveCommand(
+        True,
+        25.0,
+        ControlMode.AUTOMATIC,
+        PressureSource.INJECTION_PUMP,
+        pid_state=PidState.ACTIVE,
+        pressure_measurement=pressure,
+        pid_measurement_bar=90.5,
+    )
+    diagnostics = PidDiagnostics(
+        state=PidState.ACTIVE,
+        measurement_dt_seconds=1.0,
+        error_bar=9.5,
+        p_term_percent=1.0,
+        i_term_percent=2.0,
+        d_term_percent=0.0,
+        applied_output_percent=25.0,
+        filtered_measurement_bar=90.5,
+        reversal_count=2,
+    )
+
+    window._handle_cycle(
+        ControlCycleResult(
+            MeasurementRecord(snapshot, 0.0, "Teszt"),
+            command,
+            valve_voltage=2.0,
+            pid_diagnostics=diagnostics,
+            applied_output_percent=25.0,
+        )
+    )
+    window._copy_pid_diagnostics()
+    copied = QApplication.clipboard().text()
+
+    for field in (
+        "source=injection_pump",
+        "prefiltered_pressure_bar=91.0",
+        "quality=good",
+        "pump_status_quality=good",
+        "reversal_count=2",
+        "configuration_kp=",
+        "configuration_filter_time_constant_seconds=",
+    ):
+        assert field in copied
+    assert "Felügyeleti ciklus:" in window._pid_timing_label.text()
+    assert "Forrás mintavételi/polling ideje:" in window._pid_timing_label.text()
+    assert len(window._pid_event_points) == 1
+    assert window._pid_valve_outputs[-1] == pytest.approx(25.0)
+    assert not window._pid_valve_curve.isVisible()
+    assert not window._pid_event_scatter.isVisible()
+    assert window._plot.plotItem.legend is not None
+    assert len(window._plot.plotItem.legend.items) == 5
+    assert not {
+        "PID nyers",
+        "PID szűrt",
+        "PID célérték",
+        "Szelepállás",
+        "PID-frissítések és állapotok",
+    }.intersection(checkbox.text() for checkbox in window.findChildren(QCheckBox))
+    window._set_developer_mode(True)
+    assert window._pid_raw_curve.isVisible()
+    assert window._pid_filtered_curve.isVisible()
+    assert window._pid_setpoint_curve.isVisible()
+    assert window._pid_valve_curve.isVisible()
+    assert window._pid_event_scatter.isVisible()
+    assert len(window._plot.plotItem.legend.items) == 10
+    window._set_developer_mode(False)
+    assert not window._pid_raw_curve.isVisible()
+    assert not window._pid_event_scatter.isVisible()
+    assert len(window._plot.plotItem.legend.items) == 5
+    window.close()
+
+
+def test_running_source_switch_rejects_stale_source_without_changing_active_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+    )
+    stale_line = AnalogPressureReading(
+        last_raw_voltage=2.0,
+        median_voltage=2.0,
+        filtered_voltage=2.0,
+        raw_pressure_bar=100.0,
+        filtered_pressure_bar=100.0,
+        measured_at=datetime.now(UTC),
+        monotonic_seconds=1.0,
+        sample_age_seconds=3.0,
+        quality=DataQuality.STALE,
+        sequence=4,
+    )
+    snapshot = MeasurementSnapshot(
+        recorded_at=datetime.now(UTC),
+        monotonic_seconds=4.0,
+        jacket_pump=PumpStatus(120.0, 0.0, 250.0),
+        injection_pump=PumpStatus(90.0, 8.0, 240.0),
+        line_pressure_bar=100.0,
+        differential_pressure_bar=2.0,
+        valve_percent=25.0,
+        line_pressure_reading=stale_line,
+    )
+    window._last_cycle_result = ControlCycleResult(
+        MeasurementRecord(snapshot, 0.0, "Teszt"),
+        ValveCommand(True, 25.0, ControlMode.AUTOMATIC, PressureSource.INJECTION_PUMP),
+    )
+    monkeypatch.setattr(type(window._runtime), "running", property(lambda _self: True))
+    errors: list[str] = []
+    monkeypatch.setattr(window, "_show_error", errors.append)
+    window._source.setCurrentIndex(window._source.findData(PressureSource.LINE_SENSOR))
+
+    assert not window._confirm_pending_pressure_source()
+    assert window._confirmed_pressure_source is PressureSource.INJECTION_PUMP
+    assert errors and "nincs friss, GOOD mintája" in errors[-1]
     window.close()
 
 

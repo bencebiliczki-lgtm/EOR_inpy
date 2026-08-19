@@ -233,8 +233,9 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   a mérési runtime-ot indítsa.
 - A pumpatelemetria minőségét mezőnként kell nyilvántartani. A nyomás
   biztonságkritikus; elavulása reteszelt hibát okozhat. A FLOW vagy VOLA önálló
-  elavulása `DEGRADED` kapcsolatot jelezzen és maradjon látható, de önmagában ne
-  állítsa le a nyomásszabályozást vagy a teljes mérést. A kapcsolatindításhoz
+  elavulása mezőszintű adatminőségi hibaként maradjon látható, de ne hozzon létre
+  új kapcsolati állapotot, és önmagában ne állítsa le a nyomásszabályozást vagy a
+  teljes mérést. A kapcsolatindításhoz
   nyomás és alapstátusz szükséges; a lassú mezők háttérben töltődhetnek fel.
   A nyomáslekérdezés elsőbbséget élvezzen. A biztonságkritikus `STATUS` külön
   ütemezést kapjon, és normál parancsfolyam se éheztethesse ki. A `FLOW` és
@@ -421,3 +422,21 @@ Mérésindítási konfiguráció
 - A korábbi `pump_startup/injection_target_flow_ml_per_hour` kulcs csak
   migrációs fallback az előkészítési értékhez. Ha az új mérési kulcs
   hiányzik, az aktív szakasz mentett cél-flow-ja az egyértelmű alapérték.
+## Eszközkapcsolatok
+
+- Minden eszköz külön engedélyezhető, kapcsolható és bontható.
+- A mérés indítását kizárólag az engedélyezett eszközök kapcsolata blokkolja;
+  letiltott eszköz nem okozhat kapcsolati vagy adatminőségi hibát.
+- Az eszközparaméterek alkalmazásszintű `QSettings` beállítások, nem
+  projektadatok.
+- A legutóbbi hardvermód és hardverprofil induláskor automatikusan visszaáll;
+  az eszközbeállítási felület csak sikertelen visszaállítás után nyílik meg.
+- A közvetlen eszközkezelő az aktív kapcsolatokat használja, amikor lehetséges;
+  külön kapcsolat után véges számú automatikus visszacsatlakozás történik.
+- A BES mérési térfogatáram vezérlője alatt külön KÖP tartásinyomás-vezérlő
+  jelenjen meg aktuális értékkel, új célértékkel és Alkalmazás gombbal. A futó
+  hardvermérés alatti módosítás `STOP → CONST PRESS → SETPRESS visszaolvasás →
+  RUN` sorrendben történjen, és ne léphesse túl a KÖP MAXPRESS-határát.
+- Az élő diagram PID-diagnosztikai görbéi és jelmagyarázat-bejegyzései kizárólag
+  Developer módban jelenjenek meg. Külön görbekapcsoló sor ne foglaljon helyet a
+  normál dashboardon.

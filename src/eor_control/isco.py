@@ -1,11 +1,15 @@
 import re
-from contextlib import suppress
 from dataclasses import dataclass
 from math import isfinite
 from typing import Protocol, cast
 
 import serial  # type: ignore[import-untyped]
 
+from eor_control.connection_registry import (
+    SERIAL_PORT_REGISTRY,
+    SerialPortRegistry,
+    SerialPortReservation,
+)
 from eor_control.dasnet import DasnetClient, DasnetResponse, SerialConnection
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
 from eor_control.domain import PumpStatus
@@ -50,18 +54,44 @@ class IscoSerialConfig:
 
 
 class IscoPump:
-    def __init__(self, client: DasnetCommandClient, config: IscoSerialConfig) -> None:
+    def __init__(
+        self,
+        client: DasnetCommandClient,
+        config: IscoSerialConfig,
+        *,
+        port_registry: SerialPortRegistry | None = None,
+        connection_owner: str | None = None,
+    ) -> None:
         self._client = client
         self._config = config
         self._flow_unit = config.flow_unit
         self._connected = False
         self._identified_model: str | None = None
+        self._port_registry = port_registry
+        self._connection_owner = connection_owner or f"ISCO {config.unit_id}/{config.pump_channel}"
+        self._reservation: SerialPortReservation | None = None
+        self._close_failed = False
 
     @property
     def identified_model(self) -> str | None:
         return self._identified_model
 
+    @property
+    def serial_is_open(self) -> bool:
+        return bool(getattr(self._client, "is_open", False))
+
     def connect(self) -> None:
+        if self._connected:
+            return
+        if self._close_failed:
+            raise RuntimeError(
+                f"ISCO pump on {self._config.port} previous serial close failed; "
+                "reconnect denied"
+            )
+        if self._port_registry is not None and self._reservation is None:
+            self._reservation = self._port_registry.reserve(
+                self._config.port, self._connection_owner
+            )
         try:
             self._client.open()
             ready = self._client.command(self._channel_command("RSVP")).message.strip()
@@ -74,8 +104,16 @@ class IscoPump:
                 )
         except Exception:
             self._connected = False
-            with suppress(Exception):
+            close_succeeded = False
+            try:
                 self._client.close()
+                close_succeeded = True
+            except Exception:
+                self._close_failed = True
+            if close_succeeded and not bool(getattr(self._client, "is_open", False)):
+                self._release_port()
+            elif bool(getattr(self._client, "is_open", False)):
+                self._close_failed = True
             raise
         self._identified_model = identity
         self._connected = True
@@ -136,6 +174,27 @@ class IscoPump:
                 "expected ML/MIN or ML/HR"
             )
         return flow * 60.0 if unit == "ML/MIN" else flow
+
+    def read_configured_pressure_bar(self) -> float:
+        """Read the documented SETPRESS target for command verification."""
+        self._require_connected()
+        command = self._channel_command("SETPRESS")
+        response = self._client.command(command).message
+        accepted_keys = {
+            command.upper(),
+            self._channel_command("PRESS").upper(),
+        }
+        pressure, reported_unit = _parse_measurement_parts(
+            response,
+            command=command,
+            accepted_keys=accepted_keys,
+        )
+        unit = (reported_unit or self._config.pressure_unit).upper()
+        if unit != "BAR":
+            raise ValueError(
+                f"unexpected ISCO unit {unit!r} for {command}; expected BAR"
+            )
+        return pressure
 
     def read_remaining_volume_ml(self) -> float:
         self._require_connected()
@@ -198,7 +257,28 @@ class IscoPump:
 
     def disconnect(self) -> None:
         self._connected = False
-        self._client.close()
+        try:
+            self._client.close()
+        except Exception:
+            self._close_failed = True
+            raise
+        if bool(getattr(self._client, "is_open", False)):
+            self._close_failed = True
+            raise OSError(
+                f"serial port {self._config.port} remained open after close"
+            )
+        self._release_port()
+
+    def cancel_pending_read(self) -> None:
+        cancel = getattr(self._client, "cancel_read", None)
+        if callable(cancel):
+            cancel()
+
+    def _release_port(self) -> None:
+        reservation = self._reservation
+        if reservation is not None and self._port_registry is not None:
+            self._port_registry.release(reservation)
+            self._reservation = None
 
     def _read_measurement(self, command: str, *, expected_unit: str) -> float:
         response = self._client.command(command).message
@@ -270,11 +350,13 @@ def open_isco_pump(
     *,
     diagnostics: DiagnosticLogger | None = None,
     diagnostic_category: DiagnosticCategory = DiagnosticCategory.SYSTEM,
+    port_registry: SerialPortRegistry = SERIAL_PORT_REGISTRY,
+    connection_owner: str | None = None,
 ) -> IscoPump:
     connection = cast(
         SerialConnection,
         serial.Serial(
-            port=config.port,
+            port=None,
             baudrate=config.baud_rate,
             bytesize=serial.EIGHTBITS,
             parity=serial.PARITY_NONE,
@@ -283,6 +365,7 @@ def open_isco_pump(
             write_timeout=config.timeout_seconds,
         ),
     )
+    connection.port = config.port  # type: ignore[attr-defined]
     return IscoPump(
         DasnetClient(
             connection,
@@ -292,4 +375,6 @@ def open_isco_pump(
             diagnostic_category=diagnostic_category,
         ),
         config,
+        port_registry=port_registry,
+        connection_owner=connection_owner,
     )

@@ -21,6 +21,7 @@ class ControlCycleResult:
     command: ValveCommand
     valve_voltage: float | None = None
     pid_diagnostics: PidDiagnostics | None = None
+    applied_output_percent: float | None = None
 
 
 class ControlLoop:
@@ -94,6 +95,7 @@ class ControlLoop:
             command=command,
             valve_voltage=float(voltage) if isinstance(voltage, (int, float)) else None,
             pid_diagnostics=self._controller.diagnostics,
+            applied_output_percent=self._last_output_percent,
         )
 
     def configure_pid(self, parameters: PidParameters) -> None:
@@ -161,6 +163,7 @@ class ControlLoop:
             command=command,
             valve_voltage=float(voltage) if isinstance(voltage, (int, float)) else None,
             pid_diagnostics=self._controller.diagnostics,
+            applied_output_percent=self._last_output_percent,
         )
 
     def observe_pump_startup_once(self, *, active_stage: str) -> MeasurementRecord:
@@ -218,3 +221,11 @@ class ControlLoop:
         )
         self._controller.enter_safe(self._last_output_percent)
         self._measurement.request_safe_state()
+
+    def request_fault_state(self) -> None:
+        self._actuator.set_safe_state()
+        self._last_output_percent = float(
+            getattr(self._actuator, "safe_output_percent", 0.0)
+        )
+        self._controller.enter_safe(self._last_output_percent)
+        self._measurement.request_fault_state()

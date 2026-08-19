@@ -5,6 +5,7 @@ from threading import Event
 import pytest
 
 from eor_control.calibration import LinearCalibration
+from eor_control.devices import DisabledPump
 from eor_control.domain import DataQuality, MeasurementRecord
 from eor_control.measurement import MeasurementChannels, MeasurementService
 from eor_control.safety import SafetyLimits, SafetyMonitor
@@ -101,6 +102,31 @@ def test_sample_calibrates_and_tracks_injected_volume() -> None:
     assert restarted.jacket_net_volume_ml == pytest.approx(0.0)
 
 
+def test_disabled_pump_is_not_read_and_does_not_create_a_safety_fault() -> None:
+    injection = SimulatedPump(pressure_bar=100.0, remaining_volume_ml=250.0)
+    injection.connect()
+    daq = SimulatedDataAcquisition()
+    daq.inputs["differential_pressure"] = 1.5
+    measurement = MeasurementService(
+        jacket_pump=DisabledPump("jacket"),
+        injection_pump=injection,
+        daq=daq,
+        line_calibration=LinearCalibration(1.0, 5.0, 0.0, 400.0),
+        differential_calibration=LinearCalibration(1.0, 5.0, 0.0, 40.0),
+        safety_monitor=SafetyMonitor(SafetyLimits(350.0, 350.0, 50.0)),
+        writer=MemoryWriter(),
+        clock=FakeClock(),
+        channels=MeasurementChannels(line_pressure=None),
+        enabled_pumps=frozenset({"injection"}),
+    )
+
+    record = measurement.sample_once(active_stage="water", valve_percent=25.0)
+
+    assert not record.snapshot.jacket_pump.connected
+    assert record.snapshot.quality is DataQuality.GOOD
+    assert record.safety_reasons == ()
+
+
 def test_non_persistent_control_sample_is_not_written() -> None:
     measurement_service, _, _, _, writer = service()
 
@@ -146,7 +172,7 @@ def test_explicit_startup_margin_interlock_requests_safe_state() -> None:
 
     assert record.safety_reasons == ("jacket pressure margin is too low",)
     assert writer.records == [record]
-    assert jacket.stop_requested
+    assert not jacket.stop_requested
     assert injection.stop_requested
     assert daq.safe_state_requested
 
@@ -178,7 +204,7 @@ def test_disconnected_selected_line_source_requests_latched_safe_state() -> None
         "line pressure source quality is disconnected" in reason
         for reason in record.safety_reasons
     )
-    assert jacket.stop_requested
+    assert not jacket.stop_requested
     assert injection.stop_requested
     assert daq.safe_state_requested
 
@@ -250,7 +276,7 @@ def test_electrically_impossible_differential_voltage_requests_safe_state() -> N
     assert "electrical limits" in (
         record.snapshot.differential_pressure_quality_reason
     )
-    assert jacket.stop_requested
+    assert not jacket.stop_requested
     assert injection.stop_requested
     assert daq.safe_state_requested
 
@@ -284,7 +310,7 @@ def test_missing_differential_sensor_is_disconnected_and_latched() -> None:
         "differential pressure quality is disconnected" in reason
         for reason in record.safety_reasons
     )
-    assert jacket.stop_requested
+    assert not jacket.stop_requested
     assert injection.stop_requested
     assert daq.safe_state_requested
 
@@ -380,7 +406,7 @@ def test_slow_selected_line_sample_is_stale_and_requests_safe_state() -> None:
     )
 
     assert record.snapshot.line_pressure_quality is DataQuality.STALE
-    assert jacket.stop_requested
+    assert not jacket.stop_requested
     assert injection.stop_requested
     assert slow_daq.safe_state_requested
 
@@ -403,7 +429,7 @@ def test_slow_differential_sample_is_stale_and_requests_safe_state() -> None:
     )
 
     assert record.snapshot.differential_pressure_quality is DataQuality.STALE
-    assert jacket.stop_requested
+    assert not jacket.stop_requested
     assert injection.stop_requested
     assert slow_daq.safe_state_requested
 

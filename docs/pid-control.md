@@ -33,8 +33,9 @@ minőség felügyelete tovább fut.
 ## Átmenetek és biztonság
 
 Kézi–automata átmenet, futás közbeni PID-paraméterezés és nyomásforrás-váltás
-bumpless inicializálást használ. Az integrátor az alkalmazott szelepkimenetből és
-az új P-tagból indul; az első új mintán nincs I- vagy D-frissítés. Mérés közbeni
+bumpless inicializálást használ. Futás közbeni paramétermódosításnál az integrátor
+az alkalmazott szelepkimenetből, valamint az új P- és D-tagból indul. Kézi–automata
+és forrásváltáskor az első új mintán nincs I- vagy normál D-frissítés. Mérés közbeni
 forrásváltás csak az **Alkalmaz** művelet külön megerősítése után történik, és csak
 friss `GOOD` új forrásra engedélyezett.
 
@@ -49,8 +50,9 @@ A Szelepvezérlés panel mutatja az aktív forrás nyers és PID által használ
 adatkorát, minőségét, a PID állapotát, a szelep százalékát és az NI-feszültséget.
 A részletes diagnosztika tartalmazza a sequence-et, measurement dt-t, P/I/D-tagokat,
 a korlátozás előtti, clampelt és alkalmazott kimenetet, valamint a HOLD/BLOCKED
-okot; a tartalom vágólapra másolható. A PID nyers, szűrt és célérték görbéi
-alapértelmezetten rejtettek, külön kapcsolhatók be.
+okot; a tartalom a releváns PID-konfigurációval együtt vágólapra másolható. A PID
+nyers, szűrt és célérték görbéi, a szelepállás, valamint az új minták és
+állapotváltások jelölései alapértelmezetten rejtettek, külön kapcsolhatók be.
 
 ## Migráció és fizikai validáció
 
@@ -62,4 +64,7 @@ validáltnak minősülnek.
 
 A Kp/Ki/Kd, EMA-időállandó, kimeneti korlátok, forrásonkénti szelepirány és a
 vonali kalibráció célgépes/hidraulikus validációt igényel. A `Kd` alapértéke 0.
-A `REVERSE` konfiguráció önmagában nem bizonyít fizikai validációt.
+A `REVERSE` konfiguráció önmagában nem bizonyít fizikai validációt. A szelepirány
+validációja nyomásforrásonként külön tárolódik; az egyik forrás tesztje nem
+validálja a másikat. Hardveres futás közben a vonali forrás validált kalibráció
+nélkül nem aktiválható.

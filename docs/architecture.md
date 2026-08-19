@@ -162,11 +162,12 @@ státusz kötelező; a FLOW és VOLA később, háttérben tölti fel a cache-t.
 mezőnként tárolja az utolsó sikeres monotonic időpontot, kort, minőséget és utolsó
 hibát. A `read_cached_status()` kompatibilitási útvonalának minősége kizárólag a
 nyomás frissességét jelenti, ezért lassú FLOW/VOLA adat nem állítja le a PID-et.
-A teljes `read_telemetry()` állapot `TELEMETRY_PARTIAL`, `READY`, `DEGRADED` vagy
-`DISCONNECTED` lehet. A poller a legkorábbi határidő szerint igazságosan választ
-mezőt; a kezelői és biztonsági parancsok a következő polling tranzakció előtt
-elsőbbséget kapnak. Az alapstátusz-poll a diagnosztikai naplóba írja minden mező
-korát és utolsó sikeres monotonic időpontját.
+A teljes `read_telemetry()` publikus kapcsolati állapota kizárólag `CONNECTED`
+vagy `DISCONNECTED`. A nyomás, FLOW, VOLA és STATUS frissessége és hibája ettől
+független, mezőszintű adatminőség. A poller a legkorábbi határidő szerint
+igazságosan választ mezőt; a kezelői és biztonsági parancsok a következő polling
+tranzakció előtt elsőbbséget kapnak. Az alapstátusz-poll a diagnosztikai naplóba
+írja minden mező korát és utolsó sikeres monotonic időpontját.
 
 A `ValveController` kézi és automata módot támogat. Automata módban a
 besajtolópumpa nyomása vagy a vonali nyomás választható visszacsatolásként. A
@@ -688,9 +689,9 @@ egyszerre, bezárás és kivétel ugyanazt a STOP/SAFE útvonalat használja.
 A mérésindítás állapotai és írási kapuja
 -----------------------------------------------
 
-Az alkalmazási mód (`HARDWARE`/`SIMULATION`), a hardverkapcsolat
-(`CONNECTED`/`PARTIAL`/`DISCONNECTED`) és a mérés állapota egymástól
-független. Az előkészített mérési sorrend: `IDLE → PREPARING →
+Az alkalmazási mód (`HARDWARE`/`SIMULATION`), az eszközönkénti hardverkapcsolat
+(`CONNECTED`/`DISCONNECTED`) és a mérés állapota egymástól független. Az
+előkészített mérési sorrend: `IDLE → PREPARING →
 WAITING_CONFIRMATION → RUNNING`; a manuális pumpaállapotból induló rövid út
 `IDLE → WAITING_CONFIRMATION → RUNNING`. Hiba esetén `STOPPED_BY_FAULT` következik,
 miközben az alkalmazás hardvermódban és a profil megmarad.
@@ -751,3 +752,17 @@ nyomásdiagram marker-sorozatában is megőrzi.
 
 A pumpaworkerek, a korlátos queue-k, az aszinkron diagnosztikai író és a véges
 leállítás tulajdonosi modelljét a `docs/threading.md` részletezi.
+## Eszközkapcsolati modell
+
+Az öt logikai eszköz (köpenypumpa, besajtolópumpa, vonali nyomásbemenet,
+differenciálnyomás-bemenet és szelep analóg kimenet) önálló életciklussal
+rendelkezik. A nyilvános kapcsolati állapot kizárólag `CONNECTED` vagy
+`DISCONNECTED`; a telemetria minősége (`GOOD`, `STALE`, `INVALID` stb.) ettől
+független adat.
+
+A `DeviceConnectionManager` az engedélyezett eszközöket egymástól függetlenül
+kapcsolja és bontja. Letiltott eszközhöz nem indul worker és nem történik
+port- vagy csatornafoglalás. A soros portokat a folyamat-szintű,
+kis- és nagybetűtől független `SerialPortRegistry` foglalja. A fizikai soros
+kapcsolat csak a `connect()` híváskor nyílik meg; sikertelen azonosítás után a
+port csak igazoltan sikeres lezárást követően szabadul fel.

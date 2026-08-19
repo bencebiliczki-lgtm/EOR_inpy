@@ -120,7 +120,7 @@ class BackgroundControlRunner:
         if thread is not None:
             thread.join(timeout_seconds)
             if thread.is_alive():
-                self._control_loop.request_safe_state()
+                self._control_loop.request_fault_state()
                 raise TimeoutError("control thread did not stop before its deadline")
         self._thread = None
 
@@ -191,6 +191,6 @@ class BackgroundControlRunner:
                 if next_control < started:
                     next_control = started + self._interval
         except Exception as error:
-            self._control_loop.request_safe_state()
+            self._control_loop.request_fault_state()
             if self._on_fault is not None:
                 self._on_fault(str(error))

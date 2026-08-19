@@ -116,8 +116,9 @@ worker a következő jövőbeli időpontra ugrik; nem épít fel hátralékot é
 felzárkózó burstöt.
 
 A nyomás és a STATUS biztonságkritikus: hibás vagy STALE értékük reteszelt
-leállítást okozhat. A kizárólag FLOW/VOLA mezőt érintő hiba `DEGRADED`
-kapcsolatot jelez, de önmagában nem állítja le a nyomásszabályozást.
+leállítást okozhat. A kizárólag FLOW/VOLA mezőt érintő hiba mezőszintű
+adatminőségi hibaként látható, de nem hoz létre új kapcsolati állapotot és
+önmagában nem állítja le a nyomásszabályozást.
 
 ### Mit jelent a „lekérdezési idő”?
 

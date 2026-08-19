@@ -60,8 +60,16 @@ class SlowPollablePump:
     def set_constant_flow(self, flow_ml_per_hour: float) -> None:
         self.calls["set_flow"] += 1
 
+    def read_configured_flow_ml_per_hour(self) -> float:
+        self.calls["read_set_flow"] += 1
+        return 12.0
+
     def set_constant_pressure(self, pressure_bar: float) -> None:
         self.calls["set_pressure"] += 1
+
+    def read_configured_pressure_bar(self) -> float:
+        self.calls["read_set_pressure"] += 1
+        return 123.0
 
     def run(self) -> None:
         self.calls["run"] += 1
@@ -174,6 +182,7 @@ def test_default_pressure_stale_window_covers_observed_serial_jitter() -> None:
     assert intervals.slow_telemetry_stale_seconds == pytest.approx(33.0)
     assert intervals.status_stale_seconds == pytest.approx(8.0)
     assert intervals.startup_timeout_seconds == pytest.approx(8.0)
+    assert intervals.shutdown_timeout_seconds == pytest.approx(8.0)
 
 
 def test_control_reads_use_initialized_cache_without_serial_delay() -> None:
@@ -227,7 +236,7 @@ def test_slow_field_failure_does_not_make_pressure_stale_or_stop_worker() -> Non
     assert telemetry.pressure.quality is DataQuality.GOOD
     assert telemetry.flow.quality is DataQuality.STALE
     assert telemetry.flow.last_error == "FLOW timeout"
-    assert telemetry.connection_state is PumpConnectionState.DEGRADED
+    assert telemetry.connection_state is PumpConnectionState.CONNECTED
     assert raw.calls["pressure"] >= 2
     pump.disconnect()
 
@@ -443,6 +452,17 @@ def test_all_control_commands_run_before_next_pressure_refresh() -> None:
     assert second_result.status is PumpCommandStatus.SUCCEEDED, raw.operations
     assert raw.operations.index("CONFIG_FLOW") < raw.operations.index("CONFIG_PRESSURE")
     assert raw.operations.index("CONFIG_PRESSURE") < raw.operations.index("PRESS")
+
+
+def test_configured_pressure_readback_runs_on_the_single_worker() -> None:
+    raw = SlowPollablePump(delay_seconds=0.0)
+    pump = PollingPump(raw, name="test", intervals=slow_intervals())
+    pump.connect()
+
+    assert pump.read_configured_pressure_bar() == pytest.approx(123.0)
+
+    pump.disconnect()
+    assert raw.calls["read_set_pressure"] == 1
 
 
 def test_stop_precedes_overdue_pressure_and_normal_command() -> None:
@@ -1370,6 +1390,7 @@ def test_disconnect_does_not_close_or_reconnect_while_worker_is_blocked() -> Non
         pressure_stale_seconds=0.2,
         slow_telemetry_stale_seconds=0.2,
         startup_timeout_seconds=0.05,
+        shutdown_timeout_seconds=0.05,
     )
     pump = PollingPump(raw, name="test", intervals=intervals)
     pump.connect()
@@ -1390,3 +1411,20 @@ def test_disconnect_does_not_close_or_reconnect_while_worker_is_blocked() -> Non
         pump.connect()
     pump.disconnect()
     assert raw.calls["disconnect"] == 1
+
+
+def test_failed_serial_close_permanently_denies_worker_reconnect() -> None:
+    @dataclass
+    class CloseFailurePump(SlowPollablePump):
+        def disconnect(self) -> None:
+            self.calls["disconnect"] += 1
+            raise OSError("serial remained open")
+
+    raw = CloseFailurePump(delay_seconds=0.0)
+    pump = PollingPump(raw, name="test", intervals=slow_intervals())
+    pump.connect()
+
+    with pytest.raises(OSError, match="serial remained open"):
+        pump.disconnect()
+    with pytest.raises(RuntimeError, match="previous serial close failed"):
+        pump.connect()

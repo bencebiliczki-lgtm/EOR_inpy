@@ -107,7 +107,8 @@ def test_emergency_stop_is_latched_until_acknowledged() -> None:
 
     assert control.status.state is ApplicationState.FAULT
     assert control.status.fault_reason == "manual emergency stop"
-    assert jacket.stop_requested and injection.stop_requested
+    assert not jacket.stop_requested
+    assert injection.stop_requested
     assert daq.safe_state_requested
     with pytest.raises(RuntimeError, match="ready state"):
         control.start()
@@ -131,7 +132,7 @@ class QueuedStopPump(SimulatedPump):
         return f"{self.role}-stop"
 
     def command_result(self, command_id: str) -> PumpCommandResult:
-        assert "jacket:submit" in self.events
+        assert "jacket:submit" not in self.events
         assert "injection:submit" in self.events
         self.events.append(f"{self.role}:result")
         command = PumpCommand(
@@ -160,7 +161,7 @@ class OrderingDaq(SimulatedDataAcquisition):
         super().set_safe_state()
 
 
-def test_emergency_queues_both_stops_before_waiting_for_results() -> None:
+def test_fault_queues_only_injection_stop_before_waiting_for_result() -> None:
     events: list[str] = []
     daq = OrderingDaq(events)
     control = DeviceControlService(
@@ -173,8 +174,8 @@ def test_emergency_queues_both_stops_before_waiting_for_results() -> None:
 
     control.emergency_stop()
 
-    first_result = min(events.index("jacket:result"), events.index("injection:result"))
-    assert events.index("jacket:submit") < first_result
+    first_result = events.index("injection:result")
+    assert "jacket:submit" not in events
     assert events.index("injection:submit") < first_result
     assert events.index("daq:safe") < first_result
     assert daq.safe_state_requested
@@ -208,8 +209,8 @@ def test_safe_state_skips_stop_for_pump_already_stopped_local() -> None:
     events: list[str] = []
     daq = OrderingDaq(events)
     control = DeviceControlService(
-        jacket_pump=StoppedLocalPump("jacket", events),
-        injection_pump=IndependentQueuedPump("injection", events),
+        jacket_pump=IndependentQueuedPump("jacket", events),
+        injection_pump=StoppedLocalPump("injection", events),
         daq=daq,
     )
     control.connect()
@@ -217,9 +218,10 @@ def test_safe_state_skips_stop_for_pump_already_stopped_local() -> None:
 
     control.emergency_stop()
 
-    assert "jacket:cancel" in events
+    assert "jacket:cancel" not in events
     assert "jacket:submit" not in events
-    assert "injection:submit" in events
+    assert "injection:cancel" in events
+    assert "injection:submit" not in events
     assert daq.safe_state_requested
 
 
@@ -243,10 +245,10 @@ def test_safe_state_logs_every_action_and_result(tmp_path: Path) -> None:
         for event in logger.events_after(0)
         if event.event_id == "SAFETY_ACTION"
     ]
-    assert len(actions) == 3
+    assert len(actions) == 2
     assert {dict(event.fields)["action_result"] for event in actions} == {"OK"}
     assert {dict(event.fields)["selected_fault_strategy"] for event in actions} == {
-        "FULL_SAFE_STOP"
+        "INJECTION_STOP_JACKET_HOLD"
     }
 
 
@@ -294,13 +296,14 @@ def test_connection_failure_enters_fault_and_requests_safe_state() -> None:
         control.connect()
 
     assert control.status.state is ApplicationState.FAULT
-    assert jacket.stop_requested and injection.stop_requested
+    assert not jacket.stop_requested
+    assert injection.stop_requested
     assert daq.safe_state_requested
 
 
 def test_safe_state_attempts_every_device_when_first_stop_fails() -> None:
-    jacket = StopFailingPump()
-    injection = SimulatedPump()
+    jacket = SimulatedPump()
+    injection = StopFailingPump()
     daq = SimulatedDataAcquisition()
     control = DeviceControlService(
         jacket_pump=jacket, injection_pump=injection, daq=daq
@@ -311,8 +314,8 @@ def test_safe_state_attempts_every_device_when_first_stop_fails() -> None:
 
     assert control.status.state is ApplicationState.FAULT
     assert control.status.fault_reason is not None
-    assert "jacket pump STOP failed" in control.status.fault_reason
-    assert injection.stop_requested
+    assert "injection pump STOP failed" in control.status.fault_reason
+    assert not jacket.stop_requested
     assert daq.safe_state_requested
 
 

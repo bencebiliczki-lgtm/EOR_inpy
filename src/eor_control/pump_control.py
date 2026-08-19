@@ -58,6 +58,8 @@ class ControllablePump(Protocol):
 
     def read_configured_flow_ml_per_hour(self) -> float: ...
 
+    def read_configured_pressure_bar(self) -> float: ...
+
     def set_constant_pressure(self, pressure_bar: float) -> None: ...
 
     def set_pressure_limit(self, pressure_bar: float) -> None: ...
@@ -1342,6 +1344,68 @@ class PumpControlService:
         )
         return readback
 
+    def apply_jacket_holding_pressure(
+        self,
+        pressure_bar: float,
+        *,
+        maximum_pressure_bar: float,
+        verification_tolerance_bar: float = 1e-6,
+    ) -> float:
+        """Apply and verify the KÖP constant-pressure target safely."""
+        self._require_authorized()
+        self._require_connected(PumpRole.JACKET)
+        if not isfinite(pressure_bar) or pressure_bar <= 0.0:
+            raise ValueError("jacket holding pressure must be positive and finite")
+        if not isfinite(maximum_pressure_bar) or maximum_pressure_bar <= 0.0:
+            raise ValueError("jacket maximum pressure must be positive and finite")
+        if pressure_bar > maximum_pressure_bar:
+            raise ValueError(
+                f"jacket holding pressure {pressure_bar:.3f} bar exceeds maximum pressure "
+                f"{maximum_pressure_bar:.3f} bar"
+            )
+        if self._connected[PumpRole.INJECTION]:
+            injection_pressure = self._supervision_status(
+                PumpRole.INJECTION
+            ).pressure_bar
+            minimum_target = injection_pressure + self._minimum_margin
+            if pressure_bar < minimum_target:
+                raise PermissionError(
+                    f"jacket holding target {pressure_bar:.3f} bar would violate the "
+                    f"required pressure margin; minimum is {minimum_target:.3f} bar"
+                )
+        if not isfinite(verification_tolerance_bar) or verification_tolerance_bar < 0.0:
+            raise ValueError("pressure verification tolerance must be finite and nonnegative")
+        self.stop(PumpRole.JACKET)
+        pump = self._pumps[PumpRole.JACKET]
+        self._execute_remote_write(
+            PumpRole.JACKET,
+            lambda: pump.set_constant_pressure(pressure_bar),
+        )
+        readback = pump.read_configured_pressure_bar()
+        if not isfinite(readback) or abs(readback - pressure_bar) > verification_tolerance_bar:
+            raise RuntimeError(
+                "KÖP pressure verification failed: "
+                f"requested={pressure_bar:.7g} bar, readback={readback:.7g} bar"
+            )
+        self._states[PumpRole.JACKET] = PumpPreparationState(
+            remote=True,
+            configured=True,
+            running=False,
+            mode=PumpOperatingMode.CONSTANT_PRESSURE,
+            target=readback,
+        )
+        self._run_configured(
+            PumpRole.JACKET,
+            self.RUN_JACKET_CONFIRMATION,
+            enforce_injection_margin=False,
+        )
+        self._log(
+            PumpRole.JACKET.value,
+            f"holding pressure applied and verified target={readback:.7g} bar",
+            level="WARNING",
+        )
+        return readback
+
     def stop(self, role: PumpRole) -> None:
         self._require_authorized()
         self._require_connected(role)
@@ -1574,6 +1638,19 @@ class PumpControlService:
                 mode=state.mode,
                 target=state.target,
             )
+
+    def observe_fault_stop(self) -> None:
+        """Record BES STOP while retaining the KÖP holding state on faults."""
+        for role in PumpRole:
+            self._set_pump_remote_supervision(role, False)
+        state = self._states[PumpRole.INJECTION]
+        self._states[PumpRole.INJECTION] = PumpPreparationState(
+            remote=state.remote,
+            configured=state.configured,
+            running=False,
+            mode=state.mode,
+            target=state.target,
+        )
 
     def _require_authorized(self) -> None:
         if not self._authorized:

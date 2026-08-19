@@ -6,7 +6,8 @@ import sys
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
-from dataclasses import asdict, dataclass
+from dataclasses import MISSING, asdict, dataclass
+from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime
 from math import isfinite, log
 from pathlib import Path
@@ -110,6 +111,11 @@ from eor_control.data_management import (
     read_measurement_tables,
     safe_filename,
     test_nas_connection,
+)
+from eor_control.device_connections import (
+    DeviceConnectionManager,
+    DeviceConnector,
+    DeviceId,
 )
 from eor_control.device_testing import (
     DeviceTestReport,
@@ -607,6 +613,35 @@ PROJECT_DEVICE_FIELDS = (
 
 def hardware_device_profile(configuration: HardwareConfiguration) -> dict[str, bool]:
     return {key: bool(getattr(configuration, key)) for key, _label in PROJECT_DEVICE_FIELDS}
+
+
+def hardware_configuration_from_settings(settings: QSettings) -> HardwareConfiguration:
+    """Restore the last device profile without constructing a settings dialog."""
+
+    values: dict[str, object] = {}
+    missing: list[str] = []
+    for item in dataclass_fields(HardwareConfiguration):
+        key = f"hardware/{item.name}"
+        if not settings.contains(key):
+            if item.default is MISSING and item.default_factory is MISSING:
+                missing.append(item.name)
+            continue
+        raw = settings.value(key)
+        if item.type is bool:
+            values[item.name] = (
+                raw
+                if isinstance(raw, bool)
+                else str(raw).strip().casefold() in {"1", "true", "yes", "on"}
+            )
+        elif item.type is int:
+            values[item.name] = int(str(raw))
+        elif item.type is float:
+            values[item.name] = float(str(raw))
+        else:
+            values[item.name] = str(raw)
+    if missing:
+        raise ValueError("hiányos mentett hardverprofil: " + ", ".join(missing))
+    return HardwareConfiguration(**values)  # type: ignore[arg-type]
 
 
 def global_device_profile(
@@ -1361,10 +1396,14 @@ class RuntimeBridge(QObject):
     pump_startup_failed = Signal(str)
     flow_change_completed = Signal(float)
     flow_change_failed = Signal(str)
+    jacket_pressure_change_completed = Signal(float)
+    jacket_pressure_change_failed = Signal(str)
     pressure_limit_apply_completed = Signal(float, float)
     pressure_limit_apply_failed = Signal(str)
     hardware_status_completed = Signal(object)
     hardware_status_failed = Signal(object)
+    hardware_activation_completed = Signal(object)
+    hardware_activation_failed = Signal(object)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1380,6 +1419,8 @@ class HardwareDashboardStatus:
 class DeviceTestBridge(QObject):
     succeeded = Signal(object)
     failed = Signal(str)
+    connection_changed = Signal(object)
+    connection_failed = Signal(object)
 
 
 class EditableSelectionComboBox(QComboBox):
@@ -1422,6 +1463,9 @@ class DeviceSettingsDialog(ResizableDialog):
         functional_test_opener: Callable[[HardwareConfiguration, ConnectionTestResult], None]
         | None = None,
         direct_control_opener: Callable[[HardwareConfiguration], None] | None = None,
+        simulation_mode_opener: Callable[[], None] | None = None,
+        connection_manager: DeviceConnectionManager | None = None,
+        startup_error: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1433,6 +1477,9 @@ class DeviceSettingsDialog(ResizableDialog):
         self._current_mode = current_mode
         self._functional_test_opener = functional_test_opener
         self._direct_control_opener = direct_control_opener
+        self._simulation_mode_opener = simulation_mode_opener
+        self._connection_manager = connection_manager
+        self._startup_error = startup_error
         self._voltage_ranges = {
             HardwareTestDevice.LINE_PRESSURE: line_voltage_range,
             HardwareTestDevice.DIFFERENTIAL_PRESSURE: differential_voltage_range,
@@ -1834,10 +1881,13 @@ class DeviceSettingsDialog(ResizableDialog):
         discovery_row.addWidget(refresh_button)
         discovery_row.addWidget(self._discovery_status)
         layout.addLayout(discovery_row)
-        connection_box = QGroupBox("Eszközönkénti kapcsolatpróba")
+        connection_box = QGroupBox("Eszközönkénti kapcsolat")
         connection_grid = QGridLayout(connection_box)
         self._connection_result_labels: dict[HardwareTestDevice, QLabel] = {}
         self._device_test_buttons: dict[HardwareTestDevice, QPushButton] = {}
+        self._managed_connection_labels: dict[DeviceId, QLabel] = {}
+        self._managed_connect_buttons: dict[DeviceId, QPushButton] = {}
+        self._managed_disconnect_buttons: dict[DeviceId, QPushButton] = {}
         for row, (device, label) in enumerate(
             (
                 (HardwareTestDevice.JACKET_PUMP, "Köpenypumpa"),
@@ -1866,6 +1916,58 @@ class DeviceSettingsDialog(ResizableDialog):
         self._valve_test_status.setWordWrap(True)
         connection_grid.addWidget(QLabel("Szelep NI analóg kimenet"), 4, 0)
         connection_grid.addWidget(self._valve_test_status, 4, 1, 1, 2)
+        if connection_manager is not None:
+            for status in self._connection_result_labels.values():
+                status.hide()
+            for button in self._device_test_buttons.values():
+                button.hide()
+            self._valve_test_status.hide()
+            managed_rows = (
+                (DeviceId.JACKET_PUMP, 0),
+                (DeviceId.INJECTION_PUMP, 1),
+                (DeviceId.LINE_PRESSURE, 2),
+                (DeviceId.DIFFERENTIAL_PRESSURE, 3),
+                (DeviceId.VALVE, 4),
+            )
+            for managed_device, row in managed_rows:
+                status = QLabel()
+                status.setWordWrap(True)
+                connect_button = QPushButton("Kapcsolódás")
+                disconnect_button = QPushButton("Bontás")
+                connect_button.clicked.connect(
+                    lambda _checked=False, selected=managed_device: (
+                        self._start_managed_connection(selected, connect=True)
+                    )
+                )
+                disconnect_button.clicked.connect(
+                    lambda _checked=False, selected=managed_device: (
+                        self._start_managed_connection(selected, connect=False)
+                    )
+                )
+                controls = QWidget()
+                controls_layout = QHBoxLayout(controls)
+                controls_layout.setContentsMargins(0, 0, 0, 0)
+                controls_layout.addWidget(connect_button)
+                controls_layout.addWidget(disconnect_button)
+                connection_grid.addWidget(status, row, 1)
+                connection_grid.addWidget(controls, row, 2)
+                self._managed_connection_labels[managed_device] = status
+                self._managed_connect_buttons[managed_device] = connect_button
+                self._managed_disconnect_buttons[managed_device] = disconnect_button
+            all_controls = QWidget()
+            all_layout = QHBoxLayout(all_controls)
+            all_layout.setContentsMargins(0, 0, 0, 0)
+            connect_all = QPushButton("Összes kapcsolódás")
+            disconnect_all = QPushButton("Összes bontása")
+            connect_all.clicked.connect(
+                lambda: self._start_managed_connection(None, connect=True)
+            )
+            disconnect_all.clicked.connect(
+                lambda: self._start_managed_connection(None, connect=False)
+            )
+            all_layout.addWidget(connect_all)
+            all_layout.addWidget(disconnect_all)
+            connection_grid.addWidget(all_controls, 5, 0, 1, 3)
         connection_grid.setColumnStretch(1, 1)
         layout.addWidget(connection_box)
         # Legacy report fields remain false for snapshot compatibility, but the
@@ -1888,6 +1990,25 @@ class DeviceSettingsDialog(ResizableDialog):
         self._test_button.clicked.connect(self._start_test)
         self._result_label = QLabel("A hardvermód aktiválásához sikeres kapcsolatpróba szükséges.")
         self._result_label.setWordWrap(True)
+        if startup_error:
+            self._result_label.setText(f"AUTOMATIKUS KAPCSOLÓDÁSI HIBA — {startup_error}")
+            self._result_label.setStyleSheet("color:#b00020;font-weight:700")
+            failed_devices = {
+                HardwareTestDevice.JACKET_PUMP: DeviceId.JACKET_PUMP.value,
+                HardwareTestDevice.INJECTION_PUMP: DeviceId.INJECTION_PUMP.value,
+                HardwareTestDevice.LINE_PRESSURE: DeviceId.LINE_PRESSURE.value,
+                HardwareTestDevice.DIFFERENTIAL_PRESSURE: (
+                    DeviceId.DIFFERENTIAL_PRESSURE.value
+                ),
+            }
+            for failed_device, token in failed_devices.items():
+                if token in startup_error:
+                    error_label = self._connection_result_labels[failed_device]
+                    error_label.setText(f"DISCONNECTED — {startup_error}")
+                    error_label.setStyleSheet("color:#b00020;font-weight:700")
+            if DeviceId.VALVE.value in startup_error:
+                self._valve_test_status.setText(f"DISCONNECTED — {startup_error}")
+                self._valve_test_status.setStyleSheet("color:#b00020;font-weight:700")
         self._activate_button = QPushButton("HARDVER aktiválása")
         self._activate_button.setEnabled(False)
         self._activate_button.clicked.connect(self._activate)
@@ -1899,6 +2020,13 @@ class DeviceSettingsDialog(ResizableDialog):
             "hardvermódot és nem enged mérésindítást."
         )
         self._direct_control_button.clicked.connect(self._open_direct_control)
+        self._simulation_mode_button = QPushButton("Szimulációs mód")
+        self._simulation_mode_button.setVisible(simulation_mode_opener is not None)
+        self._simulation_mode_button.setToolTip(
+            "A fizikai kapcsolatokat biztonságosan lezárja, majd szimulációra vált."
+        )
+        if simulation_mode_opener is not None:
+            self._simulation_mode_button.clicked.connect(simulation_mode_opener)
         self._functional_test_button = QPushButton("Vezetett funkcionális eszközteszt…")
         self._functional_test_button.setVisible(False)
         self._functional_test_button.setEnabled(False)
@@ -1913,6 +2041,7 @@ class DeviceSettingsDialog(ResizableDialog):
             self._test_button,
             self._activate_button,
             self._direct_control_button,
+            self._simulation_mode_button,
             self._cancel_button,
         ):
             action_button.setMinimumWidth(0)
@@ -1922,6 +2051,9 @@ class DeviceSettingsDialog(ResizableDialog):
         self._bridge = DeviceTestBridge(self)
         self._bridge.succeeded.connect(self._test_passed)
         self._bridge.failed.connect(self._test_failed)
+        self._bridge.connection_changed.connect(self._managed_connection_changed)
+        self._bridge.connection_failed.connect(self._managed_connection_failed)
+        self._refresh_managed_connection_statuses()
         self._refresh_hardware_choices()
         for selector in (
             self.jacket_enabled,
@@ -2249,6 +2381,7 @@ class DeviceSettingsDialog(ResizableDialog):
         else:
             self._valve_test_status.setText("NINCS HOZZÁADVA — nem része az aktív profilnak")
             self._valve_test_status.setStyleSheet("color:#66788a;font-weight:700")
+        self._refresh_managed_connection_statuses()
 
     def _refresh_hardware_choices(self) -> None:
         try:
@@ -2458,6 +2591,82 @@ class DeviceSettingsDialog(ResizableDialog):
 
         Thread(target=execute, name="eor-device-test", daemon=True).start()
 
+    def _start_managed_connection(
+        self,
+        device: DeviceId | None,
+        *,
+        connect: bool,
+    ) -> None:
+        manager = self._connection_manager
+        if manager is None:
+            return
+
+        def execute() -> None:
+            try:
+                if device is None:
+                    errors = manager.connect_enabled() if connect else manager.disconnect_all()
+                    if errors:
+                        raise RuntimeError("; ".join(errors))
+                elif connect:
+                    manager.connect_device(device)
+                else:
+                    manager.disconnect_device(device)
+            except Exception as error:
+                self._bridge.connection_failed.emit((device, str(error)))
+            else:
+                self._bridge.connection_changed.emit(device)
+
+        action = "connect" if connect else "disconnect"
+        target = "all" if device is None else device.value
+        Thread(
+            target=execute,
+            name=f"eor-{action}-{target}",
+            daemon=True,
+        ).start()
+
+    def _managed_connection_changed(self, _device: object) -> None:
+        self._refresh_managed_connection_statuses()
+
+    def _managed_connection_failed(self, payload: object) -> None:
+        self._refresh_managed_connection_statuses()
+        if isinstance(payload, tuple) and len(payload) == 2:
+            self._result_label.setText(f"KAPCSOLATI HIBA — {payload[1]}")
+            self._result_label.setStyleSheet("color:#b00020;font-weight:700")
+
+    def _refresh_managed_connection_statuses(self) -> None:
+        manager = self._connection_manager
+        if manager is None or not hasattr(self, "_managed_connection_labels"):
+            return
+        selected = {
+            DeviceId.JACKET_PUMP: self.jacket_enabled.isChecked(),
+            DeviceId.INJECTION_PUMP: self.injection_enabled.isChecked(),
+            DeviceId.LINE_PRESSURE: self.line_enabled.isChecked(),
+            DeviceId.DIFFERENTIAL_PRESSURE: self.delta_enabled.isChecked(),
+            DeviceId.VALVE: self.valve_enabled.isChecked(),
+        }
+        for item in manager.statuses():
+            label = self._managed_connection_labels[item.device]
+            connected = item.state.value == "CONNECTED"
+            self._managed_connect_buttons[item.device].setEnabled(
+                item.enabled and selected[item.device] and not connected
+            )
+            self._managed_disconnect_buttons[item.device].setEnabled(
+                item.enabled and selected[item.device] and connected
+            )
+            if not item.enabled:
+                label.setText("LETILTVA")
+                label.setStyleSheet("color:#66788a;font-weight:700")
+                continue
+            detail = f"{item.state.value} — {item.endpoint}"
+            if item.last_error:
+                detail += f" — {item.last_error}"
+            label.setText(detail)
+            label.setStyleSheet(
+                "color:#1b7f3a;font-weight:700"
+                if connected
+                else "color:#b00020;font-weight:700"
+            )
+
     def _start_device_test(self, device: HardwareTestDevice) -> None:
         try:
             configuration = self._read_configuration()
@@ -2548,7 +2757,7 @@ class DeviceSettingsDialog(ResizableDialog):
             return
         result = ConnectionTestResult(
             tuple(self._validate_input_voltage(item) for item in result.devices),
-            result.required_devices,
+            result.enabled_devices,
         )
         configuration = self._active_test_configuration_or_current()
         if configuration is None:
@@ -3155,6 +3364,8 @@ class PumpControlDialog(ResizableDialog):
         enabled_pumps: frozenset[PumpRole] | None = None,
         enabled_pressure_inputs: frozenset[str] | None = None,
         valve_enabled: bool = True,
+        disconnect_on_close: bool = True,
+        connection_changes_enabled: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -3168,6 +3379,8 @@ class PumpControlDialog(ResizableDialog):
             else frozenset({"line_pressure", "differential_pressure"})
         )
         self._valve_enabled = valve_enabled
+        self._disconnect_on_close = disconnect_on_close
+        self._connection_changes_enabled = connection_changes_enabled
         self._command_active = False
         self._telemetry_active = False
         self._closing = False
@@ -3377,8 +3590,14 @@ class PumpControlDialog(ResizableDialog):
         form.addRow("Állapot", status)
         form.addRow("Üzemmód", mode)
         form.addRow("Célérték", target)
-        form.addRow(self._button("CSATLAKOZÁS", lambda: self._connect_pump(role)))
-        form.addRow(self._button("LEVÁLASZTÁS", lambda: self._disconnect_pump(role)))
+        connect_button = self._button("CSATLAKOZÁS", lambda: self._connect_pump(role))
+        disconnect_button = self._button(
+            "LEVÁLASZTÁS", lambda: self._disconnect_pump(role)
+        )
+        connect_button.setEnabled(self._connection_changes_enabled)
+        disconnect_button.setEnabled(self._connection_changes_enabled)
+        form.addRow(connect_button)
+        form.addRow(disconnect_button)
         form.addRow(self._button("BEÁLLÍTÁS", lambda: self._configure(role)))
         form.addRow(self._button("RUN", lambda: self._run(role)))
         form.addRow(self._button("STOP", lambda: self._stop(role)))
@@ -3648,7 +3867,7 @@ class PumpControlDialog(ResizableDialog):
             ]
             if connection_errors:
                 self._safety_status.setText(
-                    "RÉSZLEGES KAPCSOLAT — a sikeres eszközök ettől függetlenül "
+                    "EGYES ESZKÖZÖK NEM ÉRHETŐK EL — az elérhető eszközök ettől függetlenül "
                     "kezelhetők. A manuális biztonsági profil csak a megcélzott "
                     "eszközt ellenőrzi. Hibák: " + "; ".join(connection_errors)
                 )
@@ -3725,7 +3944,11 @@ class PumpControlDialog(ResizableDialog):
     def _start_shutdown(self) -> None:
         if self._shutdown_started:
             return
-        shutdown = getattr(self._service, "shutdown_connections", None)
+        shutdown = (
+            getattr(self._service, "shutdown_connections", None)
+            if self._disconnect_on_close
+            else self._release_borrowed_connections
+        )
         if not callable(shutdown):
             self._finish_close()
             return
@@ -3741,6 +3964,17 @@ class PumpControlDialog(ResizableDialog):
                 self._command_bridge.succeeded.emit((self._CLOSE_OPERATION, errors))
 
         Thread(target=execute, name="eor-manual-close", daemon=True).start()
+
+    def _release_borrowed_connections(self) -> tuple[str, ...]:
+        errors: list[str] = []
+        try:
+            self._control_loop.request_safe_state()
+        except Exception as error:
+            errors.append(f"safe state: {error}")
+        observe_safe_stop = getattr(self._service, "observe_safe_stop", None)
+        if callable(observe_safe_stop):
+            observe_safe_stop()
+        return tuple(errors)
 
     def _finish_close(self) -> None:
         self._command_active = False
@@ -4102,6 +4336,7 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         "slow_telemetry_stale_seconds": "developer/pump_slow_stale_seconds",
         "status_stale_seconds": "developer/pump_status_stale_seconds",
         "startup_timeout_seconds": "developer/pump_startup_timeout_seconds",
+        "shutdown_timeout_seconds": "developer/pump_shutdown_timeout_seconds",
     }
 
     def __init__(
@@ -4165,6 +4400,9 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
         self.startup_timeout = self._seconds_field(1.0, 120.0, 0.5)
         self.startup_timeout.setObjectName("pump_startup_timeout_seconds")
         self.startup_timeout.setValue(defaults.startup_timeout_seconds)
+        self.shutdown_timeout = self._seconds_field(1.0, 120.0, 0.5)
+        self.shutdown_timeout.setObjectName("pump_shutdown_timeout_seconds")
+        self.shutdown_timeout.setValue(defaults.shutdown_timeout_seconds)
         form.addRow(
             input_field_label("Nyomás polling időköze", self.pressure_poll),
             self.pressure_poll,
@@ -4196,6 +4434,10 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
             input_field_label("Kezdő telemetria timeout", self.startup_timeout),
             self.startup_timeout,
         )
+        form.addRow(
+            input_field_label("Worker leállítási timeout", self.shutdown_timeout),
+            self.shutdown_timeout,
+        )
         layout.addLayout(form)
 
         self.validation = QLabel()
@@ -4217,6 +4459,7 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
             self.slow_stale,
             self.status_stale,
             self.startup_timeout,
+            self.shutdown_timeout,
         ):
             field.valueChanged.connect(self._refresh_validation)
         self._refresh_validation()
@@ -4279,6 +4522,7 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
             slow_telemetry_stale_seconds=self.slow_stale.value(),
             status_stale_seconds=self.status_stale.value(),
             startup_timeout_seconds=self.startup_timeout.value(),
+            shutdown_timeout_seconds=self.shutdown_timeout.value(),
         )
 
     @classmethod
@@ -4360,6 +4604,10 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
                     ),
                     minimum_startup_timeout,
                 ),
+                shutdown_timeout_seconds=value(
+                    "shutdown_timeout_seconds",
+                    defaults.shutdown_timeout_seconds,
+                ),
             )
         except ValueError:
             return PumpPollingIntervals(
@@ -4383,6 +4631,7 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
                     defaults.startup_timeout_seconds,
                     minimum_startup_timeout,
                 ),
+                shutdown_timeout_seconds=defaults.shutdown_timeout_seconds,
             )
 
     @staticmethod
@@ -4487,6 +4736,7 @@ class PumpTelemetrySettingsDialog(ResizableDialog):
             "slow_telemetry_stale_seconds": (intervals.slow_telemetry_stale_seconds),
             "status_stale_seconds": intervals.status_stale_seconds,
             "startup_timeout_seconds": intervals.startup_timeout_seconds,
+            "shutdown_timeout_seconds": intervals.shutdown_timeout_seconds,
         }
         for field, value in values.items():
             self._settings.setValue(self.SETTINGS[field], value)
@@ -6590,7 +6840,10 @@ class DashboardWindow(QMainWindow):
         self._pump_preparation_cancel_event: Event | None = None
         self._last_pump_preparation_progress: PumpPreparationProgress | None = None
         self._applied_measurement_flow_ml_per_hour: float | None = None
+        self._applied_jacket_holding_pressure_bar: float | None = None
         self._active_hardware_configuration: HardwareConfiguration | None = None
+        self._startup_connection_error: str | None = None
+        self._hardware_reconnect_active = False
         self._active_pump_telemetry_intervals = next(
             (
                 pump.polling_intervals
@@ -6658,6 +6911,11 @@ class DashboardWindow(QMainWindow):
         self._pid_raw_pressures: deque[float] = deque()
         self._pid_filtered_pressures: deque[float] = deque()
         self._pid_setpoints: deque[float] = deque()
+        self._pid_valve_outputs: deque[float] = deque()
+        self._pid_event_points: list[dict[str, object]] = []
+        self._last_plotted_pid_sample_key: tuple[PressureSource, int] | None = None
+        self._last_plotted_pid_source: PressureSource | None = None
+        self._last_plotted_pid_state: PidState | None = None
         self._alarm_points: list[dict[str, object]] = []
         self._runtime_bridge = RuntimeBridge(self)
         self._runtime_bridge.cycle_completed.connect(self._handle_cycle)
@@ -6671,6 +6929,12 @@ class DashboardWindow(QMainWindow):
         )
         self._runtime_bridge.flow_change_completed.connect(self._measurement_flow_change_completed)
         self._runtime_bridge.flow_change_failed.connect(self._measurement_flow_change_failed)
+        self._runtime_bridge.jacket_pressure_change_completed.connect(
+            self._jacket_pressure_change_completed
+        )
+        self._runtime_bridge.jacket_pressure_change_failed.connect(
+            self._jacket_pressure_change_failed
+        )
         self._runtime_bridge.pressure_limit_apply_completed.connect(
             self._pressure_limit_apply_completed
         )
@@ -6680,6 +6944,12 @@ class DashboardWindow(QMainWindow):
         self._runtime_bridge.pump_startup_failed.connect(self._measurement_pump_startup_failed)
         self._runtime_bridge.hardware_status_completed.connect(self._hardware_status_completed)
         self._runtime_bridge.hardware_status_failed.connect(self._hardware_status_failed)
+        self._runtime_bridge.hardware_activation_completed.connect(
+            self._hardware_activation_completed
+        )
+        self._runtime_bridge.hardware_activation_failed.connect(
+            self._hardware_activation_failed
+        )
         self._runtime = self._make_runtime(control_loop)
         self._build_ui()
         self._hardware_status_timer = QTimer(self)
@@ -6836,6 +7106,7 @@ class DashboardWindow(QMainWindow):
 
         right_layout.addWidget(self._create_measurement_controls_component())
         right_layout.addWidget(self._create_measurement_flow_component())
+        right_layout.addWidget(self._create_jacket_pressure_component())
         right_layout.addWidget(self._create_recording_status_component())
         right_layout.addWidget(self._create_startup_summary_component())
         right_layout.addWidget(self._create_preparation_status_component())
@@ -7161,7 +7432,24 @@ class DashboardWindow(QMainWindow):
         return settings
 
     def _copy_pid_diagnostics(self) -> None:
-        QApplication.clipboard().setText(self._pid_diagnostics_view.toPlainText())
+        configuration = (
+            self._pid_diagnostics_view.toPlainText()
+            + "\nconfiguration_kp="
+            + str(self._kp.value())
+            + "\nconfiguration_ki="
+            + str(self._ki.value())
+            + "\nconfiguration_kd="
+            + str(self._kd.value())
+            + "\nconfiguration_direction="
+            + str(self._direction.currentData())
+            + "\nconfiguration_filter_enabled="
+            + str(self._pid_filter_enabled.isChecked())
+            + "\nconfiguration_filter_time_constant_seconds="
+            + str(self._pid_filter_time_constant.value())
+            + "\nconfiguration_output_limits_percent="
+            + f"{self._output_min.value()}..{self._output_max.value()}"
+        )
+        QApplication.clipboard().setText(configuration)
 
     def _create_project_component(self) -> tuple[QWidget, QWidget]:
         project_box = QGroupBox("Mérési projekt és szakasz")
@@ -7273,6 +7561,36 @@ class DashboardWindow(QMainWindow):
         flow_layout.addRow("Új érték", self._new_measurement_flow)
         flow_layout.addRow(self._apply_measurement_flow_button)
         return flow_box
+
+    def _create_jacket_pressure_component(self) -> QWidget:
+        pressure_box = self._dashboard_box(
+            "jacket_holding_pressure", "KÖP tartási nyomás", "right"
+        )
+        self._jacket_pressure_box = pressure_box
+        layout = QFormLayout(pressure_box)
+        layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        self._current_jacket_pressure = QLabel("— bar")
+        self._current_jacket_pressure.setObjectName("current_jacket_holding_pressure")
+        self._new_jacket_pressure = QDoubleSpinBox()
+        self._new_jacket_pressure.setObjectName("new_jacket_holding_pressure")
+        self._new_jacket_pressure.setRange(0.001, 10_000.0)
+        self._new_jacket_pressure.setDecimals(3)
+        self._new_jacket_pressure.setSuffix(" bar")
+        self._new_jacket_pressure.setMinimumWidth(160)
+        self._new_jacket_pressure.setMaximumWidth(240)
+        self._new_jacket_pressure.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        self._apply_jacket_pressure_button = QPushButton("Alkalmazás")
+        self._apply_jacket_pressure_button.setMaximumWidth(240)
+        self._apply_jacket_pressure_button.clicked.connect(
+            self._apply_running_jacket_pressure
+        )
+        layout.addRow("Aktuális", self._current_jacket_pressure)
+        layout.addRow("Új érték", self._new_jacket_pressure)
+        layout.addRow(self._apply_jacket_pressure_button)
+        return pressure_box
 
     def _create_recording_status_component(self) -> QWidget:
         recording_box = self._dashboard_box("measurement_recording", "Mérési adatrögzítés", "right")
@@ -7391,19 +7709,36 @@ class DashboardWindow(QMainWindow):
         )
         self._pid_raw_curve = self._plot.plot(
             pen=pg.mkPen("#ef6c00", style=Qt.PenStyle.DotLine),
-            name="PID-forrás nyers [bar]",
         )
         self._pid_filtered_curve = self._plot.plot(
-            pen=pg.mkPen("#00838f", width=2), name="PID-bemenet [bar]"
+            pen=pg.mkPen("#00838f", width=2)
         )
         self._pid_setpoint_curve = self._plot.plot(
             pen=pg.mkPen("#455a64", style=Qt.PenStyle.DashLine),
-            name="PID célérték [bar]",
         )
+        self._pid_valve_curve = self._plot.plot(
+            pen=pg.mkPen("#6d4c41", style=Qt.PenStyle.DashDotLine),
+        )
+        self._pid_event_scatter = pg.ScatterPlotItem(
+            size=9,
+            symbol="t",
+            pen=pg.mkPen("#ffffff", width=1),
+        )
+        self._plot.addItem(self._pid_event_scatter)
+        self._pid_diagnostic_legend_entries = (
+            (self._pid_raw_curve, "PID-forrás nyers [bar]"),
+            (self._pid_filtered_curve, "PID-bemenet [bar]"),
+            (self._pid_setpoint_curve, "PID célérték [bar]"),
+            (self._pid_valve_curve, "Szelepállás [%]"),
+            (self._pid_event_scatter, "PID-frissítés / állapotesemény"),
+        )
+        self._pid_diagnostic_legend_visible = False
         for curve in (
             self._pid_raw_curve,
             self._pid_filtered_curve,
             self._pid_setpoint_curve,
+            self._pid_valve_curve,
+            self._pid_event_scatter,
         ):
             curve.hide()
         self._alarm_scatter = pg.ScatterPlotItem(
@@ -7436,6 +7771,7 @@ class DashboardWindow(QMainWindow):
             self._pid_raw_curve,
             self._pid_filtered_curve,
             self._pid_setpoint_curve,
+            self._pid_valve_curve,
             self._flow_curve,
         ):
             curve.setDownsampling(auto=True, method="peak")
@@ -7470,19 +7806,6 @@ class DashboardWindow(QMainWindow):
         )
         live_measurement_layout = QVBoxLayout(live_measurement_page)
         live_measurement_layout.setContentsMargins(0, 0, 0, 0)
-        pid_curve_controls = QWidget()
-        pid_curve_layout = QHBoxLayout(pid_curve_controls)
-        pid_curve_layout.setContentsMargins(0, 0, 0, 0)
-        for label, curve in (
-            ("PID nyers", self._pid_raw_curve),
-            ("PID szűrt", self._pid_filtered_curve),
-            ("PID célérték", self._pid_setpoint_curve),
-        ):
-            toggle = QCheckBox(label)
-            toggle.toggled.connect(curve.setVisible)
-            pid_curve_layout.addWidget(toggle)
-        pid_curve_layout.addStretch(1)
-        live_measurement_layout.addWidget(pid_curve_controls)
         live_measurement_layout.addWidget(
             self._follow_live_plot_button, alignment=Qt.AlignmentFlag.AlignRight
         )
@@ -7498,6 +7821,24 @@ class DashboardWindow(QMainWindow):
         self._measurement_tabs.addTab(self._history_view, "Teljes mérés")
         self._measurement_tabs.currentChanged.connect(self._measurement_tab_changed)
         return self._measurement_tabs
+
+    def _sync_pid_diagnostic_plot_visibility(self) -> None:
+        visible = self._developer_mode
+        for item, _label in self._pid_diagnostic_legend_entries:
+            item.setVisible(visible)
+        legend = self._plot.plotItem.legend
+        if legend is None or visible == self._pid_diagnostic_legend_visible:
+            return
+        if visible:
+            # Keep the alarm entry last, matching the measurement-series order.
+            legend.removeItem("Riasztás")
+            for item, label in self._pid_diagnostic_legend_entries:
+                legend.addItem(item, label)
+            legend.addItem(self._alarm_scatter, "Riasztás")
+        else:
+            for _item, label in self._pid_diagnostic_legend_entries:
+                legend.removeItem(label)
+        self._pid_diagnostic_legend_visible = visible
 
     def _create_status_sidebar_component(self) -> QWidget:
 
@@ -8479,7 +8820,7 @@ class DashboardWindow(QMainWindow):
         details = f"{telemetry.connection_state.value} | nyomás kora: {pressure_age}"
         if slow_issues:
             details += " | lassú adat: " + ", ".join(slow_issues)
-        if telemetry.connection_state.value == "READY":
+        if telemetry.connection_state.value == "CONNECTED":
             return details, True
         if telemetry.connection_state.value == "DISCONNECTED":
             return details, False
@@ -8684,6 +9025,7 @@ class DashboardWindow(QMainWindow):
 
     def _set_developer_mode(self, enabled: bool) -> None:
         self._developer_mode = enabled
+        self._sync_pid_diagnostic_plot_visibility()
         self._simulation_mode_action.setVisible(enabled)
         self._control_cycle_settings_action.setVisible(enabled)
         self._pump_telemetry_settings_action.setVisible(enabled)
@@ -8721,6 +9063,12 @@ class DashboardWindow(QMainWindow):
                 "változtatja meg azonnal a pumpát; csak az Alkalmazás gomb indítja "
                 "el a felügyelt STOP → FLOW → visszaolvasás → RUN műveletet. "
                 "Kizárólag futó hardvermérésnél használható.",
+            ),
+            (
+                self._new_jacket_pressure,
+                "A KÖP pumpa kért tartási nyomása. Az Alkalmazás gomb felügyelt "
+                "STOP → CONST PRESS → SETPRESS visszaolvasás → RUN műveletet indít. "
+                "Az érték nem lehet nagyobb a KÖP MAXPRESS határánál.",
             ),
             (
                 self._mode,
@@ -8841,6 +9189,10 @@ class DashboardWindow(QMainWindow):
             "A megadott BES térfogatáramot felügyelt hardverművelettel alkalmazza. "
             "A művelet sikertelensége biztonsági leállítást vált ki."
         )
+        self._apply_jacket_pressure_button.setToolTip(
+            "A megadott KÖP tartási nyomást felügyelt, visszaellenőrzött "
+            "hardverművelettel alkalmazza. Hiba esetén biztonsági leállítás történik."
+        )
         self._apply_pid_button.setToolTip(
             "Érvényesíti a kézzel módosított PID-paramétereket. Futó mérésnél a "
             "következő vezérlési ciklus már az új beállításokat használja."
@@ -8893,7 +9245,19 @@ class DashboardWindow(QMainWindow):
             and self._preferred_run_mode is RunMode.HARDWARE
             and self._run_mode is RunMode.SIMULATION
         ):
-            self._open_device_settings()
+            try:
+                configuration = hardware_configuration_from_settings(
+                    self._user_settings
+                )
+            except Exception as error:
+                self._startup_connection_error = str(error)
+                self._show_error(
+                    f"A mentett hardverprofil nem tölthető vissza: {error}"
+                )
+                self._open_settings_hub("devices")
+                return
+            self._set_all_connections("MENTETT HARDVER VISSZAÁLLÍTÁSA", ok=None)
+            self._schedule_hardware_reconnect(configuration)
 
     def _restore_theme(self) -> None:
         theme = str(self._user_settings.value("theme", "system"))
@@ -9042,19 +9406,13 @@ class DashboardWindow(QMainWindow):
                 "Az eszközbeállítások futó vagy szüneteltetett mérés közben nem módosíthatók."
             )
         reconnect_state["required"] = self._devices.status.state is ApplicationState.READY
-        if self._devices.status.state is ApplicationState.READY:
-            try:
-                self._devices.disconnect()
-                if self._pump_control is not None:
-                    self._pump_control.observe_disconnected(*tuple(PumpRole))
-            except Exception as error:
-                self._show_error(
-                    "Az eszközbeállítások előtt a meglévő kapcsolat nem "
-                    f"zárható le biztonságosan: {error}"
-                )
-                return QLabel(f"A hardverkapcsolat nem zárható le: {error}")
-        elif self._devices.status.state is not ApplicationState.IDLE:
+        if self._devices.status.state not in (ApplicationState.IDLE, ApplicationState.READY):
             return QLabel("Az eszközbeállítások csak leállított mérésből nyithatók meg.")
+        def switch_to_simulation() -> None:
+            self._activate_simulation()
+            if self._run_mode is RunMode.SIMULATION:
+                hub.accept()
+
         dialog = DeviceSettingsDialog(
             PhysicalHardwareConnectionTester(diagnostics=self._diagnostics),
             settings=self._user_settings,
@@ -9071,6 +9429,9 @@ class DashboardWindow(QMainWindow):
             ),
             functional_test_opener=self._open_functional_device_test,
             direct_control_opener=self._open_direct_device_control,
+            simulation_mode_opener=switch_to_simulation,
+            connection_manager=self._devices.connection_manager,
+            startup_error=self._startup_connection_error,
         )
         self._embedded_settings_dialog(dialog)
 
@@ -9096,46 +9457,42 @@ class DashboardWindow(QMainWindow):
         return dialog
 
     def _reconnect_active_mode(self) -> None:
+        configuration = self._active_hardware_configuration
+        if self._devices.status.mode is RunMode.HARDWARE and configuration is not None:
+            self._schedule_hardware_reconnect(configuration)
+            return
         try:
-            if self._devices.status.mode is RunMode.HARDWARE:
-                answer = QMessageBox.question(
-                    self,
-                    "Fizikai hardver újraaktiválása",
-                    "A hardvermód és az NI fizikai kimenet ismételt "
-                    "engedélyezése után az alkalmazás fizikai eszközöket vezérelhet.\n\n"
-                    "Engedélyezed a hardver újraaktiválását?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if answer != QMessageBox.StandardButton.Yes:
-                    self._set_all_connections(
-                        "LEVÁLASZTVA — ÚJRAAKTIVÁLÁS SZÜKSÉGES",
-                        ok=None,
-                    )
-                    self._refresh_state()
-                    return
-                if self._active_hardware_configuration is None or self._hardware_daq is None:
-                    raise RuntimeError("az aktív NI hardverkonfiguráció hiányzik")
-                _authorize_physical_hardware(
-                    self._devices,
-                    self._hardware_daq,
-                    valve_output_enabled=(self._active_hardware_configuration.valve_output_enabled),
-                    hardware_confirmation=DeviceControlService.HARDWARE_CONFIRMATION,
-                )
-                if self._pump_control is not None:
-                    self._pump_control.authorize(PumpControlService.AUTHORIZATION)
             self._devices.connect()
-            if self._pump_control is not None:
-                observe_connected = getattr(self._pump_control, "observe_connected", None)
-                if callable(observe_connected):
-                    observe_connected(*tuple(PumpRole))
-            self._set_all_connections("KAPCSOLÓDVA", ok=True)
         except Exception as error:
-            self._show_error(
-                "A korábbi hardverkapcsolat nem állítható vissza: "
-                f"{error}. Nyisd meg újra az Eszközbeállításokat."
-            )
+            self._show_error(f"A kapcsolat nem állítható vissza: {error}")
         self._refresh_state()
+
+    def _schedule_hardware_reconnect(
+        self,
+        configuration: HardwareConfiguration,
+        attempt: int = 1,
+    ) -> None:
+        if attempt == 1:
+            if self._hardware_reconnect_active:
+                return
+            self._hardware_reconnect_active = True
+
+        def reconnect() -> None:
+            self._set_all_connections(
+                f"ÚJRACSATLAKOZÁS {attempt}/3", ok=None
+            )
+            try:
+                self._activate_hardware(
+                    configuration,
+                    connect_in_background=True,
+                    reconnect_attempt=attempt,
+                )
+            except Exception as error:
+                self._runtime_bridge.hardware_activation_failed.emit(
+                    (configuration, attempt, str(error))
+                )
+
+        QTimer.singleShot(0, reconnect)
 
     def _open_direct_device_control(self, hardware: HardwareConfiguration) -> None:
         enabled_pumps = frozenset(
@@ -9154,6 +9511,24 @@ class DashboardWindow(QMainWindow):
             )
             if enabled
         )
+        if (
+            hardware == self._active_hardware_configuration
+            and self._devices.status.state is ApplicationState.READY
+            and self._pump_control is not None
+        ):
+            dialog = PumpControlDialog(
+                self._pump_control,
+                self._control_loop,
+                lambda: self._stage.currentText(),
+                enabled_pumps=enabled_pumps,
+                enabled_pressure_inputs=enabled_pressure_inputs,
+                valve_enabled=hardware.valve_output_enabled,
+                disconnect_on_close=False,
+                connection_changes_enabled=False,
+                parent=self,
+            )
+            self._show_modeless_dialog(dialog)
+            return
 
         jacket = (
             PollingPump(
@@ -9241,6 +9616,7 @@ class DashboardWindow(QMainWindow):
             ),
             analog_filter_config=hardware.analog_filter_config(),
             persistence_enabled=False,
+            enabled_pumps=frozenset(role.value for role in enabled_pumps),
         )
         direct_loop = ControlLoop(
             measurement=measurement,
@@ -9276,8 +9652,25 @@ class DashboardWindow(QMainWindow):
         )
 
         def direct_control_finished(_result: int) -> None:
-            direct_service.shutdown_connections()
-            direct_loop.close()
+            # The dialog owns the pump shutdown. Repeating it here could reopen
+            # a failed-close path or race the scheduled dashboard reconnect.
+            cleanup_errors: tuple[str, ...] = ()
+            try:
+                direct_loop.close()
+            except Exception as error:
+                cleanup_errors = (*cleanup_errors, f"control loop: {error}")
+            try:
+                writer.close()
+            except Exception as error:
+                cleanup_errors = (*cleanup_errors, f"writer: {error}")
+            if cleanup_errors:
+                self._diagnostics.emit(
+                    DiagnosticCategory.SYSTEM,
+                    "DIRECT_CONTROL_CLOSE",
+                    "; ".join(cleanup_errors),
+                    level="ERROR",
+                )
+            self._schedule_hardware_reconnect(hardware)
 
         self._show_modeless_dialog(dialog, finished=direct_control_finished)
 
@@ -9445,6 +9838,7 @@ class DashboardWindow(QMainWindow):
     @staticmethod
     def _valve_direction_configuration_hash(
         configuration: HardwareConfiguration,
+        source: PressureSource = PressureSource.INJECTION_PUMP,
     ) -> str:
         """Identify the physical AO mapping whose direction was verified."""
         return configuration_hash(
@@ -9453,6 +9847,7 @@ class DashboardWindow(QMainWindow):
                 "safe_output_voltage": configuration.safe_output_voltage,
                 "valve_zero_percent_voltage": (configuration.valve_zero_percent_voltage),
                 "valve_hundred_percent_voltage": (configuration.valve_hundred_percent_voltage),
+                "pressure_source": source.value,
             }
         )
 
@@ -9461,34 +9856,55 @@ class DashboardWindow(QMainWindow):
         configuration: HardwareConfiguration,
         session: FunctionalDeviceTestSession,
     ) -> None:
+        source = PressureSource(self._source.currentData())
+        validated_key = f"hardware/valve_direction_validated/{source.value}"
+        hash_key = f"hardware/valve_direction_validation_hash/{source.value}"
         valve_attempted = any(
             result.device == FunctionalTestDevice.HANBAY_VALVE.value
             for result in session.report.device_results
         )
         if session.valve_complete:
             self._user_settings.setValue("hardware/valve_direction_validated", True)
+            self._user_settings.setValue(validated_key, True)
             self._user_settings.setValue(
                 "hardware/valve_direction_validation_hash",
-                self._valve_direction_configuration_hash(configuration),
+                self._valve_direction_configuration_hash(configuration, source),
+            )
+            self._user_settings.setValue(
+                hash_key, self._valve_direction_configuration_hash(configuration, source)
             )
         elif valve_attempted:
             self._user_settings.setValue("hardware/valve_direction_validated", False)
+            self._user_settings.setValue(validated_key, False)
             self._user_settings.remove("hardware/valve_direction_validation_hash")
+            self._user_settings.remove(hash_key)
 
-    def _valve_direction_is_validated(self) -> bool:
+    def _valve_direction_is_validated(
+        self, source: PressureSource | None = None
+    ) -> bool:
         configuration = self._active_hardware_configuration
-        if configuration is None or not self._setting_bool(
-            "hardware/valve_direction_validated", False
-        ):
+        selected_source = source or PressureSource(self._source.currentData())
+        validated_key = f"hardware/valve_direction_validated/{selected_source.value}"
+        if configuration is None or not self._setting_bool(validated_key, False):
             return False
-        stored_hash = str(self._user_settings.value("hardware/valve_direction_validation_hash", ""))
-        return stored_hash == self._valve_direction_configuration_hash(configuration)
+        hash_key = f"hardware/valve_direction_validation_hash/{selected_source.value}"
+        stored_hash = str(self._user_settings.value(hash_key, ""))
+        return stored_hash == self._valve_direction_configuration_hash(
+            configuration, selected_source
+        )
 
     def _activate_hardware(
         self,
         configuration: HardwareConfiguration,
         connection_result: ConnectionTestResult | None = None,
+        *,
+        connect_in_background: bool = False,
+        reconnect_attempt: int = 1,
     ) -> None:
+        if self._devices.status.state is not ApplicationState.IDLE:
+            self._devices.disconnect()
+            if self._pump_control is not None:
+                self._pump_control.observe_disconnected(*tuple(PumpRole))
         if self._pump_control is not None:
             cleanup_errors = self._pump_control.shutdown_connections()
             if cleanup_errors:
@@ -9506,6 +9922,7 @@ class DashboardWindow(QMainWindow):
                     configuration.jacket_config(),
                     diagnostics=self._diagnostics,
                     diagnostic_category=DiagnosticCategory.JACKET_PUMP,
+                    connection_owner="jacket pump",
                 ),
                 name="jacket",
                 serial_port=configuration.jacket_port,
@@ -9523,6 +9940,7 @@ class DashboardWindow(QMainWindow):
                         configuration.injection_config(),
                         diagnostics=self._diagnostics,
                         diagnostic_category=DiagnosticCategory.INJECTION_PUMP,
+                        connection_owner="injection pump",
                     ),
                     name="injection",
                     serial_port=configuration.injection_port,
@@ -9575,6 +9993,14 @@ class DashboardWindow(QMainWindow):
                 ),
             ),
             analog_filter_config=configuration.analog_filter_config(),
+            enabled_pumps=frozenset(
+                name
+                for name, enabled in (
+                    ("jacket", configuration.jacket_pump_enabled),
+                    ("injection", configuration.injection_pump_enabled),
+                )
+                if enabled
+            ),
         )
         controller = ValveController(PidController(self._pid_parameters()))
         new_loop = ControlLoop(measurement=measurement, controller=controller, actuator=actuator)
@@ -9584,6 +10010,56 @@ class DashboardWindow(QMainWindow):
             daq=daq,
             mode=RunMode.HARDWARE,
             diagnostics=self._diagnostics,
+            connection_manager=DeviceConnectionManager(
+                {
+                    DeviceId.JACKET_PUMP: DeviceConnector(
+                        jacket.connect,
+                        jacket.disconnect,
+                        configuration.jacket_port,
+                    ),
+                    DeviceId.INJECTION_PUMP: DeviceConnector(
+                        injection.connect,
+                        injection.disconnect,
+                        configuration.injection_port,
+                    ),
+                    DeviceId.LINE_PRESSURE: DeviceConnector(
+                        lambda: daq.read_voltage("line_pressure"),
+                        lambda: None,
+                        configuration.line_pressure_channel,
+                    ),
+                    DeviceId.DIFFERENTIAL_PRESSURE: DeviceConnector(
+                        lambda: daq.read_voltage("differential_pressure"),
+                        lambda: None,
+                        configuration.differential_pressure_channel,
+                    ),
+                    DeviceId.VALVE: DeviceConnector(
+                        daq.set_safe_state,
+                        daq.close,
+                        configuration.valve_output_channel,
+                    ),
+                },
+                enabled_devices=frozenset(
+                    device
+                    for device, enabled in (
+                        (DeviceId.JACKET_PUMP, configuration.jacket_pump_enabled),
+                        (DeviceId.INJECTION_PUMP, configuration.injection_pump_enabled),
+                        (DeviceId.LINE_PRESSURE, configuration.line_pressure_enabled),
+                        (
+                            DeviceId.DIFFERENTIAL_PRESSURE,
+                            configuration.differential_pressure_enabled,
+                        ),
+                        (DeviceId.VALVE, configuration.valve_output_enabled),
+                    )
+                    if enabled
+                ),
+                event_sink=lambda device, event, detail: self._diagnostics.emit(
+                    DiagnosticCategory.SYSTEM,
+                    "DEVICE_CONNECTION",
+                    f"device={device.value}; event={event}"
+                    + (f"; detail={detail}" if detail else ""),
+                    level="ERROR" if event.endswith("FAILED") else "INFO",
+                ),
+            ),
         )
         _authorize_physical_hardware(
             new_devices,
@@ -9609,52 +10085,148 @@ class DashboardWindow(QMainWindow):
             enforce_injection_margin=True,
         )
         pump_control.authorize(PumpControlService.AUTHORIZATION)
-        try:
+        def connect_devices() -> None:
             new_devices.connect()
             _observe_hardware_pump_connections(
                 pump_control,
                 jacket_enabled=configuration.jacket_pump_enabled,
                 injection_enabled=configuration.injection_pump_enabled,
             )
-        except Exception:
+
+        def cleanup_failed_connection() -> None:
             with suppress(Exception):
                 new_devices.disconnect()
             pump_control.shutdown_connections()
-            new_loop.close()
+            with suppress(Exception):
+                new_loop.close()
+            with suppress(Exception):
+                writer.close()
+
+        def finalize_activation() -> None:
+            self._control_loop.close()
+            self._control_loop = new_loop
+            self._measurement_writer = writer
+            self._devices = new_devices
+            self._pump_control = pump_control
+            self._hardware_status_generation += 1
+            self._hardware_status_active = False
+            self._last_hardware_status_record = None
+            self._active_hardware_configuration = configuration
+            self._startup_connection_error = None
+            self._active_pump_telemetry_intervals = pump_telemetry_intervals
+            self._hardware_connection_result = connection_result
+            self._hardware_daq = daq
+            self._hardware_actuator = actuator
+            self._runtime = self._make_runtime(new_loop)
+            self._run_mode = RunMode.HARDWARE
+            self._remember_run_mode(RunMode.HARDWARE)
+            self._set_line_pressure_source_available(configuration.line_pressure_enabled)
+            self._sync_simulation_mode_action()
+            self._simulation_settings_action.setEnabled(False)
+            self._diagnostics.emit(
+                DiagnosticCategory.SYSTEM,
+                "MODE",
+                "hardware mode activated",
+            )
+            self._user_settings.setValue(
+                "hardware/last_test_succeeded",
+                connection_result is not None
+                and connection_result.successful_for(
+                    configuration.enabled_test_devices()
+                ),
+            )
+            self._clear_active_alarm()
+            self._refresh_mode_label()
+            self._set_all_connections("KAPCSOLÓDVA", ok=True)
+            self._refresh_state()
+
+        if connect_in_background:
+            def execute() -> None:
+                self._diagnostics.emit(
+                    DiagnosticCategory.SYSTEM,
+                    "RECONNECT",
+                    f"attempt={reconnect_attempt}; event=STARTED",
+                )
+                try:
+                    connect_devices()
+                except Exception as error:
+                    cleanup_failed_connection()
+                    self._runtime_bridge.hardware_activation_failed.emit(
+                        (configuration, reconnect_attempt, str(error))
+                    )
+                else:
+                    jacket_worker = (
+                        jacket.worker_snapshot()
+                        if isinstance(jacket, PollingPump)
+                        else None
+                    )
+                    injection_worker = (
+                        injection.worker_snapshot()
+                        if isinstance(injection, PollingPump)
+                        else None
+                    )
+                    self._diagnostics.emit(
+                        DiagnosticCategory.SYSTEM,
+                        "RECONNECT",
+                        f"attempt={reconnect_attempt}; event=SUCCEEDED; "
+                        f"jacket_is_open={getattr(jacket, 'serial_is_open', False)}; "
+                        f"jacket_worker={getattr(jacket_worker, 'running', False)}; "
+                        f"injection_is_open={getattr(injection, 'serial_is_open', False)}; "
+                        f"injection_worker={getattr(injection_worker, 'running', False)}",
+                    )
+                    self._runtime_bridge.hardware_activation_completed.emit(
+                        finalize_activation
+                    )
+
+            Thread(
+                target=execute,
+                name="eor-hardware-activation",
+                daemon=True,
+            ).start()
+            return
+        try:
+            connect_devices()
+        except Exception:
+            cleanup_failed_connection()
             raise
-        self._control_loop.close()
-        self._control_loop = new_loop
-        self._measurement_writer = writer
-        self._devices = new_devices
-        self._pump_control = pump_control
-        self._hardware_status_generation += 1
-        self._hardware_status_active = False
-        self._last_hardware_status_record = None
-        self._active_hardware_configuration = configuration
-        self._active_pump_telemetry_intervals = pump_telemetry_intervals
-        self._hardware_connection_result = connection_result
-        self._hardware_daq = daq
-        self._hardware_actuator = actuator
-        self._runtime = self._make_runtime(new_loop)
-        self._run_mode = RunMode.HARDWARE
-        self._remember_run_mode(RunMode.HARDWARE)
-        self._set_line_pressure_source_available(configuration.line_pressure_enabled)
-        self._sync_simulation_mode_action()
-        self._simulation_settings_action.setEnabled(False)
+        finalize_activation()
+
+    def _hardware_activation_completed(self, completion: object) -> None:
+        self._hardware_reconnect_active = False
+        if callable(completion):
+            completion()
+
+    def _hardware_activation_failed(self, payload: object) -> None:
+        if not (
+            isinstance(payload, tuple)
+            and len(payload) == 3
+            and isinstance(payload[0], HardwareConfiguration)
+            and isinstance(payload[1], int)
+            and isinstance(payload[2], str)
+        ):
+            return
+        configuration, attempt, message = payload
+        self._startup_connection_error = message
         self._diagnostics.emit(
             DiagnosticCategory.SYSTEM,
-            "MODE",
-            "hardware mode activated",
+            "RECONNECT",
+            f"attempt={attempt}; failed={message}",
+            level="ERROR",
         )
-        self._user_settings.setValue(
-            "hardware/last_test_succeeded",
-            connection_result is not None
-            and connection_result.successful_for(configuration.enabled_test_devices()),
+        if attempt < 3:
+            QTimer.singleShot(
+                min(5000, attempt * 1000),
+                lambda: self._schedule_hardware_reconnect(
+                    configuration, attempt + 1
+                ),
+            )
+            return
+        self._hardware_reconnect_active = False
+        self._show_error(
+            "A hardver automatikus újracsatlakoztatása három próbálkozás "
+            f"után is sikertelen: {message}"
         )
-        self._clear_active_alarm()
-        self._refresh_mode_label()
-        self._set_all_connections("KAPCSOLÓDVA", ok=True)
-        self._refresh_state()
+        self._open_settings_hub("devices")
 
     def _activate_simulation(
         self,
@@ -10395,6 +10967,16 @@ class DashboardWindow(QMainWindow):
                 "A kiválasztott új PID-forrás nem használható: nincs friss, GOOD mintája."
             )
             return False
+        if (
+            self._run_mode is RunMode.HARDWARE
+            and new_source is PressureSource.LINE_SENSOR
+            and not self._setting_bool("calibration/profile_validated", False)
+        ):
+            self._show_error(
+                "A vonali PID-forrás nem használható: a szenzorkalibráció "
+                "nincs fizikailag validálva."
+            )
+            return False
         old_pressure = (
             None
             if snapshot is None
@@ -10424,6 +11006,11 @@ class DashboardWindow(QMainWindow):
             DiagnosticCategory.RUNTIME,
             "PID_SOURCE_CHANGED",
             f"old={old_source.value}; new={new_source.value}; "
+            f"old_value="
+            f"{('NONE' if old_pressure is None else old_pressure.filtered_value_bar)}; "
+            f"old_age={('NONE' if old_pressure is None else old_pressure.age_seconds)}; "
+            f"old_quality="
+            f"{('NONE' if old_pressure is None else old_pressure.quality.value)}; "
             f"new_value={pressure.filtered_value_bar:.6f}; "
             f"age={pressure.age_seconds:.6f}; quality={pressure.quality.value}",
         )
@@ -10588,9 +11175,46 @@ class DashboardWindow(QMainWindow):
         else:
             self._control_loop.configure_pid(parameters)
             message = "PID-beállítások alkalmazva; a következő mérés ezt használja."
-        self._pid_application_status.setText(message)
-        self._pid_application_status.setStyleSheet("color:#1b7f3a;font-weight:700")
+        warnings = self._pid_validation_warnings()
+        self._pid_application_status.setText(
+            message
+            + ("\nFIGYELEM: " + "; ".join(warnings) if warnings else "")
+        )
+        self._pid_application_status.setStyleSheet(
+            "color:#9a6700;font-weight:700"
+            if warnings
+            else "color:#1b7f3a;font-weight:700"
+        )
         self._apply_pid_button.setEnabled(False)
+
+    def _pid_validation_warnings(self) -> list[str]:
+        warnings: list[str] = []
+        source = PressureSource(self._source.currentData())
+        profile_id = self._pid_profile.currentData()
+        if isinstance(profile_id, int):
+            profile = self._projects.get_pid_profile(profile_id)
+            if not profile.physically_validated:
+                warnings.append("a PID-profil nincs fizikailag validálva")
+            if PressureSource(profile.pressure_source) is not source:
+                warnings.append("a PID-profil másik nyomásforráshoz készült")
+        else:
+            warnings.append("az egyéni PID-beállítás nincs fizikailag validálva")
+        if not self._valve_direction_is_validated(source):
+            warnings.append("a szelep hatásiránya ehhez a forráshoz nincs validálva")
+        if source is PressureSource.LINE_SENSOR and not self._setting_bool(
+            "calibration/profile_validated", False
+        ):
+            warnings.append("a vonali nyomáskalibráció nincs fizikailag validálva")
+        if (
+            self._run_mode is RunMode.HARDWARE
+            and self._output_max.value() - self._output_min.value() > 30.0
+        ):
+            warnings.append("a commissioning kimeneti tartomány 30%-nál szélesebb")
+        if source is PressureSource.LINE_SENSOR and self._pid_filter_enabled.isChecked():
+            warnings.append(
+                "a vonali forrás előszűrt; a PID EMA ennél a forrásnál nem kerül alkalmazásra"
+            )
+        return warnings
 
     def _pid_parameters(self) -> PidParameters:
         return PidParameters(
@@ -10747,7 +11371,6 @@ class DashboardWindow(QMainWindow):
                 "pressure_source": PressureSource(self._source.currentData()).value,
             },
             "recording_interval_seconds": self._recording_interval.value(),
-            "devices": self._global_device_profile(),
         }
 
     def _global_device_profile(self) -> dict[str, bool]:
@@ -10763,7 +11386,7 @@ class DashboardWindow(QMainWindow):
         )
 
     def _save_global_device_profile(self, hardware: HardwareConfiguration) -> None:
-        for key, value in hardware_device_profile(hardware).items():
+        for key, value in hardware.to_settings().items():
             self._user_settings.setValue(f"hardware/{key}", value)
         self._user_settings.sync()
 
@@ -10795,7 +11418,10 @@ class DashboardWindow(QMainWindow):
                 self._handle_runtime_fault(str(error))
 
     def _measurement_start_allowed(self) -> bool:
-        return self._run_mode is RunMode.HARDWARE or self._developer_mode
+        if self._run_mode is not RunMode.HARDWARE:
+            return self._developer_mode
+        manager = self._devices.connection_manager
+        return manager is None or manager.all_enabled_connected
 
     def _start(self) -> None:
         if not self._measurement_start_allowed():
@@ -11027,6 +11653,12 @@ class DashboardWindow(QMainWindow):
         self._pid_raw_pressures.clear()
         self._pid_filtered_pressures.clear()
         self._pid_setpoints.clear()
+        self._pid_valve_outputs.clear()
+        self._pid_event_points.clear()
+        self._last_plotted_pid_sample_key = None
+        self._last_plotted_pid_source = None
+        self._last_plotted_pid_state = None
+        self._pid_event_scatter.setData([])
         self._alarm_points.clear()
         self._alarm_scatter.setData([])
         self._follow_live_plot_button.setChecked(True)
@@ -11210,6 +11842,63 @@ class DashboardWindow(QMainWindow):
         if previous is not None:
             self._current_measurement_flow.setText(f"{previous:.3f} ml/h")
         self._handle_critical_hardware_fault(f"a BES mérési flow módosítása sikertelen: {message}")
+
+    def _apply_running_jacket_pressure(self) -> None:
+        if (
+            self._run_mode is not RunMode.HARDWARE
+            or self._devices.status.measurement is not MeasurementState.RUNNING
+            or self._pump_control is None
+        ):
+            self._show_error(
+                "A KÖP tartási nyomás csak futó hardvermérés közben módosítható."
+            )
+            return
+        requested = self._new_jacket_pressure.value()
+        maximum = self._max_jacket.value()
+        self._apply_jacket_pressure_button.setEnabled(False)
+        pump_control = self._pump_control
+
+        def execute() -> None:
+            try:
+                applied = pump_control.apply_jacket_holding_pressure(
+                    requested,
+                    maximum_pressure_bar=maximum,
+                )
+            except Exception as error:
+                self._runtime_bridge.jacket_pressure_change_failed.emit(str(error))
+            else:
+                self._runtime_bridge.jacket_pressure_change_completed.emit(applied)
+
+        Thread(target=execute, name="eor-jacket-pressure-change", daemon=True).start()
+
+    def _jacket_pressure_change_completed(self, applied: float) -> None:
+        previous = self._applied_jacket_holding_pressure_bar
+        self._applied_jacket_holding_pressure_bar = applied
+        self._current_jacket_pressure.setText(f"{applied:.3f} bar")
+        self._new_jacket_pressure.setValue(applied)
+        self._apply_jacket_pressure_button.setEnabled(True)
+        self._diagnostics.emit_event(
+            DiagnosticCategory.JACKET_PUMP,
+            "JACKET_HOLDING_PRESSURE_CHANGED",
+            fields={
+                "previous_pressure_bar": previous,
+                "target_pressure_bar": applied,
+                "measurement_state": self._devices.status.measurement.value,
+                "action": "operator jacket holding pressure change",
+                "action_result": "SUCCESS",
+            },
+            direction="OPERATOR",
+            level="INFO",
+        )
+
+    def _jacket_pressure_change_failed(self, message: str) -> None:
+        self._apply_jacket_pressure_button.setEnabled(True)
+        previous = self._applied_jacket_holding_pressure_bar
+        if previous is not None:
+            self._current_jacket_pressure.setText(f"{previous:.3f} bar")
+        self._handle_critical_hardware_fault(
+            f"a KÖP tartási nyomás módosítása sikertelen: {message}"
+        )
 
     def _measurement_pump_startup_failed(self, message: str) -> None:
         self._finish_pump_preparation_display()
@@ -11406,9 +12095,12 @@ class DashboardWindow(QMainWindow):
             if snapshot.line_pressure_bar is None
             else f"{snapshot.line_pressure_bar:.3f} bar"
         )
+        hardware = self._active_hardware_configuration
+        jacket_required = hardware is None or hardware.jacket_pump_enabled
+        injection_required = hardware is None or hardware.injection_pump_enabled
         sensors_ok = (
-            snapshot.jacket_pump.connected
-            and snapshot.injection_pump.connected
+            (not jacket_required or snapshot.jacket_pump.connected)
+            and (not injection_required or snapshot.injection_pump.connected)
             and snapshot.quality.value == "good"
         )
         add(
@@ -11619,6 +12311,12 @@ class DashboardWindow(QMainWindow):
         self._pid_raw_pressures.clear()
         self._pid_filtered_pressures.clear()
         self._pid_setpoints.clear()
+        self._pid_valve_outputs.clear()
+        self._pid_event_points.clear()
+        self._last_plotted_pid_sample_key = None
+        self._last_plotted_pid_source = None
+        self._last_plotted_pid_state = None
+        self._pid_event_scatter.setData([])
         self._alarm_points.clear()
         self._alarm_scatter.setData([])
         for curve in (
@@ -11629,6 +12327,7 @@ class DashboardWindow(QMainWindow):
             self._pid_raw_curve,
             self._pid_filtered_curve,
             self._pid_setpoint_curve,
+            self._pid_valve_curve,
             self._flow_curve,
         ):
             curve.setData([], [])
@@ -11688,13 +12387,8 @@ class DashboardWindow(QMainWindow):
         )
         pid_state = result.command.pid_state
         self._pid_state_label.setText(pid_state.value)
-        state_color = (
-            "#1b7f3a"
-            if pid_state is PidState.ACTIVE
-            else "#b00020"
-            if pid_state in {PidState.BLOCKED, PidState.SAFE, PidState.FAULT}
-            else "#9a6700"
-            if pressure is not None
+        age_warning = (
+            pressure is not None
             and pressure.age_seconds
             > 0.8
             * (
@@ -11702,6 +12396,15 @@ class DashboardWindow(QMainWindow):
                 if pressure.source is PressureSource.INJECTION_PUMP
                 else self._line_pid_max_age.value()
             )
+        )
+        validation_warning = bool(self._pid_validation_warnings())
+        state_color = (
+            "#b00020"
+            if pid_state in {PidState.BLOCKED, PidState.SAFE, PidState.FAULT}
+            else "#9a6700"
+            if age_warning or validation_warning
+            else "#1b7f3a"
+            if pid_state is PidState.ACTIVE
             else "#52677a"
         )
         self._pid_state_label.setStyleSheet(f"color:{state_color};font-weight:700")
@@ -11715,6 +12418,17 @@ class DashboardWindow(QMainWindow):
         )
         self._pid_timing_label.setText(
             f"Felügyeleti ciklus: {self._runtime.control_interval_seconds:.3f} s | "
+            "Forrás mintavételi/polling ideje: "
+            + (
+                f"{self._active_pump_telemetry_intervals.pressure_seconds:.3f} s"
+                if pressure is not None
+                and pressure.source is PressureSource.INJECTION_PUMP
+                and self._active_pump_telemetry_intervals is not None
+                else f"{self._runtime.control_interval_seconds:.3f} s"
+                if pressure is not None
+                else "—"
+            )
+            + " | "
             "PID frissítése: új forrásmintánként"
         )
         if diagnostics is not None:
@@ -11725,6 +12439,12 @@ class DashboardWindow(QMainWindow):
                     (
                         "pump_pressure_poll_seconds="
                         + ("NONE" if intervals is None else str(intervals.pressure_seconds)),
+                        "pump_status_quality="
+                        + (
+                            "NONE"
+                            if snapshot.injection_pressure_reading is None
+                            else snapshot.injection_pressure_reading.status_quality.value
+                        ),
                         f"source_last_error={pressure.last_error}",
                     )
                 )
@@ -11748,6 +12468,14 @@ class DashboardWindow(QMainWindow):
                         + ("NONE" if reading is None else str(reading.filtered_voltage)),
                         "raw_line_pressure_bar="
                         + ("NONE" if reading is None else str(reading.raw_pressure_bar)),
+                        "ni_measured_at_utc="
+                        + (
+                            "NONE"
+                            if reading is None
+                            else reading.measured_at.isoformat()
+                        ),
+                        "ni_sample_count="
+                        + ("NONE" if reading is None else str(reading.sample_count)),
                         "source_quality_reason="
                         + ("NONE" if reading is None else reading.quality_reason),
                     )
@@ -11758,11 +12486,14 @@ class DashboardWindow(QMainWindow):
                         f"source={('NONE' if pressure is None else pressure.source.value)}",
                         "raw_pressure_bar="
                         f"{('NONE' if pressure is None else pressure.raw_value_bar)}",
+                        "prefiltered_pressure_bar="
+                        f"{('NONE' if pressure is None else pressure.filtered_value_bar)}",
                         f"pid_pressure_bar={diagnostics.filtered_measurement_bar}",
                         "timestamp_monotonic="
                         f"{('NONE' if pressure is None else pressure.timestamp_monotonic)}",
                         f"age_seconds={('NONE' if pressure is None else pressure.age_seconds)}",
                         f"sequence={('NONE' if pressure is None else pressure.sequence)}",
+                        f"quality={('NONE' if pressure is None else pressure.quality.value)}",
                         f"measurement_dt_seconds={diagnostics.measurement_dt_seconds}",
                         f"setpoint_bar={self._setpoint.value()}",
                         f"error_bar={diagnostics.error_bar}",
@@ -11772,7 +12503,10 @@ class DashboardWindow(QMainWindow):
                         f"unconstrained_output_percent={diagnostics.unconstrained_output_percent}",
                         f"constrained_output_percent={diagnostics.constrained_output_percent}",
                         f"applied_output_percent={diagnostics.applied_output_percent}",
+                        f"actual_output_percent={result.applied_output_percent}",
                         f"output_voltage={result.valve_voltage}",
+                        f"deadband_active={pid_state is PidState.DEADBAND}",
+                        f"reversal_count={diagnostics.reversal_count}",
                         f"pid_state={pid_state.value}",
                         f"state_reason={result.command.reason or diagnostics.reason}",
                         *source_details,
@@ -11885,6 +12619,11 @@ class DashboardWindow(QMainWindow):
             else result.command.pid_measurement_bar
         )
         self._pid_setpoints.append(self._setpoint.value())
+        self._pid_valve_outputs.append(
+            float("nan")
+            if result.applied_output_percent is None
+            else result.applied_output_percent
+        )
         elapsed_times = [value - self._measurement_time_origin for value in self._times]
         self._jacket_curve.setData(elapsed_times, list(self._jacket_pressures))
         self._injection_curve.setData(elapsed_times, list(self._injection_pressures))
@@ -11895,6 +12634,44 @@ class DashboardWindow(QMainWindow):
             elapsed_times, list(self._pid_filtered_pressures)
         )
         self._pid_setpoint_curve.setData(elapsed_times, list(self._pid_setpoints))
+        self._pid_valve_curve.setData(elapsed_times, list(self._pid_valve_outputs))
+        if pid_pressure is not None:
+            sample_key = (pid_pressure.source, pid_pressure.sequence)
+            new_sample = sample_key != self._last_plotted_pid_sample_key
+            source_changed = pid_pressure.source is not self._last_plotted_pid_source
+            state_changed = pid_state is not self._last_plotted_pid_state
+            if new_sample or source_changed or state_changed:
+                event_value = (
+                    pid_pressure.filtered_value_bar
+                    if result.command.pid_measurement_bar is None
+                    else result.command.pid_measurement_bar
+                )
+                event_color = (
+                    "#b00020"
+                    if pid_state in {PidState.BLOCKED, PidState.SAFE, PidState.FAULT}
+                    else "#52677a"
+                    if pid_state is PidState.HOLD
+                    else "#1b7f3a"
+                )
+                self._pid_event_points.append(
+                    {
+                        "pos": (elapsed_times[-1], event_value),
+                        "brush": pg.mkBrush(event_color),
+                        "data": (
+                            f"{pid_state.value}; source={pid_pressure.source.value}; "
+                            f"sequence={pid_pressure.sequence}; "
+                            "reason="
+                            + (
+                                result.command.reason
+                                or ("" if diagnostics is None else diagnostics.reason)
+                            )
+                        ),
+                    }
+                )
+                self._pid_event_scatter.setData(self._pid_event_points)
+            self._last_plotted_pid_sample_key = sample_key
+            self._last_plotted_pid_source = pid_pressure.source
+            self._last_plotted_pid_state = pid_state
         self._flow_curve.setData(elapsed_times, list(self._injection_flows))
         latest = elapsed_times[-1]
         if self._follow_live_plot_button.isChecked():
@@ -11946,8 +12723,8 @@ class DashboardWindow(QMainWindow):
                     "previous_quality": DataQuality.GOOD.value,
                     "new_quality": snapshot.quality.value,
                     "safety_rule": safety_rule,
-                    "selected_fault_strategy": "FULL_SAFE_STOP",
-                    "action": "request_full_safe_state",
+                    "selected_fault_strategy": "INJECTION_STOP_JACKET_HOLD",
+                    "action": "stop_injection_set_valve_safe_keep_jacket_holding",
                     "action_result": "REQUESTED",
                     "reason": reason,
                     "jacket_pressure_bar": snapshot.jacket_pump.pressure_bar,
@@ -12257,8 +13034,8 @@ class DashboardWindow(QMainWindow):
                 except Exception as error:
                     errors.append(f"biztonsági leállítás: {error}")
             if self._pump_control is not None:
-                self._pump_control.observe_safe_stop()
-            self._set_all_connections("VÉSZLEÁLLÍTÁS — RETESZELVE", ok=False)
+                self._pump_control.observe_fault_stop()
+            self._set_all_connections("HIBA — BES STOP, KÖP NYOMÁSTARTÁS", ok=False)
             details = "" if not errors else "\n- " + "\n- ".join(errors)
             self._show_error(
                 "A mérés biztonságosan leállt. A HARDWARE mód, a "
@@ -12386,6 +13163,7 @@ class DashboardWindow(QMainWindow):
         return f"{output_percent:.1f} % | {effective_voltage:.3f} V"
 
     def _refresh_state(self) -> None:
+        self._sync_pid_diagnostic_plot_visibility()
         device_status = self._devices.status
         state = device_status.state
         self._state_label.setText(
@@ -12502,6 +13280,26 @@ class DashboardWindow(QMainWindow):
             and self._devices.status.measurement is MeasurementState.RUNNING
             and not self._preflight_active
         )
+        self._apply_jacket_pressure_button.setEnabled(
+            self._run_mode is RunMode.HARDWARE
+            and self._devices.status.measurement is MeasurementState.RUNNING
+            and not self._preflight_active
+        )
+        self._new_jacket_pressure.setMaximum(max(0.001, self._max_jacket.value()))
+        jacket_state = (
+            self._pump_control.state(PumpRole.JACKET)
+            if self._pump_control is not None
+            else None
+        )
+        if (
+            jacket_state is not None
+            and jacket_state.mode is PumpOperatingMode.CONSTANT_PRESSURE
+            and jacket_state.target is not None
+        ):
+            self._applied_jacket_holding_pressure_bar = jacket_state.target
+            self._current_jacket_pressure.setText(f"{jacket_state.target:.3f} bar")
+            if not self._new_jacket_pressure.hasFocus():
+                self._new_jacket_pressure.setValue(jacket_state.target)
         self._refresh_measurement_field_editability(state)
         self._configuration_summary_label.setText(self._configuration_summary_text())
         self._refresh_valve_status()
@@ -12526,6 +13324,9 @@ class DashboardWindow(QMainWindow):
             and not self._preflight_active
         )
         self._new_measurement_flow.setEnabled(not measurement_active or flow_change_available)
+        self._new_jacket_pressure.setEnabled(
+            not measurement_active or flow_change_available
+        )
 
     def _configuration_summary_text(self) -> str:
         hardware = self._active_hardware_configuration
@@ -12683,30 +13484,46 @@ class DashboardWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._shutdown_started = True
-        self._save_user_settings()
+        application_managed_connection = self._devices.status.state is not ApplicationState.IDLE
+        errors: list[str] = []
+
+        def attempt(label: str, operation: Callable[[], object]) -> None:
+            try:
+                operation()
+            except Exception as error:
+                errors.append(f"{label}: {error}")
+
+        attempt("settings", self._save_user_settings)
         self._hardware_status_timer.stop()
         self._hardware_status_generation += 1
-        application_managed_connection = self._devices.status.state is not ApplicationState.IDLE
         if self._runtime.running:
-            self._runtime.stop()
+            attempt("runtime", self._runtime.stop)
         if self._devices.status.state in (
             ApplicationState.READY,
             ApplicationState.RUNNING,
         ):
-            self._devices.stop()
-        self._measurement_writer.complete_current_phase()
+            attempt("safe state", self._devices.stop)
+        attempt("measurement writer", self._measurement_writer.complete_current_phase)
         if self._devices.status.state is not ApplicationState.IDLE:
-            self._devices.disconnect()
+            attempt("device disconnect", self._devices.disconnect)
         if self._pump_control is not None:
             if application_managed_connection:
                 self._pump_control.observe_disconnected(*tuple(PumpRole))
                 self._pump_control.revoke()
             else:
-                self._pump_control.shutdown_connections()
-        self._control_loop.close()
-        self._nas_sync.close()
-        self._projects.close()
-        self._diagnostics.close()
+                shutdown_errors = self._pump_control.shutdown_connections()
+                errors.extend(f"pump shutdown: {error}" for error in shutdown_errors)
+        attempt("control loop", self._control_loop.close)
+        attempt("NAS sync", self._nas_sync.close)
+        attempt("project database", self._projects.close)
+        if errors:
+            self._diagnostics.emit(
+                DiagnosticCategory.SYSTEM,
+                "SHUTDOWN",
+                "; ".join(errors),
+                level="ERROR",
+            )
+        attempt("diagnostics", self._diagnostics.close)
         self._tray_icon.hide()
         event.accept()
 

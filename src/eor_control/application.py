@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from time import monotonic, sleep
 
+from eor_control.device_connections import DeviceConnectionManager, DeviceId
 from eor_control.devices import DataAcquisition, Pump
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
 from eor_control.pump_commands import PumpCommandResult, PumpCommandStatus
@@ -21,7 +22,6 @@ class ApplicationState(StrEnum):
 
 class HardwareConnectionState(StrEnum):
     CONNECTED = "connected"
-    PARTIAL = "partial"
     DISCONNECTED = "disconnected"
 
 
@@ -57,12 +57,14 @@ class DeviceControlService:
         daq: DataAcquisition,
         mode: RunMode = RunMode.SIMULATION,
         diagnostics: DiagnosticLogger | None = None,
+        connection_manager: DeviceConnectionManager | None = None,
     ) -> None:
         self._jacket_pump = jacket_pump
         self._injection_pump = injection_pump
         self._daq = daq
         self._mode = mode
         self._diagnostics = diagnostics
+        self._connection_manager = connection_manager
         self._state = ApplicationState.IDLE
         self._fault_reason: str | None = None
         self._hardware_authorized = False
@@ -92,6 +94,10 @@ class DeviceControlService:
     def data_acquisition(self) -> DataAcquisition:
         return self._daq
 
+    @property
+    def connection_manager(self) -> DeviceConnectionManager | None:
+        return self._connection_manager
+
     def authorize_hardware(self, confirmation: str) -> None:
         if self._mode is not RunMode.HARDWARE:
             raise RuntimeError("hardware authorization is only valid in hardware mode")
@@ -104,6 +110,15 @@ class DeviceControlService:
             raise RuntimeError("devices can only be connected from idle state")
         self._require_hardware_authorization()
         self._require_physical_output_authorization()
+        if self._connection_manager is not None:
+            errors = self._connection_manager.connect_enabled()
+            if errors or not self._connection_manager.all_enabled_connected:
+                detail = "; ".join(errors) or "not all enabled devices connected"
+                self._enter_fault(f"device connection failed: {detail}")
+                raise ConnectionError(detail)
+            self._state = ApplicationState.READY
+            self._connection = HardwareConnectionState.CONNECTED
+            return
         try:
             self._jacket_pump.connect()
             self._injection_pump.connect()
@@ -118,7 +133,7 @@ class DeviceControlService:
             raise RuntimeError("measurement can only start from ready state")
         self._require_hardware_authorization()
         self._require_physical_output_authorization()
-        for pump in (self._jacket_pump, self._injection_pump):
+        for _label, pump, _category in self._enabled_pump_entries():
             acknowledge = getattr(pump, "acknowledge_stop_latch", None)
             if callable(acknowledge):
                 acknowledge()
@@ -158,7 +173,7 @@ class DeviceControlService:
         self._fault_reason = None
         self._state = ApplicationState.READY
         self._measurement = MeasurementState.IDLE
-        for pump in (self._jacket_pump, self._injection_pump):
+        for _label, pump, _category in self._enabled_pump_entries():
             acknowledge = getattr(pump, "acknowledge_stop_latch", None)
             if callable(acknowledge):
                 acknowledge()
@@ -167,16 +182,27 @@ class DeviceControlService:
         errors: list[str] = []
         if self._state is ApplicationState.RUNNING:
             errors.extend(self._request_safe_state("DISCONNECT_WHILE_RUNNING"))
-        for label, pump in (
-            ("jacket pump", self._jacket_pump),
-            ("injection pump", self._injection_pump),
-        ):
-            try:
-                pump.disconnect()
-            except Exception as error:
-                errors.append(f"{label} disconnect failed: {error}")
+        if self._connection_manager is not None:
+            errors.extend(self._connection_manager.disconnect_all())
+        else:
+            for label, pump in (
+                ("jacket pump", self._jacket_pump),
+                ("injection pump", self._injection_pump),
+            ):
+                try:
+                    pump.disconnect()
+                except Exception as error:
+                    errors.append(f"{label} disconnect failed: {error}")
         self._hardware_authorized = False
-        self._connection = HardwareConnectionState.DISCONNECTED
+        self._connection = (
+            HardwareConnectionState.CONNECTED
+            if self._connection_manager is not None
+            and any(
+                item.enabled and item.state.value == "CONNECTED"
+                for item in self._connection_manager.statuses()
+            )
+            else HardwareConnectionState.DISCONNECTED
+        )
         self._measurement = MeasurementState.IDLE
         if errors:
             self._fault_reason = "; ".join(errors)
@@ -204,32 +230,33 @@ class DeviceControlService:
             )
 
     def _enter_fault(self, reason: str) -> None:
-        errors = self._request_safe_state(reason)
+        errors = self._request_safe_state(reason, stop_jacket=False)
         details = "; ".join(errors)
         self._fault_reason = f"{reason}; safe-state errors: {details}" if errors else reason
         self._state = ApplicationState.FAULT
         self._measurement = MeasurementState.STOPPED_BY_FAULT
 
-    def _request_safe_state(self, safety_rule: str) -> tuple[str, ...]:
+    def _request_safe_state(
+        self, safety_rule: str, *, stop_jacket: bool = True
+    ) -> tuple[str, ...]:
+        pump_entries = tuple(
+            entry
+            for entry in self._enabled_pump_entries()
+            if stop_jacket or entry[2] is not DiagnosticCategory.JACKET_PUMP
+        )
         asynchronous = all(
             callable(getattr(pump, "submit_stop", None))
             and callable(getattr(pump, "command_result", None))
-            for pump in (self._jacket_pump, self._injection_pump)
+            for _label, pump, _category in pump_entries
         )
         if asynchronous:
-            return self._request_queued_safe_state(safety_rule)
+            return self._request_queued_safe_state(
+                safety_rule, pump_entries=pump_entries, stop_jacket=stop_jacket
+            )
         errors: list[str] = []
-        pump_operations = (
-            (
-                "jacket pump STOP",
-                self._jacket_pump.request_stop,
-                DiagnosticCategory.JACKET_PUMP,
-            ),
-            (
-                "injection pump STOP",
-                self._injection_pump.request_stop,
-                DiagnosticCategory.INJECTION_PUMP,
-            ),
+        pump_operations = tuple(
+            (label, pump.request_stop, category)
+            for label, pump, category in pump_entries
         )
         for label, operation, category in pump_operations:
             pump = (
@@ -244,6 +271,7 @@ class DeviceControlService:
                     "SKIPPED_ALREADY_STOPPED_LOCAL",
                     "WARNING",
                     safety_rule,
+                    stop_jacket=stop_jacket,
                 )
                 continue
             try:
@@ -256,6 +284,7 @@ class DeviceControlService:
                     f"FAILED: {error}",
                     "ERROR",
                     safety_rule,
+                    stop_jacket=stop_jacket,
                 )
             else:
                 self._log_safe_state(
@@ -264,6 +293,7 @@ class DeviceControlService:
                     "OK",
                     "WARNING",
                     safety_rule,
+                    stop_jacket=stop_jacket,
                 )
         try:
             self._daq.set_safe_state()
@@ -275,6 +305,7 @@ class DeviceControlService:
                 f"FAILED: {error}",
                 "ERROR",
                 safety_rule,
+                stop_jacket=stop_jacket,
             )
         else:
             self._log_safe_state(
@@ -283,24 +314,20 @@ class DeviceControlService:
                 "OK",
                 "WARNING",
                 safety_rule,
+                stop_jacket=stop_jacket,
             )
         return tuple(errors)
 
-    def _request_queued_safe_state(self, safety_rule: str) -> tuple[str, ...]:
+    def _request_queued_safe_state(
+        self,
+        safety_rule: str,
+        *,
+        pump_entries: tuple[tuple[str, Pump, DiagnosticCategory], ...],
+        stop_jacket: bool,
+    ) -> tuple[str, ...]:
         errors: list[str] = []
         pending: list[tuple[str, object, str, DiagnosticCategory]] = []
-        for label, pump, category in (
-            (
-                "jacket pump STOP",
-                self._jacket_pump,
-                DiagnosticCategory.JACKET_PUMP,
-            ),
-            (
-                "injection pump STOP",
-                self._injection_pump,
-                DiagnosticCategory.INJECTION_PUMP,
-            ),
-        ):
+        for label, pump, category in pump_entries:
             try:
                 cancel = getattr(pump, "cancel_pending_commands", None)
                 if callable(cancel):
@@ -312,6 +339,7 @@ class DeviceControlService:
                         "SKIPPED_ALREADY_STOPPED_LOCAL",
                         "WARNING",
                         safety_rule,
+                        stop_jacket=stop_jacket,
                     )
                     continue
                 submit_stop = getattr(pump, "submit_stop", None)
@@ -327,6 +355,7 @@ class DeviceControlService:
                     f"FAILED: {error}",
                     "ERROR",
                     safety_rule,
+                    stop_jacket=stop_jacket,
                 )
 
         try:
@@ -339,6 +368,7 @@ class DeviceControlService:
                 f"FAILED: {error}",
                 "ERROR",
                 safety_rule,
+                stop_jacket=stop_jacket,
             )
         else:
             self._log_safe_state(
@@ -347,6 +377,7 @@ class DeviceControlService:
                 "OK",
                 "WARNING",
                 safety_rule,
+                stop_jacket=stop_jacket,
             )
 
         for label, queued_pump, command_id, category in pending:
@@ -374,6 +405,7 @@ class DeviceControlService:
                     f"FAILED: {detail}",
                     "ERROR",
                     safety_rule,
+                    stop_jacket=stop_jacket,
                 )
             else:
                 self._log_safe_state(
@@ -382,8 +414,34 @@ class DeviceControlService:
                     "OK",
                     "WARNING",
                     safety_rule,
+                    stop_jacket=stop_jacket,
                 )
         return tuple(errors)
+
+    def _enabled_pump_entries(
+        self,
+    ) -> tuple[tuple[str, Pump, DiagnosticCategory], ...]:
+        entries = (
+            (
+                DeviceId.JACKET_PUMP,
+                "jacket pump STOP",
+                self._jacket_pump,
+                DiagnosticCategory.JACKET_PUMP,
+            ),
+            (
+                DeviceId.INJECTION_PUMP,
+                "injection pump STOP",
+                self._injection_pump,
+                DiagnosticCategory.INJECTION_PUMP,
+            ),
+        )
+        if self._connection_manager is None:
+            return tuple((label, pump, category) for _, label, pump, category in entries)
+        return tuple(
+            (label, pump, category)
+            for device, label, pump, category in entries
+            if self._connection_manager.status(device).enabled
+        )
 
     @staticmethod
     def _is_stopped_local(pump: object) -> bool:
@@ -397,6 +455,8 @@ class DeviceControlService:
         result: str,
         level: str,
         safety_rule: str,
+        *,
+        stop_jacket: bool = True,
     ) -> None:
         if self._diagnostics is not None:
             self._diagnostics.emit_event(
@@ -406,7 +466,11 @@ class DeviceControlService:
                     "device": category.value,
                     "field": "control",
                     "safety_rule": safety_rule,
-                    "selected_fault_strategy": "FULL_SAFE_STOP",
+                    "selected_fault_strategy": (
+                        "FULL_SAFE_STOP"
+                        if stop_jacket
+                        else "INJECTION_STOP_JACKET_HOLD"
+                    ),
                     "action": label,
                     "action_result": result,
                 },

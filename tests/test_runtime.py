@@ -24,6 +24,9 @@ class FakeControlLoop:
     def request_safe_state(self) -> None:
         self.safe_state_count += 1
 
+    def request_fault_state(self) -> None:
+        self.safe_state_count += 1
+
     def configure_pid(self, parameters: PidParameters) -> None:
         self.configured_pid.append(parameters)
 

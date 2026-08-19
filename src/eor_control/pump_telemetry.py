@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -39,6 +40,8 @@ class PollablePump(Protocol):
 
     def read_configured_flow_ml_per_hour(self) -> float: ...
 
+    def read_configured_pressure_bar(self) -> float: ...
+
     def set_constant_pressure(self, pressure_bar: float) -> None: ...
 
     def set_pressure_limit(self, pressure_bar: float) -> None: ...
@@ -63,6 +66,7 @@ class PumpPollingIntervals:
     slow_telemetry_stale_seconds: float = 33.0
     status_stale_seconds: float = 8.0
     startup_timeout_seconds: float = 8.0
+    shutdown_timeout_seconds: float = 8.0
 
     def __post_init__(self) -> None:
         values = (
@@ -73,6 +77,7 @@ class PumpPollingIntervals:
             self.slow_telemetry_stale_seconds,
             self.status_stale_seconds,
             self.startup_timeout_seconds,
+            self.shutdown_timeout_seconds,
         )
         if not all(isfinite(value) and value > 0.0 for value in values):
             raise ValueError("pump polling intervals must be positive and finite")
@@ -86,9 +91,6 @@ class PumpPollingIntervals:
 
 class PumpConnectionState(StrEnum):
     CONNECTED = "CONNECTED"
-    TELEMETRY_PARTIAL = "TELEMETRY_PARTIAL"
-    READY = "READY"
-    DEGRADED = "DEGRADED"
     DISCONNECTED = "DISCONNECTED"
 
 
@@ -211,6 +213,10 @@ class PollingPump:
         """Return the immutable timing configuration active in this worker."""
         return self._intervals
 
+    @property
+    def serial_is_open(self) -> bool:
+        return bool(getattr(self._pump, "serial_is_open", False))
+
     def worker_snapshot(self) -> PumpWorkerSnapshot:
         """Return worker/queue health without initiating serial traffic."""
 
@@ -243,6 +249,10 @@ class PollingPump:
         with self._condition:
             if self._connected:
                 return
+            if self._close_error is not None:
+                raise RuntimeError(
+                    f"{self._name} pump previous serial close failed; reconnect denied"
+                ) from self._close_error
             if self._thread is not None:
                 detail = (
                     "worker is still stopping"
@@ -364,18 +374,8 @@ class PollingPump:
                 connected=False,
             )
             state = PumpConnectionState.DISCONNECTED
-        elif pressure.quality is not DataQuality.GOOD or any(
-            field.last_error is not None for field in (flow, volume, operating_status)
-        ):
-            state = PumpConnectionState.DEGRADED
-        elif flow.age_seconds is None or volume.age_seconds is None:
-            state = PumpConnectionState.TELEMETRY_PARTIAL
-        elif any(
-            field.quality is not DataQuality.GOOD for field in (flow, volume, operating_status)
-        ):
-            state = PumpConnectionState.DEGRADED
         else:
-            state = PumpConnectionState.READY
+            state = PumpConnectionState.CONNECTED
         return PumpTelemetrySnapshot(
             status=status,
             connection_state=state,
@@ -451,6 +451,12 @@ class PollingPump:
             raise RuntimeError("pump configured flow readback returned no value")
         return result.value
 
+    def read_configured_pressure_bar(self) -> float:
+        result = self._execute_command(PumpCommandKind.READ_CONFIGURED_PRESSURE)
+        if result.value is None:
+            raise RuntimeError("pump configured pressure readback returned no value")
+        return result.value
+
     def set_constant_pressure(self, pressure_bar: float) -> None:
         self._execute_command(
             PumpCommandKind.SET_CONSTANT_PRESSURE,
@@ -497,11 +503,17 @@ class PollingPump:
             self._condition.notify_all()
         self._log_connection_event("TELEMETRY_CONNECTION_LOST", "DISCONNECTED")
         if thread is not None and thread is not current_thread():
-            thread.join(self._intervals.startup_timeout_seconds)
+            cancel_read = getattr(self._pump, "cancel_pending_read", None)
+            if callable(cancel_read):
+                # Some serial backends do not support cancelling a read. The
+                # independent shutdown timeout remains the hard bound.
+                with suppress(Exception):
+                    cancel_read()
+            thread.join(self._intervals.shutdown_timeout_seconds)
             if thread.is_alive():
                 error = TimeoutError(
                     f"{self._name} pump worker did not stop within "
-                    f"{self._intervals.startup_timeout_seconds:.1f} s; "
+                    f"{self._intervals.shutdown_timeout_seconds:.1f} s; "
                     "serial port left open and reconnect denied"
                 )
                 with self._condition:
@@ -1244,6 +1256,8 @@ class PollingPump:
             self._pump.set_constant_pressure(value)
         elif command.kind is PumpCommandKind.READ_CONFIGURED_FLOW:
             return self._pump.read_configured_flow_ml_per_hour()
+        elif command.kind is PumpCommandKind.READ_CONFIGURED_PRESSURE:
+            return self._pump.read_configured_pressure_bar()
         elif command.kind is PumpCommandKind.RUN:
             self._pump.run()
         elif command.kind is PumpCommandKind.STOP:

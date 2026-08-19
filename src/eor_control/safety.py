@@ -48,11 +48,18 @@ class SafetyMonitor:
         enforce_minimum_margin: bool = True,
         require_good_line_pressure: bool = False,
         require_good_differential_pressure: bool = False,
+        require_jacket_pump: bool = True,
+        require_injection_pump: bool = True,
     ) -> SafetyDecision:
         reasons: list[str] = []
         if snapshot.quality is not DataQuality.GOOD:
             reasons.append(f"invalid data quality: {snapshot.quality}")
-        if not snapshot.jacket_pump.connected or not snapshot.injection_pump.connected:
+        if (
+            require_jacket_pump
+            and not snapshot.jacket_pump.connected
+            or require_injection_pump
+            and not snapshot.injection_pump.connected
+        ):
             reasons.append("pump disconnected")
         measured_values = (
             snapshot.jacket_pump.pressure_bar,
@@ -94,19 +101,21 @@ class SafetyMonitor:
                 f"{snapshot.differential_pressure_quality.value}"
                 + (f": {detail}" if detail else "")
             )
-        for pump_name, pressure, limit in (
+        for pump_name, pressure, limit, required in (
             (
                 "jacket",
                 snapshot.jacket_pump.pressure_bar,
                 self._limits.max_jacket_pressure_bar,
+                require_jacket_pump,
             ),
             (
                 "injection",
                 snapshot.injection_pump.pressure_bar,
                 self._limits.max_injection_pressure_bar,
+                require_injection_pump,
             ),
         ):
-            if pressure > limit:
+            if required and pressure > limit:
                 reasons.append(
                     f"{pump_name} pump pressure limit exceeded: measured={pressure:.3f} bar; "
                     f"limit={limit:.3f} bar"
@@ -149,14 +158,15 @@ class SafetyMonitor:
                 f"measured={safety_line_pressure:.3f} bar; "
                 f"limit={self._limits.max_line_pressure_bar:.3f} bar; source={source}"
             )
-        margin = snapshot.jacket_pump.pressure_bar - snapshot.injection_pump.pressure_bar
-        if margin < 0.0:
-            reasons.append("injection pressure exceeds jacket pressure")
-        elif (
-            enforce_minimum_margin
-            and margin < self._limits.minimum_jacket_margin_bar
-        ):
-            reasons.append("jacket pressure margin is too low")
+        if require_jacket_pump and require_injection_pump:
+            margin = snapshot.jacket_pump.pressure_bar - snapshot.injection_pump.pressure_bar
+            if margin < 0.0:
+                reasons.append("injection pressure exceeds jacket pressure")
+            elif (
+                enforce_minimum_margin
+                and margin < self._limits.minimum_jacket_margin_bar
+            ):
+                reasons.append("jacket pressure margin is too low")
         if reasons:
             self._latched_reasons = tuple(dict.fromkeys((*self._latched_reasons, *reasons)))
         return SafetyDecision(

@@ -28,6 +28,7 @@ class FakePump:
     commands: list[str]
     connected: bool = False
     configured_flow_readback: float | None = None
+    configured_pressure_readback: float | None = None
 
     def connect(self) -> None:
         self.connected = True
@@ -51,6 +52,11 @@ class FakePump:
 
     def set_constant_pressure(self, target: float) -> None:
         self.commands.append(f"PRESS={target}")
+
+    def read_configured_pressure_bar(self) -> float:
+        if self.configured_pressure_readback is not None:
+            return self.configured_pressure_readback
+        return float(self.commands[-1].split("=", 1)[1])
 
     def set_pressure_limit(self, target: float) -> None:
         self.commands.append(f"MAXPRESS={target}")
@@ -740,6 +746,51 @@ def test_measurement_flow_uses_common_safety_gate_before_run() -> None:
     # The pump was already stopped, so the duplicate STOP is intentionally skipped.
     assert injection.commands == ["FLOW=25.0"]
     assert not control.state(PumpRole.INJECTION).running
+
+
+def test_jacket_holding_pressure_uses_stop_set_verify_run_sequence() -> None:
+    control, jacket, _ = service()
+    prepare(control, PumpRole.JACKET)
+    control.run(PumpRole.JACKET, PumpControlService.RUN_JACKET_CONFIRMATION)
+    jacket.commands.clear()
+
+    applied = control.apply_jacket_holding_pressure(135.0, maximum_pressure_bar=160.0)
+
+    assert applied == pytest.approx(135.0)
+    assert jacket.commands == ["STOP", "PRESS=135.0", "RUN"]
+
+
+def test_jacket_holding_pressure_rejects_limit_and_bad_readback() -> None:
+    control, jacket, _ = service()
+    prepare(control, PumpRole.JACKET)
+    control.run(PumpRole.JACKET, PumpControlService.RUN_JACKET_CONFIRMATION)
+    jacket.commands.clear()
+
+    with pytest.raises(ValueError, match="maximum pressure"):
+        control.apply_jacket_holding_pressure(165.0, maximum_pressure_bar=160.0)
+    assert jacket.commands == []
+
+    jacket.configured_pressure_readback = 130.0
+    with pytest.raises(RuntimeError, match="pressure verification failed"):
+        control.apply_jacket_holding_pressure(135.0, maximum_pressure_bar=160.0)
+    assert jacket.commands == ["STOP", "PRESS=135.0"]
+    assert not control.state(PumpRole.JACKET).running
+
+
+def test_jacket_holding_pressure_preserves_injection_margin() -> None:
+    control, jacket, _ = service(
+        jacket_pressure=140.0,
+        injection_pressure=100.0,
+        minimum_jacket_margin_bar=20.0,
+    )
+    prepare(control, PumpRole.JACKET)
+    control.run(PumpRole.JACKET, PumpControlService.RUN_JACKET_CONFIRMATION)
+    jacket.commands.clear()
+
+    with pytest.raises(PermissionError, match="holding target.*margin"):
+        control.apply_jacket_holding_pressure(115.0, maximum_pressure_bar=160.0)
+
+    assert jacket.commands == []
 
 
 def test_measurement_start_programs_each_hardware_pressure_limit() -> None:

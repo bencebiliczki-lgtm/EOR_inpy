@@ -153,6 +153,7 @@ class PidDiagnostics:
     constrained_output_percent: float = 0.0
     applied_output_percent: float = 0.0
     filtered_measurement_bar: float | None = None
+    reversal_count: int = 0
     reason: str = ""
 
 
@@ -173,6 +174,8 @@ class PidController:
         self._reversals: deque[float] = deque()
         self._last_sequence: int | None = None
         self._last_sample_timestamp: float | None = None
+        self._last_measurement_rate = 0.0
+        self._prepared_derivative_term = 0.0
         self._suppress_integral_derivative_once = False
         self._in_deadband = False
         self._diagnostics = PidDiagnostics(applied_output_percent=0.0)
@@ -200,6 +203,8 @@ class PidController:
         self._reversals.clear()
         self._last_sequence = None
         self._last_sample_timestamp = None
+        self._last_measurement_rate = 0.0
+        self._prepared_derivative_term = 0.0
         self._suppress_integral_derivative_once = False
         self._in_deadband = False
         self._diagnostics = PidDiagnostics(
@@ -217,6 +222,8 @@ class PidController:
         setpoint: float | None = None,
         measurement: float | None = None,
     ) -> None:
+        direction = 1.0 if parameters.direction is ControlDirection.DIRECT else -1.0
+        derivative = -direction * parameters.derivative_gain * self._last_measurement_rate
         self._parameters = parameters
         if setpoint is None or measurement is None:
             self.reset(output_percent=current_output_percent)
@@ -225,6 +232,7 @@ class PidController:
                 setpoint=setpoint,
                 measurement=measurement,
                 output_percent=current_output_percent,
+                derivative_term=derivative,
             )
 
     def calculate(
@@ -249,6 +257,7 @@ class PidController:
                 i_term_percent=self._integral,
                 applied_output_percent=self._last_output,
                 filtered_measurement_bar=self._filtered_measurement,
+                reversal_count=len(self._reversals),
                 reason="no new source sample",
             )
             return self._last_output
@@ -292,6 +301,8 @@ class PidController:
         if self._in_deadband:
             self._previous_measurement = filtered
             self._remember_sample(sequence, timestamp_monotonic)
+            self._suppress_integral_derivative_once = False
+            self._prepared_derivative_term = 0.0
             self._diagnostics = PidDiagnostics(
                 state=PidState.DEADBAND,
                 measurement_dt_seconds=measurement_dt,
@@ -299,11 +310,17 @@ class PidController:
                 i_term_percent=self._integral,
                 applied_output_percent=self._last_output,
                 filtered_measurement_bar=filtered,
+                reversal_count=len(self._reversals),
                 reason="inside hysteretic deadband",
             )
             return self._last_output
         proportional = self._parameters.proportional_gain * error
-        derivative = 0.0
+        derivative = (
+            self._prepared_derivative_term
+            if self._suppress_integral_derivative_once
+            else 0.0
+        )
+        measurement_rate = 0.0
         interval_valid = measurement_dt <= self._parameters.maximum_pid_sample_interval_seconds
         suppress_dynamic_terms = self._suppress_integral_derivative_once or not interval_valid
         if self._previous_measurement is not None and not suppress_dynamic_terms:
@@ -339,10 +356,12 @@ class PidController:
             self._integral = integral_candidate
 
         self._previous_measurement = filtered
+        self._last_measurement_rate = measurement_rate
         self._last_output = output
         self._remember_sample(sequence, timestamp_monotonic)
         initializing = self._suppress_integral_derivative_once
         self._suppress_integral_derivative_once = False
+        self._prepared_derivative_term = 0.0
         self._diagnostics = PidDiagnostics(
             state=PidState.INITIALIZING if initializing else PidState.ACTIVE,
             measurement_dt_seconds=measurement_dt,
@@ -354,6 +373,7 @@ class PidController:
             constrained_output_percent=constrained,
             applied_output_percent=output,
             filtered_measurement_bar=filtered,
+            reversal_count=len(self._reversals),
             reason=(
                 "bumpless first sample"
                 if initializing
@@ -392,7 +412,12 @@ class PidController:
         )
 
     def prepare_bumpless(
-        self, *, setpoint: float, measurement: float, output_percent: float
+        self,
+        *,
+        setpoint: float,
+        measurement: float,
+        output_percent: float,
+        derivative_term: float = 0.0,
     ) -> None:
         direction = 1.0 if self._parameters.direction is ControlDirection.DIRECT else -1.0
         error = direction * (setpoint - measurement)
@@ -401,7 +426,7 @@ class PidController:
             self._parameters.integral_max_percent,
             max(
                 self._parameters.integral_min_percent,
-                self._clamp(output_percent) - proportional,
+                self._clamp(output_percent) - proportional - derivative_term,
             ),
         )
         self._previous_measurement = measurement
@@ -409,6 +434,8 @@ class PidController:
         self._last_output = self._clamp(output_percent)
         self._last_sequence = None
         self._last_sample_timestamp = None
+        self._last_measurement_rate = 0.0
+        self._prepared_derivative_term = derivative_term
         self._suppress_integral_derivative_once = True
         self._in_deadband = False
 
@@ -474,7 +501,9 @@ class ValveController:
             current_output_percent=current_output_percent,
             setpoint=self._last_setpoint,
             measurement=(
-                None
+                self._pid.diagnostics.filtered_measurement_bar
+                if self._pid.diagnostics.filtered_measurement_bar is not None
+                else None
                 if self._last_pressure is None
                 else self._last_pressure.filtered_value_bar
             ),

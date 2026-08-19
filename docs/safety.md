@@ -29,8 +29,9 @@ időkorlátja; a kommunikációs és konkrét parancs-timeoutok megmaradnak.
 
 A `FLOW` és `VOLA` lassú kijelzési mezők külön frissességet kapnak. Ezek önálló
 elavulása nem írhatja felül a friss pumpanyomás biztonsági minőségét; a rendszer
-ilyenkor `DEGRADED` telemetriát jelez. A pumpanyomás elavulása továbbra is
-biztonsági interlock. Szünethiba esetén a felügyelet közvetlenül meghívja a
+ilyenkor mezőszintű adatminőségi hibát jelez, miközben a publikus kapcsolat
+`CONNECTED` marad. A pumpanyomás elavulása továbbra is biztonsági interlock.
+Szünethiba esetén a felügyelet közvetlenül meghívja a
 szelepaktuátor safe-state műveletét és nullázza a belső vezérlőkimenetet.
 
 ## Alapelv
@@ -138,3 +139,11 @@ reteszelt teljes safe-state-et kér.
 ## Kötelező tesztek
 
 Minden interlockhoz tartozzon határérték alatti, pontosan határértékű, határérték feletti, hibás adat és kapcsolatvesztési teszt. Biztonsági teszt hibája blokkolja a kiadást.
+## Kapcsolat és erőforrás-tulajdon
+
+Egy fizikai COM-portnak egyszerre egy tulajdonosa lehet. Ha egy pumpaworker
+nem áll le a beállított leállítási időhatáron belül, a worker és a port
+foglaltként marad; az alkalmazás nem indíthat rá második workert. Kapcsolódási
+hiba esetén minden már létrehozott erőforrást le kell zárni, de egy lezárási
+hiba nem akadályozhatja meg a többi eszköz biztonságos leállításának
+megkísérlését.

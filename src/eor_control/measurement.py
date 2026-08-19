@@ -51,7 +51,10 @@ class MeasurementService:
         channels: MeasurementChannels | None = None,
         persistence_enabled: bool = True,
         analog_filter_config: AnalogFilterConfig | None = None,
+        enabled_pumps: frozenset[str] = frozenset({"jacket", "injection"}),
     ) -> None:
+        if not enabled_pumps.issubset({"jacket", "injection"}):
+            raise ValueError("enabled pumps must be jacket and/or injection")
         self._jacket_pump = jacket_pump
         self._injection_pump = injection_pump
         self._daq = daq
@@ -63,6 +66,7 @@ class MeasurementService:
         self._channels = channels or MeasurementChannels()
         self._persistence_enabled = persistence_enabled
         self._analog_filter_config = analog_filter_config or AnalogFilterConfig()
+        self._enabled_pumps = enabled_pumps
         self._analog_filters = {
             "line_pressure": self._make_analog_filter("line_pressure"),
             "differential_pressure": self._make_analog_filter(
@@ -130,15 +134,15 @@ class MeasurementService:
         use_line_pressure_for_control: bool = False,
         enforce_minimum_margin: bool = False,
     ) -> MeasurementRecord:
-        jacket, jacket_quality, jacket_pressure_reading = self._read_pump(
+        jacket, jacket_quality, jacket_pressure_reading = self._read_enabled_pump(
             self._jacket_pump, "jacket"
         )
-        injection, injection_quality, injection_pressure_reading = self._read_pump(
+        injection, injection_quality, injection_pressure_reading = self._read_enabled_pump(
             self._injection_pump, "injection"
         )
-        if self._initial_jacket_volume_ml is None:
+        if "jacket" in self._enabled_pumps and self._initial_jacket_volume_ml is None:
             self._initial_jacket_volume_ml = jacket.remaining_volume_ml
-        if self._initial_injection_volume_ml is None:
+        if "injection" in self._enabled_pumps and self._initial_injection_volume_ml is None:
             self._initial_injection_volume_ml = injection.remaining_volume_ml
 
         line_reading = self._read_optional_pressure(
@@ -168,7 +172,16 @@ class MeasurementService:
                 else differential_reading.filtered_pressure_bar
             ),
             valve_percent=valve_percent,
-            quality=self._combined_quality(jacket_quality, injection_quality),
+            quality=self._combined_quality(
+                *(
+                    quality
+                    for name, quality in (
+                        ("jacket", jacket_quality),
+                        ("injection", injection_quality),
+                    )
+                    if name in self._enabled_pumps
+                )
+            ),
             raw_line_pressure_bar=(
                 None if line_reading is None else line_reading.raw_pressure_bar
             ),
@@ -198,23 +211,42 @@ class MeasurementService:
             require_good_differential_pressure=(
                 self._channels.differential_pressure is not None
             ),
+            require_jacket_pump="jacket" in self._enabled_pumps,
+            require_injection_pump="injection" in self._enabled_pumps,
         )
         record = MeasurementRecord(
             snapshot=snapshot,
             injected_volume_ml=(
-                self._initial_injection_volume_ml - injection.remaining_volume_ml
+                (
+                    injection.remaining_volume_ml
+                    if self._initial_injection_volume_ml is None
+                    else self._initial_injection_volume_ml
+                )
+                - injection.remaining_volume_ml
             ),
             active_stage=active_stage,
             jacket_net_volume_ml=(
-                self._initial_jacket_volume_ml - jacket.remaining_volume_ml
+                (
+                    jacket.remaining_volume_ml
+                    if self._initial_jacket_volume_ml is None
+                    else self._initial_jacket_volume_ml
+                )
+                - jacket.remaining_volume_ml
             ),
             safety_reasons=decision.reasons,
         )
         if persist and self._persistence_enabled:
             self._writer.write(record)
         if not decision.safe:
-            self.request_safe_state()
+            self.request_fault_state()
         return record
+
+    def _read_enabled_pump(
+        self, pump: Pump, role: str
+    ) -> tuple[PumpStatus, DataQuality, PumpPressureReading | None]:
+        if role in self._enabled_pumps:
+            return self._read_pump(pump, role)
+        return PumpStatus(0.0, 0.0, 0.0, connected=False), DataQuality.GOOD, None
 
     def _read_optional_pressure(
         self,
@@ -412,6 +444,7 @@ class MeasurementService:
                     pressure.sequence,
                     pressure.quality,
                     pressure.last_error or "",
+                    status_quality,
                 ),
             )
         read_cached = getattr(pump, "read_cached_status", None)
@@ -452,7 +485,7 @@ class MeasurementService:
             DataQuality.OUT_OF_RANGE: 3,
             DataQuality.DISCONNECTED: 4,
         }
-        return max(qualities, key=priority.__getitem__)
+        return max(qualities, key=priority.__getitem__) if qualities else DataQuality.GOOD
 
     def run(
         self,
@@ -469,22 +502,40 @@ class MeasurementService:
             try:
                 self.sample_once(active_stage=active_stage, valve_percent=valve_percent)
             except (ConnectionError, ValueError):
-                self.request_safe_state()
+                self.request_fault_state()
                 raise
             elapsed = self._clock.monotonic() - started_at
             self._clock.sleep(max(0.0, interval_seconds - elapsed))
 
     def request_safe_state(self) -> None:
-        for operation in (
-            self._jacket_pump.request_stop,
-            self._injection_pump.request_stop,
-            self._daq.set_safe_state,
-        ):
+        operations = [self._daq.set_safe_state]
+        if "jacket" in self._enabled_pumps:
+            operations.append(self._jacket_pump.request_stop)
+        if "injection" in self._enabled_pumps:
+            operations.append(self._injection_pump.request_stop)
+        for operation in operations:
             try:
                 operation()
             except Exception:
                 # The application-level supervisor records detailed failures; this
                 # lower-level fallback must still attempt every safe-state action.
+                continue
+
+    def request_fault_state(self) -> None:
+        """Stop injection while preserving jacket pressure on a latched fault.
+
+        The jacket pump's separately programmed MAXPRESS limit remains the
+        independent protection that stops it on an internal overpressure.
+        """
+        operations = [self._daq.set_safe_state]
+        if "injection" in self._enabled_pumps:
+            operations.append(self._injection_pump.request_stop)
+        for operation in operations:
+            try:
+                operation()
+            except Exception:
+                # The application-level supervisor records detailed failures;
+                # still attempt every remaining fault-state action.
                 continue
 
     def configure_measurement(

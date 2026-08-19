@@ -200,6 +200,14 @@ class SimulatedPump:
         self.mode = SimulatedPumpMode.CONSTANT_PRESSURE
         self.state = SimulatedPumpState.CONFIGURED
 
+    def read_configured_pressure_bar(self) -> float:
+        self._require_connected()
+        if self.mode is not SimulatedPumpMode.CONSTANT_PRESSURE:
+            raise RuntimeError("simulated pump is not configured for constant pressure")
+        if self.target_pressure_bar is None:
+            raise RuntimeError("simulated pump pressure target is missing")
+        return self.target_pressure_bar
+
     def set_pressure_limit(self, pressure_bar: float) -> None:
         self._require_configurable()
         if not isfinite(pressure_bar) or pressure_bar <= 0.0:

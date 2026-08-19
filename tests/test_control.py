@@ -95,6 +95,34 @@ def timestamped_snapshot(
     )
 
 
+def timestamped_line_snapshot(
+    pressure: float, *, sequence: int, timestamp: float
+) -> MeasurementSnapshot:
+    base = snapshot(line_pressure=pressure)
+    reading = AnalogPressureReading(
+        last_raw_voltage=2.0,
+        median_voltage=2.0,
+        filtered_voltage=2.0,
+        raw_pressure_bar=pressure,
+        filtered_pressure_bar=pressure,
+        measured_at=base.recorded_at,
+        monotonic_seconds=timestamp,
+        sample_age_seconds=0.0,
+        quality=DataQuality.GOOD,
+        sequence=sequence,
+    )
+    return MeasurementSnapshot(
+        recorded_at=base.recorded_at,
+        monotonic_seconds=timestamp,
+        jacket_pump=base.jacket_pump,
+        injection_pump=base.injection_pump,
+        line_pressure_bar=pressure,
+        differential_pressure_bar=base.differential_pressure_bar,
+        valve_percent=base.valve_percent,
+        line_pressure_reading=reading,
+    )
+
+
 def test_manual_mode_passes_validated_percentage() -> None:
     command = controller().command(
         snapshot=snapshot(),
@@ -584,3 +612,143 @@ def test_deadband_uses_separate_exit_threshold() -> None:
     assert pid.calculate(setpoint=10.0, measurement=9.5, dt_seconds=0.2) == 30.0
     assert pid.calculate(setpoint=10.0, measurement=8.5, dt_seconds=0.2) == 30.0
     assert pid.calculate(setpoint=10.0, measurement=7.5, dt_seconds=0.2) != 30.0
+
+
+def test_same_ni_sequence_updates_pid_only_once() -> None:
+    valve = controller(
+        PidParameters(
+            0.0,
+            1.0,
+            0.0,
+            direction=ControlDirection.DIRECT,
+            measurement_filter_enabled=False,
+        )
+    )
+    first = valve.command(
+        snapshot=timestamped_line_snapshot(10.0, sequence=8, timestamp=2.0),
+        safety=SafetyDecision(True, ()),
+        mode=ControlMode.AUTOMATIC,
+        source=PressureSource.LINE_SENSOR,
+        setpoint_bar=20.0,
+        dt_seconds=0.2,
+    )
+    held = valve.command(
+        snapshot=timestamped_line_snapshot(10.0, sequence=8, timestamp=2.0),
+        safety=SafetyDecision(True, ()),
+        mode=ControlMode.AUTOMATIC,
+        source=PressureSource.LINE_SENSOR,
+        setpoint_bar=20.0,
+        dt_seconds=0.5,
+    )
+
+    assert held.output_percent == pytest.approx(first.output_percent)
+    assert held.pid_state.value == "HOLD"
+
+
+def test_time_based_ema_is_independent_of_supervision_interval() -> None:
+    parameters = PidParameters(
+        1.0,
+        0.0,
+        0.0,
+        direction=ControlDirection.DIRECT,
+        measurement_filter_time_constant_seconds=1.0,
+    )
+    fast = PidController(parameters)
+    slow = PidController(parameters)
+    for pid, cycle_dt in ((fast, 0.2), (slow, 0.5)):
+        pid.calculate(
+            setpoint=20.0,
+            measurement=0.0,
+            dt_seconds=cycle_dt,
+            sequence=1,
+            timestamp_monotonic=1.0,
+        )
+        pid.calculate(
+            setpoint=20.0,
+            measurement=10.0,
+            dt_seconds=cycle_dt,
+            sequence=2,
+            timestamp_monotonic=2.0,
+        )
+
+    assert fast.diagnostics.filtered_measurement_bar == pytest.approx(
+        slow.diagnostics.filtered_measurement_bar
+    )
+
+
+def test_anti_windup_blocks_integral_at_clamp_and_rate_limit() -> None:
+    clamped = PidController(
+        PidParameters(
+            0.0,
+            10.0,
+            0.0,
+            output_max_percent=20.0,
+            direction=ControlDirection.DIRECT,
+            measurement_filter_enabled=False,
+        )
+    )
+    rate_limited = PidController(
+        PidParameters(
+            0.0,
+            1.0,
+            0.0,
+            maximum_output_rate_percent_per_second=1.0,
+            direction=ControlDirection.DIRECT,
+            measurement_filter_enabled=False,
+        )
+    )
+
+    clamped.calculate(setpoint=10.0, measurement=0.0, dt_seconds=1.0)
+    rate_limited.calculate(setpoint=10.0, measurement=0.0, dt_seconds=1.0)
+
+    assert clamped.diagnostics.i_term_percent == pytest.approx(0.0)
+    assert rate_limited.diagnostics.i_term_percent == pytest.approx(0.0)
+
+
+def test_runtime_parameter_change_is_bumpless_with_new_derivative_gain() -> None:
+    pid = PidController(
+        PidParameters(
+            1.0,
+            0.0,
+            1.0,
+            direction=ControlDirection.DIRECT,
+            measurement_filter_enabled=False,
+        )
+    )
+    pid.calculate(
+        setpoint=50.0,
+        measurement=0.0,
+        dt_seconds=1.0,
+        sequence=1,
+        timestamp_monotonic=1.0,
+    )
+    actual = pid.calculate(
+        setpoint=50.0,
+        measurement=10.0,
+        dt_seconds=1.0,
+        sequence=2,
+        timestamp_monotonic=2.0,
+    )
+    pid.configure(
+        PidParameters(
+            2.0,
+            0.2,
+            2.0,
+            direction=ControlDirection.DIRECT,
+            measurement_filter_enabled=False,
+        ),
+        current_output_percent=actual,
+        setpoint=50.0,
+        measurement=10.0,
+    )
+
+    first = pid.calculate(
+        setpoint=50.0,
+        measurement=10.0,
+        dt_seconds=1.0,
+        sequence=3,
+        timestamp_monotonic=3.0,
+    )
+
+    assert first == pytest.approx(actual)
+    assert pid.diagnostics.state.value == "INITIALIZING"
