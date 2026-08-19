@@ -81,6 +81,8 @@ class DeviceConnectionManager:
             )
 
     def connect_device(self, device: DeviceId) -> DeviceConnectionStatus:
+        if device not in self._enabled:
+            return self.status(device)
         if device in (DeviceId.LINE_PRESSURE, DeviceId.DIFFERENTIAL_PRESSURE):
             pressure_inputs = tuple(
                 pressure_device

@@ -223,3 +223,31 @@ def test_shared_ai_failure_marks_both_inputs_failed_and_skips_valve() -> None:
         manager.status(DeviceId.DIFFERENTIAL_PRESSURE).last_error
         == "resource reserved"
     )
+
+
+def test_individual_pressure_connect_uses_one_shared_physical_operation() -> None:
+    calls: list[str] = []
+    manager = DeviceConnectionManager(
+        {
+            DeviceId.LINE_PRESSURE: DeviceConnector(
+                lambda: calls.append("shared_ai"), lambda: None, "Dev1/ai0"
+            ),
+            DeviceId.DIFFERENTIAL_PRESSURE: DeviceConnector(
+                lambda: calls.append("unexpected_second_ai"),
+                lambda: None,
+                "Dev1/ai1",
+            ),
+        },
+        enabled_devices=frozenset(
+            {DeviceId.LINE_PRESSURE, DeviceId.DIFFERENTIAL_PRESSURE}
+        ),
+    )
+
+    manager.connect_device(DeviceId.DIFFERENTIAL_PRESSURE)
+
+    assert calls == ["shared_ai"]
+    assert manager.status(DeviceId.LINE_PRESSURE).state is DeviceConnectionState.CONNECTED
+    assert (
+        manager.status(DeviceId.DIFFERENTIAL_PRESSURE).state
+        is DeviceConnectionState.CONNECTED
+    )
