@@ -2806,7 +2806,7 @@ def test_last_hardware_mode_restores_saved_profile_without_opening_settings(
     monkeypatch.setattr(
         window,
         "_schedule_hardware_reconnect",
-        lambda configuration: restored.append(configuration),
+        lambda configuration, **_kwargs: restored.append(configuration),
     )
 
     window._restore_startup_mode()
@@ -2815,6 +2815,55 @@ def test_last_hardware_mode_restores_saved_profile_without_opening_settings(
     assert restored == [hardware]
     assert opened == []
     assert window._run_mode is RunMode.SIMULATION
+    window.close()
+
+
+def test_startup_hardware_reconnect_runs_connection_test_before_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+    )
+    hardware = HardwareConfiguration(
+        jacket_port="COM1",
+        jacket_unit_id=1,
+        jacket_channel="A",
+        injection_port="COM2",
+        injection_unit_id=2,
+        injection_channel="A",
+        baud_rate=9600,
+        line_pressure_channel="Dev1/ai0",
+        differential_pressure_channel="Dev1/ai1",
+        valve_output_channel="Dev1/ao0",
+        safe_output_voltage=1.0,
+        valve_zero_percent_voltage=1.0,
+        valve_hundred_percent_voltage=5.0,
+    )
+    connection_result = ConnectionTestResult(tuple(), hardware.enabled_test_devices())
+    tested: list[HardwareConfiguration] = []
+    activated: list[ConnectionTestResult | None] = []
+
+    class FakeTester:
+        def __init__(self, **_kwargs: object) -> None:
+            return
+
+        def test(self, configuration: HardwareConfiguration) -> ConnectionTestResult:
+            tested.append(configuration)
+            return connection_result
+
+    monkeypatch.setattr("eor_control.ui.PhysicalHardwareConnectionTester", FakeTester)
+    monkeypatch.setattr(
+        window,
+        "_activate_hardware",
+        lambda _configuration, result=None, **_kwargs: activated.append(result),
+    )
+    monkeypatch.setattr(QTimer, "singleShot", lambda _delay, callback: callback())
+
+    window._schedule_hardware_reconnect(hardware, run_connection_test=True)
+
+    assert tested == [hardware]
+    assert activated == [connection_result]
     window.close()
 
 

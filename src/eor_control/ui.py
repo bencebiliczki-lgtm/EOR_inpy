@@ -9263,7 +9263,7 @@ class DashboardWindow(QMainWindow):
                 self._open_settings_hub("devices")
                 return
             self._set_all_connections("MENTETT HARDVER VISSZAÁLLÍTÁSA", ok=None)
-            self._schedule_hardware_reconnect(configuration)
+            self._schedule_hardware_reconnect(configuration, run_connection_test=True)
 
     def _restore_theme(self) -> None:
         theme = str(self._user_settings.value("theme", "system"))
@@ -9477,6 +9477,8 @@ class DashboardWindow(QMainWindow):
         self,
         configuration: HardwareConfiguration,
         attempt: int = 1,
+        *,
+        run_connection_test: bool = False,
     ) -> None:
         if attempt == 1:
             if self._hardware_reconnect_active:
@@ -9488,8 +9490,18 @@ class DashboardWindow(QMainWindow):
                 f"ÚJRACSATLAKOZÁS {attempt}/3", ok=None
             )
             try:
+                connection_result = None
+                if run_connection_test:
+                    connection_result = PhysicalHardwareConnectionTester(
+                        diagnostics=self._diagnostics
+                    ).test(configuration)
+                    if not connection_result.all_successful:
+                        raise ConnectionError(
+                            "az indulási kapcsolati teszt sikertelen"
+                        )
                 self._activate_hardware(
                     configuration,
+                    connection_result,
                     connect_in_background=True,
                     reconnect_attempt=attempt,
                 )
