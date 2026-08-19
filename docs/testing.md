@@ -381,6 +381,17 @@ utána a köpeny végső célja előtt is elindulhat, marginvesztéskor leáll �
 hiszterézissel újraindul. Szimuláltan 120 másodpercnél hosszabb célvárakozás sem
 okozhat célidő-túllépési hibát; `STALE` vagy `INVALID` adat külön telemetry-hiba.
 
+## NI-aktiválási regressziók
+
+Az NI-aktiválási regressziók mockolt DAQmx taskokkal ellenőrzik, hogy a két AI
+csatorna egyetlen névvel ellátott taskba kerül, a mintasorok nem cserélődnek fel,
+az AO csak az AI-validáció után jön létre, és a SAFE feszültség csak ezután kerül
+kiírásra. Külön teszt fedi a `-50103` cleanup/retry útját, a második próbálkozás
+utáni `READY` állapotot, a három sikertelen próbálkozást, a nem retryzható hibát,
+az idempotens többszörös close-t és a két egyidejű aktiválási kérés
+deduplikálását. A normál mérési regresszió ugyanennek a közös többcsatornás
+olvasásnak a használatát és a logikai csatornakiosztást is ellenőrzi.
+
 ## Hardveres smoke test
 
 Felügyelt környezetben, nyomásfelépítés nélkül vagy meghatározott biztonságos tesztállapotban:

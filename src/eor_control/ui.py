@@ -10208,8 +10208,10 @@ class DashboardWindow(QMainWindow):
                 try:
                     connect_devices()
                 except Exception as error:
-                    cleanup_failed_connection()
-                    self._finish_hardware_activation_guard()
+                    try:
+                        cleanup_failed_connection()
+                    finally:
+                        self._finish_hardware_activation_guard()
                     self._runtime_bridge.hardware_activation_failed.emit(
                         (configuration, reconnect_attempt, str(error))
                     )
@@ -10239,9 +10241,13 @@ class DashboardWindow(QMainWindow):
                         finally:
                             self._finish_hardware_activation_guard()
 
-                    self._runtime_bridge.hardware_activation_completed.emit(
-                        complete_activation
-                    )
+                    try:
+                        self._runtime_bridge.hardware_activation_completed.emit(
+                            complete_activation
+                        )
+                    except Exception:
+                        self._finish_hardware_activation_guard()
+                        raise
 
             Thread(
                 target=execute,
@@ -13099,7 +13105,17 @@ class DashboardWindow(QMainWindow):
                 except Exception as error:
                     errors.append(f"biztonsági leállítás: {error}")
             if self._pump_control is not None:
-                self._pump_control.observe_fault_stop()
+                observe_fault_stop = getattr(
+                    self._pump_control, "observe_fault_stop", None
+                )
+                if callable(observe_fault_stop):
+                    observe_fault_stop()
+                else:
+                    observe_safe_stop = getattr(
+                        self._pump_control, "observe_safe_stop", None
+                    )
+                    if callable(observe_safe_stop):
+                        observe_safe_stop()
             self._set_all_connections("HIBA — BES STOP, KÖP NYOMÁSTARTÁS", ok=False)
             details = "" if not errors else "\n- " + "\n- ".join(errors)
             self._show_error(
@@ -13351,9 +13367,14 @@ class DashboardWindow(QMainWindow):
             and not self._preflight_active
         )
         self._new_jacket_pressure.setMaximum(max(0.001, self._max_jacket.value()))
-        jacket_state = (
-            self._pump_control.state(PumpRole.JACKET)
+        pump_state_reader = (
+            getattr(self._pump_control, "state", None)
             if self._pump_control is not None
+            else None
+        )
+        jacket_state = (
+            pump_state_reader(PumpRole.JACKET)
+            if callable(pump_state_reader)
             else None
         )
         if (

@@ -6,6 +6,12 @@ from types import SimpleNamespace
 import pytest
 
 from eor_control import ni
+from eor_control.application import ApplicationState, DeviceControlService, RunMode
+from eor_control.device_connections import (
+    DeviceConnectionManager,
+    DeviceConnector,
+    DeviceId,
+)
 from eor_control.diagnostics import DiagnosticCategory, DiagnosticLogger
 from eor_control.ni import (
     AnalogValveActuator,
@@ -13,6 +19,7 @@ from eor_control.ni import (
     NidaqmxBackend,
     NidaqmxDataAcquisition,
 )
+from eor_control.simulators import SimulatedPump
 
 
 @dataclass
@@ -277,6 +284,50 @@ def test_physical_backend_reads_both_pressure_channels_in_one_named_task(
     assert task.name.startswith("eor_pressure_inputs_ai_")
 
 
+def test_physical_input_task_closes_when_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tasks: list[object] = []
+
+    class FakeTask:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.closed = False
+            self.ai_channels = SimpleNamespace(add_ai_voltage_chan=lambda *args, **kwargs: None)
+            tasks.append(self)
+
+        def __enter__(self) -> "FakeTask":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self.closed = True
+
+        def read(self, *, timeout: float) -> float:
+            raise RuntimeError("mock read failure")
+
+    monkeypatch.setattr(
+        ni.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(
+            Task=FakeTask,
+            TerminalConfiguration=SimpleNamespace(DEFAULT="default"),
+        )
+        if name == "nidaqmx"
+        else SimpleNamespace(
+            TerminalConfiguration=SimpleNamespace(DEFAULT="default"),
+            AcquisitionType=SimpleNamespace(FINITE="finite"),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="mock read failure"):
+        NidaqmxBackend().read_voltage("Dev1/ai0")
+
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert isinstance(task, FakeTask)
+    assert task.closed
+
+
 class ResourceReservedError(RuntimeError):
     error_code = -50103
 
@@ -329,6 +380,86 @@ def test_activation_retries_resource_reserved_then_applies_safe_output(
     assert backend.events.index("ao_safe") > max(
         index for index, event in enumerate(backend.events) if event == "ai"
     )
+
+
+def test_activation_diagnostics_include_sequence_and_retry_details(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(ni, "sleep", lambda _seconds: None)
+    logger = DiagnosticLogger(tmp_path / "communication.log")
+    logger.configure(
+        enabled=True,
+        categories=[DiagnosticCategory.NI_LINE, DiagnosticCategory.NI_VALVE],
+    )
+    backend = ActivationBackend(reserved_failures=1)
+    daq = NidaqmxDataAcquisition(backend, config(), logger)
+    daq.authorize_output(NidaqmxDataAcquisition.HARDWARE_CONFIRMATION)
+
+    daq.activate(samples_per_read=2)
+
+    messages = "\n".join(event.message for event in logger.events_after(0))
+    for expected in (
+        "NI activation started",
+        "AI task name",
+        "AI channel list=Dev1/ai0,Dev1/ai1",
+        "terminal configuration=DEFAULT",
+        "sample rate=",
+        "samples per read=2",
+        "activation attempt=1",
+        "AI validation completed",
+        "AO task created",
+        "safe voltage applied",
+        "NI activation completed",
+        "NI resource reserved",
+        "failing task",
+        "active known tasks",
+        "cleanup result",
+        "retry number=2",
+    ):
+        assert expected in messages
+
+
+def test_second_ni_activation_attempt_can_reach_hardware_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ni, "sleep", lambda _seconds: None)
+    backend = ActivationBackend(reserved_failures=1)
+    daq = NidaqmxDataAcquisition(backend, config())
+    jacket = SimulatedPump()
+    injection = SimulatedPump()
+    manager = DeviceConnectionManager(
+        {
+            DeviceId.JACKET_PUMP: DeviceConnector(
+                jacket.connect, jacket.disconnect, "COM1"
+            ),
+            DeviceId.INJECTION_PUMP: DeviceConnector(
+                injection.connect, injection.disconnect, "COM2"
+            ),
+            DeviceId.LINE_PRESSURE: DeviceConnector(
+                daq.activate, daq.close, "Dev1/ai0"
+            ),
+            DeviceId.DIFFERENTIAL_PRESSURE: DeviceConnector(
+                daq.activate, daq.close, "Dev1/ai1"
+            ),
+            DeviceId.VALVE: DeviceConnector(daq.activate, daq.close, "Dev1/ao0"),
+        },
+        enabled_devices=frozenset(DeviceId),
+    )
+    service = DeviceControlService(
+        jacket_pump=jacket,
+        injection_pump=injection,
+        daq=daq,
+        mode=RunMode.HARDWARE,
+        connection_manager=manager,
+    )
+    daq.authorize_output(NidaqmxDataAcquisition.HARDWARE_CONFIRMATION)
+    service.authorize_hardware(DeviceControlService.HARDWARE_CONFIRMATION)
+
+    service.connect()
+
+    assert service.status.state is ApplicationState.READY
+    assert manager.all_enabled_connected
+    assert backend.reads == 2
 
 
 def test_activation_stops_after_three_resource_reserved_failures(

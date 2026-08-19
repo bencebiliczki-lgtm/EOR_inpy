@@ -383,6 +383,20 @@ cseréli, új háttér-runtime-mal és ugyanahhoz az aktív projekthez tartozó 
 leválasztott `IDLE` állapotban engedélyezett. Új programindítás soha nem aktivál
 automatikusan fizikai hardvert.
 
+A hardveraktiválás sorrendje determinisztikus: a két külön COM-portos pumpa
+párhuzamosan kapcsolódik, utánuk a két NI nyomásbemenet egy közös többcsatornás
+AI-taskban kerül ellenőrzésre, majd létrejön a tartós szelep-AO task és megkapja a
+SAFE feszültséget. A `DeviceConnectionManager` a két nyomásbemenethez továbbra is
+külön megjelenítési állapotot tart, de fizikailag egyetlen közös connect műveletet
+futtat. Az alkalmazás csak mindhárom fázis sikere után vált `HARDWARE/READY`
+állapotba. Az aktiválási zár megakadályozza két reconnect/kezelői aktiválás
+egyidejű NI-task-létrehozását.
+
+A `-50103` DAQmx resource-reserved hiba kizárólag az NI-aktiválási fázisban kap
+legfeljebb három próbálkozást (azonnal, 250 ms, 500 ms késleltetéssel). Minden
+újrapróbálás előtt idempotens NI-cleanup fut. Más hibakód, hibás csatornanév vagy
+konfigurációs hiba nem kerül újrapróbálásra.
+
 ## Diagnosztika és Developer nézet
 
 A `DiagnosticLogger` szálbiztos, kategóriaszűrt eseménynapló. Kikapcsolt állapotban

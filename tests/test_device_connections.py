@@ -187,3 +187,39 @@ def test_connection_order_is_parallel_pumps_then_shared_ai_then_valve() -> None:
     assert events.count("shared_ai") == 1
     assert events[-2:] == ["shared_ai", "valve"]
     assert manager.all_enabled_connected
+
+
+def test_shared_ai_failure_marks_both_inputs_failed_and_skips_valve() -> None:
+    valve_calls: list[str] = []
+
+    def fail_ai() -> None:
+        raise RuntimeError("resource reserved")
+
+    manager = DeviceConnectionManager(
+        {
+            DeviceId.LINE_PRESSURE: DeviceConnector(
+                fail_ai, lambda: None, "Dev1/ai0"
+            ),
+            DeviceId.DIFFERENTIAL_PRESSURE: DeviceConnector(
+                fail_ai, lambda: None, "Dev1/ai1"
+            ),
+            DeviceId.VALVE: DeviceConnector(
+                lambda: valve_calls.append("valve"), lambda: None, "Dev1/ao0"
+            ),
+        },
+        enabled_devices=frozenset(
+            {
+                DeviceId.LINE_PRESSURE,
+                DeviceId.DIFFERENTIAL_PRESSURE,
+                DeviceId.VALVE,
+            }
+        ),
+    )
+
+    assert manager.connect_enabled() == ("ni_pressure_inputs: resource reserved",)
+    assert valve_calls == []
+    assert manager.status(DeviceId.LINE_PRESSURE).last_error == "resource reserved"
+    assert (
+        manager.status(DeviceId.DIFFERENTIAL_PRESSURE).last_error
+        == "resource reserved"
+    )

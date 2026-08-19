@@ -81,6 +81,17 @@ class DeviceConnectionManager:
             )
 
     def connect_device(self, device: DeviceId) -> DeviceConnectionStatus:
+        if device in (DeviceId.LINE_PRESSURE, DeviceId.DIFFERENTIAL_PRESSURE):
+            pressure_inputs = tuple(
+                pressure_device
+                for pressure_device in (
+                    DeviceId.LINE_PRESSURE,
+                    DeviceId.DIFFERENTIAL_PRESSURE,
+                )
+                if pressure_device in self._enabled
+            )
+            self._connect_shared_devices(pressure_inputs)
+            return self.status(device)
         with self._device_locks[device]:
             return self._connect_device_locked(device)
 

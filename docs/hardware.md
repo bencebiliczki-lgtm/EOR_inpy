@@ -121,6 +121,14 @@ nem választ helyettük alapértelmezett
 fizikai biztonsági állapotot. Az `AnalogValveActuator` explicit 0%/100%
 kalibrációból számít feszültséget, így a fordított szelepkarakterisztika is kezelhető.
 
+A két analóg nyomásbemenet egyetlen, névvel ellátott
+`eor_pressure_inputs_ai_<azonosító>` DAQmx taskban kerül mintavételre. A task a
+csatornákat konfigurációs sorrendben (`line_pressure`, majd
+`differential_pressure`) adja hozzá, a visszaadott mintasorokat ugyanebben a
+sorrendben rendeli vissza a logikai csatornákhoz. Minden AI/AO taskműveletet közös
+folyamaton belüli `RLock` sorosít, így a rövid életű AI-task és a tartós AO-task
+létrehozása, használata és lezárása nem versenyezhet egymással.
+
 ## Szenzorok
 
 - Vonali nyomásmérő: 1–5 V, jelenlegi információ szerint 0–400 bar.
@@ -141,8 +149,10 @@ időtartama, valamint megjelölhető a kábelkihúzási, vészleállítási és 
 sikeres teljesítése. A jelölések dokumentációs adatok; önmagukban nem helyettesítik
 a fizikai tesztet és nem kapcsolnak kimenetet.
 
-Az NI analóg kimenet hardveres módban lusta inicializálású, tartós DAQmx taskot
-használ. SAFE állapot vagy lezárás után a task bezáródik és a kimenetengedély
-visszavonódik; a kapcsolatpróba továbbra sem hoz létre AO taskot. A vezetett AO
+Az NI analóg kimenet hardveraktiváláskor, a közös AI-ellenőrzés sikeres lezárása
+után jön létre `eor_valve_ao_<azonosító>` néven, majd azonnal megkapja a
+konfigurált SAFE feszültséget. Ez a task tartósan nyitva marad a hardvermunkamenet
+alatt. Lezárás után a task bezáródik és a kimenetengedély visszavonódik; a külön
+olvasási kapcsolatpróba továbbra sem hoz létre AO taskot. A vezetett AO
 lépéssor SAFE, 1 V, 2 V, 3 V, 4 V, 5 V, SAFE, külön kezelői indítással és
 multiméteres összehasonlítással.

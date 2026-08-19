@@ -47,6 +47,7 @@ class NidaqmxBackend:
         self._sample_rate_hz = sample_rate_hz
         self._output_task: object | None = None
         self._output_channel: str | None = None
+        self._last_input_task_name: str | None = None
         self._task_lock = RLock()
 
     @classmethod
@@ -85,6 +86,7 @@ class NidaqmxBackend:
                 self._terminal_configuration,
             )
             task_name = self._task_name("pressure_inputs_ai")
+            self._last_input_task_name = task_name
             with nidaqmx.Task(task_name) as task:
                 for physical_channel in channels:
                     task.ai_channels.add_ai_voltage_chan(
@@ -163,6 +165,11 @@ class NidaqmxBackend:
                 return ()
             name = getattr(self._output_task, "name", None)
             return (str(name or "eor_valve_ao"),)
+
+    @property
+    def last_input_task_name(self) -> str | None:
+        with self._task_lock:
+            return self._last_input_task_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,8 +311,9 @@ class NidaqmxDataAcquisition:
                 DiagnosticCategory.NI_LINE,
                 "NI_ACTIVATION",
                 "NI activation started; "
-                f"AI channels={','.join(channels) or 'NONE'}; terminal={terminal}; "
-                f"sample_rate={sample_rate}; samples_per_read={samples_per_read}",
+                f"AI channel list={','.join(channels) or 'NONE'}; "
+                f"terminal configuration={terminal}; sample rate={sample_rate}; "
+                f"samples per read={samples_per_read}",
             )
             for attempt in range(1, 4):
                 self._cleanup_backend()
@@ -329,10 +337,14 @@ class NidaqmxDataAcquisition:
                             )
                         else:
                             self.read_pressure_voltages(samples_per_read)
+                        task_name = str(
+                            getattr(self._backend, "last_input_task_name", None)
+                            or task_name
+                        )
                         self._log(
                             DiagnosticCategory.NI_LINE,
                             "NI_ACTIVATION",
-                            "AI validation completed",
+                            f"AI validation completed; AI task name={task_name}",
                         )
                     if self._config.valve_output_channel is not None:
                         if not self._output_authorized:
@@ -346,18 +358,25 @@ class NidaqmxDataAcquisition:
                         self._log(
                             DiagnosticCategory.NI_VALVE,
                             "NI_ACTIVATION",
-                            "AO task created; safe voltage applied; "
+                            "AO task created; "
+                            f"AO task name={self._active_task_names()}; "
+                            "safe voltage applied; "
                             f"channel={self._config.valve_output_channel}; "
                             f"voltage={self._config.safe_output_voltage:.6f} V",
                         )
                 except Exception as error:
+                    task_name = str(
+                        getattr(self._backend, "last_input_task_name", None)
+                        or task_name
+                    )
+                    active_tasks = self._active_task_names()
                     cleanup_result = self._cleanup_backend()
                     if not self._is_resource_reserved(error) or attempt == 3:
                         self._log(
                             DiagnosticCategory.NI_LINE,
                             "NI_ACTIVATION",
                             f"activation failed; task={task_name}; attempt={attempt}; "
-                            f"active known tasks={self._active_task_names()}; "
+                            f"active known tasks={active_tasks}; "
                             f"cleanup result={cleanup_result}; error={error}",
                         )
                         raise
@@ -365,7 +384,7 @@ class NidaqmxDataAcquisition:
                         DiagnosticCategory.NI_LINE,
                         "NI_RESOURCE_RESERVED",
                         f"NI resource reserved; failing task={task_name}; "
-                        f"active known tasks={self._active_task_names()}; "
+                        f"active known tasks={active_tasks}; "
                         f"cleanup result={cleanup_result}; retry number={attempt + 1}",
                     )
                     sleep(0.25 * attempt)

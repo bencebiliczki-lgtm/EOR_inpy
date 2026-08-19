@@ -2,7 +2,7 @@ import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from time import monotonic, sleep
 from types import SimpleNamespace
 
@@ -196,6 +196,51 @@ def test_hardware_activation_records_only_enabled_pumps() -> None:
     )
 
     assert control.connected == (PumpRole.JACKET,)
+
+
+def test_concurrent_hardware_activation_request_does_not_start_second_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", tmp_path / "projects.sqlite3"
+    )
+    configuration = HardwareConfiguration(
+        jacket_port="COM1",
+        jacket_unit_id=1,
+        jacket_channel="A",
+        injection_port="COM2",
+        injection_unit_id=2,
+        injection_channel="A",
+        baud_rate=9600,
+        line_pressure_channel="Dev1/ai0",
+        differential_pressure_channel="Dev1/ai1",
+        valve_output_channel="Dev1/ao0",
+        safe_output_voltage=1.0,
+        valve_zero_percent_voltage=1.0,
+        valve_hundred_percent_voltage=5.0,
+    )
+    entered = Event()
+    release = Event()
+    calls: list[str] = []
+
+    def activate(*_args: object, **_kwargs: object) -> None:
+        calls.append("activation")
+        entered.set()
+        assert release.wait(1.0)
+
+    monkeypatch.setattr(window, "_activate_hardware_impl", activate)
+    first = Thread(target=window._activate_hardware, args=(configuration,))
+
+    first.start()
+    assert entered.wait(1.0)
+    window._activate_hardware(configuration)
+    release.set()
+    first.join(1.0)
+
+    assert calls == ["activation"]
+    assert not window._hardware_activation_in_progress
+    window.close()
 
 
 def application() -> QApplication:
