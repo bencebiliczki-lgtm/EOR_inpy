@@ -1124,6 +1124,19 @@ def test_global_safe_stop_observation_clears_running_state_without_new_command()
     assert len(jacket.commands) == command_count
 
 
+def test_fault_stop_observation_keeps_jacket_running_and_stops_injection() -> None:
+    control, _, _ = service()
+    prepare(control, PumpRole.JACKET)
+    prepare(control, PumpRole.INJECTION)
+    control.run(PumpRole.JACKET, PumpControlService.RUN_JACKET_CONFIRMATION)
+    control.run(PumpRole.INJECTION, PumpControlService.RUN_INJECTION_CONFIRMATION)
+
+    control.observe_fault_stop()
+
+    assert control.state(PumpRole.JACKET).running
+    assert not control.state(PumpRole.INJECTION).running
+
+
 def test_remote_supervision_is_enabled_only_for_connected_pumps_and_stops_safely(
 ) -> None:
     class SupervisedPump(FakePump):

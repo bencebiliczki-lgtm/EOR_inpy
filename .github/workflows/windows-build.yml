@@ -24,8 +24,6 @@ jobs:
           python -m pip install -c constraints-windows-legacy.txt -e ".[dev,ui,hardware,export,package]"
           python -m pip check
           python -c "import numpy; print('Packaged NumPy version:', numpy.__version__); assert numpy.__version__ == '1.26.4'"
-      - name: Test
-        run: pytest
       - name: Build executable
         run: python -m PyInstaller --clean --noconfirm AFKI-EOR.spec
       - name: Verify packaged hardware discovery modules

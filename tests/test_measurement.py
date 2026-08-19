@@ -161,6 +161,16 @@ def test_normal_measurement_does_not_enforce_startup_pressure_margin() -> None:
     assert not daq.safe_state_requested
 
 
+def test_explicit_full_safe_state_still_stops_both_pumps() -> None:
+    measurement_service, jacket, injection, daq, _ = service()
+
+    measurement_service.request_safe_state()
+
+    assert jacket.stop_requested
+    assert injection.stop_requested
+    assert daq.safe_state_requested
+
+
 def test_explicit_startup_margin_interlock_requests_safe_state() -> None:
     measurement_service, jacket, injection, daq, writer = service(jacket_pressure=119.0)
 

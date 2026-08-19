@@ -322,7 +322,8 @@ időzítést. Ugyanazt a Developer beállítást kapja, mint a mérési runtime:
 A tisztán telemetriai és biztonsági ciklus abszolút monotonic ütemen fut. Ha
 egy ilyen ellenőrzés hosszabb, mint
 `ciklusidő + watchdog-tűrés`, `control cycle deadline missed` hiba keletkezik,
-az előkészítés megszakad, és mindkét pumpán megkísérli a STOP-ot.
+az előkészítés megszakad, a BES pumpán megkísérli a STOP-ot, a KÖP pumpát pedig
+nyomástartásban hagyja.
 
 A DASNET `STOP`, konfigurációs és `RUN` tranzakciók saját soros timeout- és
 retry-kerettel rendelkeznek. A vezérlési szál csak `PumpCommand` objektumot tesz
@@ -452,10 +453,11 @@ más biztonsági ok esetén egyetlen safe-state tulajdonos, a
 4. `FAULT` és `STOPPED_BY_FAULT` reteszelés;
 5. részletes diagnosztikai esemény mentése.
 
-A két STOP egymástól függetlenül megkísérlésre kerül, tehát az egyik
-pumpa kommunikációs hibája nem akadályozhatja meg a másik STOP-ját. A STOP
-parancs szoftveresen reteszelt. Az egymással versenyző hibaútvonalak ugyanazt a
-STOP-parancsazonosítót kapják vissza, ezért nem küldenek ismételt fizikai STOP-ot.
+A reteszelt hibaút kizárólag a BES pumpának küld STOP-ot; a KÖP pumpa megtartja
+a nyomástartást, és csak a saját hardveres `MAXPRESS`/belső túlnyomásvédelme
+állítja le. A BES STOP parancsa szoftveresen reteszelt. Az egymással versenyző
+hibaútvonalak ugyanazt a STOP-parancsazonosítót kapják vissza, ezért nem küldenek
+ismételt fizikai STOP-ot.
 A hiba csak biztonságos friss ellenőrzés
 és kezelői nyugtázás után oldható fel.
 

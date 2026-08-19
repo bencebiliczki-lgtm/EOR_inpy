@@ -43,8 +43,10 @@ A hardver I/O, adatmentés és NAS-művelet nem futhat a Qt főszálán. A szab�
 A `MeasurementService` egy konfigurálható, 1 másodperc és 1 óra közötti ciklusban
 olvassa a két pumpát és a két kalibrált analóg csatornát. Minden pillanatképet előbb
 biztonságilag kiértékel, majd a projekt SQLite-adatbázisába ír. Interlock vagy
-eszközhiba esetén mindkét pumpán szimulált STOP-ot, a DAQ-on pedig biztonságos
-állapotot kér. A ciklust a `BackgroundControlRunner` külön munkaszálon futtatja;
+eszközhiba esetén a BES pumpán STOP-ot, a DAQ-on biztonságos állapotot kér, a KÖP
+pumpát pedig nyomástartásban hagyja. A KÖP leállítását a külön beprogramozott
+hardveres `MAXPRESS` és a pumpa saját belső túlnyomásvédelme végzi. A ciklust a
+`BackgroundControlRunner` külön munkaszálon futtatja;
 Qt főszálból közvetlenül nem fut.
 
 A vonali nyomás teljes adatútja egyetlen feldolgozási lánc: véges NI-mintacsomag,

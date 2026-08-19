@@ -46,10 +46,11 @@ felső szint ilyenkor a hardvermód-engedélyt is érvényteleníti, ezért fél
 engedélyezett `READY` állapotból nem indulhat új mérés.
 
 A telemetria minőségromlásához tartozó safety esemény kódja a UI riasztásában
-és a diagnosztikai naplóban azonos. A teljes safe-state minden részlépése
-(köpenypumpa STOP, besajtolópumpa STOP, NI szelep safe-state) önálló
-`SAFETY_ACTION` eseményt és `OK` vagy `FAILED` eredményt kap. Egy részlépés
-hibája nem akadályozhatja meg a többi biztonsági művelet megkísérlését.
+és a diagnosztikai naplóban azonos. A reteszelt hibaút a
+`INJECTION_STOP_JACKET_HOLD` stratégiát használja: a BES STOP és az NI szelep
+safe-state önálló `SAFETY_ACTION` eseményt és `OK` vagy `FAILED` eredményt kap,
+a KÖP nem kap szoftveres STOP-ot. Egy részlépés hibája nem akadályozhatja meg
+a többi biztonsági művelet megkísérlését.
 
 ## Minimális interlockok
 
@@ -60,9 +61,15 @@ hibája nem akadályozhatja meg a többi biztonsági művelet megkísérlését.
 - vezérlési ciklus határidejének túllépése;
 - kézi vészleállítás.
 
-## Biztonságos állapot
+## Hibaállapot
 
-A pontos fizikai reakció még helyszíni kockázatelemzést igényel. Addig a kód nem feltételezheti, hogy a szelep teljes nyitása vagy zárása minden esetben biztonságos. A prototípusban a biztonságos állapot eseményt, reteszelt hibát és szimulált STOP-kérést jelent.
+Alkalmazási, kommunikációs, adatminőségi, watchdog- vagy nyomásinterlock-hibánál
+a BES leáll, a szelep a konfigurált safe-state-be kerül, a KÖP pedig autonóm
+nyomástartásban marad. A KÖP kizárólag a pumpába írt `MAXPRESS` határ és a saját
+belső túlnyomásvédelme alapján áll le; az alkalmazás ilyen hibánál nem küld neki
+STOP-ot. A normál kezelői teljes leállítás és a **MINDKÉT PUMPA STOP** parancs
+továbbra is mindkét pumpát leállítja. A szelep pontos fizikai safe-state értékét
+helyszíni kockázatelemzéssel kell validálni.
 
 ## Reteszelés és visszaállítás
 

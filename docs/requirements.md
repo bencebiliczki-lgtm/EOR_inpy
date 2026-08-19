@@ -263,7 +263,9 @@ A konfiguráció legyen verziózott, és a mérés indulásakor készüljön ró
   a jelenlegi workerekben ténylegesen aktív időzítést.
 - A köpenynyomás felépülése alatt minden egyéb szenzor-, kapcsolat- és
   nyomáshatár maradjon aktív. Timeout, kezelői megszakítás vagy bármely hiba
-  mindkét pumpán STOP-ot és a mérési runtime indításának tiltását váltsa ki.
+  a BES pumpán STOP-ot, a KÖP pumpán autonóm nyomástartást és a mérési runtime
+  indításának tiltását váltsa ki. A KÖP csak a pumpa saját hardveres
+  `MAXPRESS`/belső túlnyomásvédelme esetén álljon le.
 - A `valve_direction_validated`, `limits_validated`, `profile_validated` és
   `pump_shutdown_validated` üzembe helyezési jelzők hiánya sárga, kezelő által
   elfogadandó preflight-figyelmeztetés, nem mérésindítási tiltás. A tényleges

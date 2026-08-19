@@ -236,7 +236,8 @@ kezelői megerősítést kér. Ellenőrzi továbbá a pontos indítási
 megerősítést, a két kezdőnyomás és a tervezett nyomástöbblet kötelező bevitelét,
 a besajtoló kezdőnyomásának kivárását, a cél első elérésekor kiadott azonnali
 STOP-ot, valamint azt, hogy timeout vagy indulási
-biztonsági hiba esetén egyik pumpa sem marad RUN állapotban.
+biztonsági hiba esetén a BES nem marad RUN állapotban, miközben a KÖP nem kap
+szoftveres STOP-ot és megtartja a nyomástartási állapotát.
 Külön regresszió igazolja, hogy a besajtoló sikeres `RUN` parancsa után a
 nyomáskülönbség 20 bar alá esése nem állítja le a pumpákat: a köpeny a megadott
 fix `CONST PRESS` célon marad, a normál és szüneteltetett mérési safety pedig nem
@@ -373,7 +374,8 @@ A Developer vezérlésiciklus-beállítás tesztje ellenőrzi a ciklusidő és a
 watchdog-tűrés tartós mentését, valamint a számított végrehajtási határidőt.
 Az előkészítési regresszió igazolja, hogy ugyanezek az értékek jutnak a
 pumpafelügyeleti ciklusba, az ütemezés nem halmoz driftet, a watchdog-túllépés
-pedig mindkét pumpát leállítja.
+pedig a BES pumpát leállítja, a KÖP pumpát nyomástartásban hagyja és a szelepet
+safe-state-be viszi.
 Külön állapotgép-tesztek igazolják, hogy a BES a minimum margin előtt nem indul,
 utána a köpeny végső célja előtt is elindulhat, marginvesztéskor leáll és
 hiszterézissel újraindul. Szimuláltan 120 másodpercnél hosszabb célvárakozás sem
