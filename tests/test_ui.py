@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (  # noqa: E402
 from eor_control.application import (  # noqa: E402
     ApplicationState,
     DeviceControlService,
+    HardwareConnectionState,
     MeasurementState,
     RunMode,
 )
@@ -3474,6 +3475,39 @@ def test_hardware_start_supports_manual_and_prepared_pump_state(
     window._start()
 
     assert runtime_starts == [True]
+    window._run_mode = RunMode.SIMULATION
+    window._devices.stop()
+    window.close()
+
+
+def test_automatic_hardware_activation_enables_start_and_preparation_buttons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application()
+    project_path = tmp_path / "projects.sqlite3"
+    with ProjectRepository(project_path) as repository:
+        project = repository.create_project(
+            name="Automatic hardware activation",
+            configuration={},
+            calibration_snapshot={},
+        )
+        stage = repository.add_stage(project.id, "Hardware stage")
+    settings = QSettings(str(tmp_path / "automatic-hardware.ini"), QSettings.Format.IniFormat)
+    settings.setValue("project/last_project_id", project.id)
+    settings.setValue("project/last_stage_id", stage.id)
+    window = build_simulated_dashboard(
+        tmp_path / "raw.csv", project_path, settings=settings
+    )
+    window._run_mode = RunMode.HARDWARE
+    window._devices._hardware_authorized = True
+    window._devices.set_connection_state(HardwareConnectionState.CONNECTED)
+    window._hardware_connection_result = None
+    monkeypatch.setattr(window, "_hardware_matches_global_profile", lambda: True)
+
+    window._refresh_state()
+
+    assert window._prepare_button.isEnabled()
+    assert window._start_button.isEnabled()
     window._run_mode = RunMode.SIMULATION
     window._devices.stop()
     window.close()

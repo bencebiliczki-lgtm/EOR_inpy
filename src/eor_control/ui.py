@@ -82,6 +82,7 @@ from eor_control import __version__
 from eor_control.application import (
     ApplicationState,
     DeviceControlService,
+    HardwareConnectionState,
     MeasurementState,
     RunMode,
 )
@@ -13264,10 +13265,13 @@ class DashboardWindow(QMainWindow):
         no_alarm = self._active_alarm_text == "Nincs aktív riasztás"
         hardware_profile_matches = self._hardware_matches_global_profile()
         connections_ready = self._run_mode is RunMode.SIMULATION or (
-            self._hardware_connection_result is not None
-            and self._hardware_connection_result.all_successful
-            and hardware_profile_matches
+            hardware_profile_matches
             and self._devices.status.hardware_authorized
+            and self._devices.status.connection is HardwareConnectionState.CONNECTED
+            and (
+                self._hardware_connection_result is None
+                or self._hardware_connection_result.all_successful
+            )
         )
         common_start_conditions = (
             not self._preflight_active and project_selected and no_alarm and connections_ready
